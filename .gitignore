@@ -1,0 +1,12 @@
+_build/
+_checkouts/
+.rebar3/
+rebar.lock
+data/
+*.beam
+*.dump
+erl_crash.dump
+.eunit/
+doc/edoc/
+logs/
+.DS_Store
