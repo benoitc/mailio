@@ -85,9 +85,7 @@ with_counters(Mailbox, Counters) ->
 -spec get(binary(), [binary()] | all) -> {ok, map()}.
 get(Account, all) ->
     Db = mailio_account:db_name(Account),
-    {ok, Docs, _} = mailio_db:find(
-        Db, #{where => [{exists, [<<"totalEmails">>]}]},
-        #{include_docs => true, limit => 100000}),
+    {ok, Docs} = mailio_db:by_id_prefix(Db, <<?ID_MAILBOX>>),
     {ok, #{<<"accountId">> => Account,
            <<"state">> => mailio_account:state_token(Account),
            <<"list">> => [project(D) || D <- Docs],

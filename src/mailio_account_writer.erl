@@ -243,8 +243,9 @@ maybe_write_uidmap(Db, MailboxId, Opts, EmailId) ->
     case maps:get(uid, Opts, undefined) of
         undefined -> ok;
         Uid ->
+            %% Enumerated by the `uidmap/<mailbox>/' id prefix, so no
+            %% separate mailboxId field is needed for lookup.
             Doc = #{<<"id">> => <<?ID_UIDMAP, MailboxId/binary, "/", (to_bin(Uid))/binary>>,
-                    <<"mailboxId">> => MailboxId,
                     <<"uid">> => Uid,
                     <<"emailId">> => EmailId},
             {ok, _, _} = mailio_db:put(Db, Doc),

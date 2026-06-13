@@ -295,11 +295,12 @@ run_reconcile(ImapName, LocalId,
             end
     end.
 
-%% All {Uid, EmailId, UidmapDocId} the store knows for a local mailbox.
+%% All {Uid, EmailId, UidmapDocId} the store knows for a local mailbox,
+%% enumerated by the `uidmap/<mailbox>/' id namespace.
 local_uidmaps(Db, LocalId) ->
-    case mailio_db:find(Db, #{where => [{path, [<<"mailboxId">>], LocalId}]},
-                        #{include_docs => true, limit => 1000000}) of
-        {ok, Docs, _} ->
+    Prefix = <<?ID_UIDMAP, LocalId/binary, "/">>,
+    case mailio_db:by_id_prefix(Db, Prefix) of
+        {ok, Docs} ->
             [{maps:get(<<"uid">>, D), maps:get(<<"emailId">>, D), maps:get(<<"id">>, D)}
              || D <- Docs, maps:is_key(<<"uid">>, D)];
         _ ->

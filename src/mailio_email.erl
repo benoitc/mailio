@@ -236,9 +236,8 @@ candidates(Db, Filter) ->
     end.
 
 all_emails(Db) ->
-    case mailio_db:find(Db, #{where => [{path, [?MAILIO_NS, <<"parse_version">>], 1}]},
-                        #{include_docs => true, limit => 1000000}) of
-        {ok, Docs, _} -> Docs;
+    case mailio_db:by_id_prefix(Db, <<?ID_EMAIL>>) of
+        {ok, Docs} -> Docs;
         {error, _} -> []
     end.
 

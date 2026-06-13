@@ -58,9 +58,7 @@ repair_counters(AccountId) ->
 -spec recompute(binary()) -> #{binary() => {integer(), integer()}}.
 recompute(AccountId) ->
     Db = mailio_account:db_name(AccountId),
-    {ok, Emails, _} = mailio_db:find(
-        Db, #{where => [{path, [?MAILIO_NS, <<"parse_version">>], 1}]},
-        #{include_docs => true, limit => 1000000}),
+    {ok, Emails} = mailio_db:by_id_prefix(Db, <<?ID_EMAIL>>),
     lists:foldl(fun tally_email/2, #{}, Emails).
 
 %%====================================================================
@@ -77,9 +75,7 @@ tally_email(Email, Acc) ->
             A#{MailboxId => {T + 1, U1}}
         end, Acc, Mailboxes).
 
-%% Enumerate mailbox docs (only they carry a top-level `totalEmails').
+%% Enumerate mailbox docs by their id namespace.
 all_mailboxes(Db) ->
-    {ok, Docs, _} = mailio_db:find(
-        Db, #{where => [{exists, [<<"totalEmails">>]}]},
-        #{include_docs => true, limit => 100000}),
+    {ok, Docs} = mailio_db:by_id_prefix(Db, <<?ID_MAILBOX>>),
     Docs.

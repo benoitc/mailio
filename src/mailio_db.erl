@@ -10,7 +10,7 @@
 
 -export([ensure_db/1, open_db/1, close_db/1, delete_db/1]).
 -export([get/2, get_many/2, put/2, put_batch/2, put_batch_strict/2, delete/2, delete/3]).
--export([find/2, find/3, explain/2]).
+-export([find/2, find/3, explain/2, by_id_prefix/2]).
 -export([changes/2, changes/3, subscribe_changes/2, subscribe_path/2, unsubscribe/1]).
 -export([put_attachment/4, get_attachment/3, open_attachment_stream/3,
          read_attachment_chunk/1, close_attachment_stream/1]).
@@ -159,6 +159,16 @@ unwrap({error, _} = Err) ->
 -spec explain(db(), map()) -> {ok, map()} | {error, term()}.
 explain(Db, QuerySpec) ->
     barrel_docdb:explain(Db, QuerySpec).
+
+%% @doc Enumerate documents whose id starts with `Prefix' via barrel's
+%% primary-key range scan (no secondary index needed). Used to list a
+%% collection by its path-style id namespace (e.g. `<<"email/">>').
+-spec by_id_prefix(db(), binary()) -> {ok, [doc()]} | {error, term()}.
+by_id_prefix(Db, Prefix) ->
+    case unwrap(barrel_docdb:find(Db, #{id_prefix => Prefix}, #{limit => 1000000})) of
+        {ok, Docs, _Meta} -> {ok, Docs};
+        {error, _} = Err -> Err
+    end.
 
 %%====================================================================
 %% Changes feed and subscriptions

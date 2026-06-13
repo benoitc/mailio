@@ -117,7 +117,7 @@ idempotent_reingest(Config) ->
     ?assertEqual(Id1, Id2),
 
     %% Exactly one email doc, one thread member, counter still 1.
-    {ok, [_], _} = mailio_db:find(Db, #{where => [{path, [?MAILIO_NS, <<"parse_version">>], 1}]}),
+    {ok, [_]} = mailio_db:by_id_prefix(Db, <<"email/">>),
     {ok, Mbx} = mailio_db:get(Db, <<?ID_MAILBOX, "inbox">>),
     ?assertEqual(1, maps:get(<<"totalEmails">>, Mbx)),
     ?assertEqual(1, mailio_blob:ref_count(Db, maps:get(<<"blobId">>,

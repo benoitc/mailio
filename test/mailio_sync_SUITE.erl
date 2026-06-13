@@ -178,9 +178,7 @@ wait_until(Pred, Timeout) ->
 %%====================================================================
 
 all_emails(Db) ->
-    {ok, Emails, _} = mailio_db:find(
-        Db, #{where => [{path, [?MAILIO_NS, <<"parse_version">>], 1}]},
-        #{include_docs => true}),
+    {ok, Emails} = mailio_db:by_id_prefix(Db, <<"email/">>),
     Emails.
 
 email_by_subject(Db, Subject) ->

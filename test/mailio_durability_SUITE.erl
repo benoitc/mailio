@@ -164,9 +164,7 @@ find_by_subject_count(Db, Subject) ->
     length(Docs).
 
 count_emails(Db) ->
-    {ok, Emails, _} = mailio_db:find(
-        Db, #{where => [{path, [?MAILIO_NS, <<"parse_version">>], 1}]},
-        #{include_docs => true}),
+    {ok, Emails} = mailio_db:by_id_prefix(Db, <<"email/">>),
     length(Emails).
 
 sample() ->
