@@ -117,11 +117,19 @@ delete(Db, Id, Rev) ->
 
 -spec find(db(), map()) -> {ok, [doc()], map()} | {error, term()}.
 find(Db, QuerySpec) ->
-    barrel_docdb:find(Db, QuerySpec).
+    unwrap(barrel_docdb:find(Db, QuerySpec)).
 
 -spec find(db(), map(), map()) -> {ok, [doc()], map()} | {error, term()}.
 find(Db, QuerySpec, Opts) ->
-    barrel_docdb:find(Db, QuerySpec, Opts).
+    unwrap(barrel_docdb:find(Db, QuerySpec, Opts)).
+
+%% barrel `find' returns result wrappers `#{<<"id">>, <<"doc">> => Doc}'
+%% (the body nested under `doc'). Unwrap to the actual documents; when
+%% `include_docs' was false there is no `doc', so keep the `{id}' wrapper.
+unwrap({ok, Results, Meta}) ->
+    {ok, [maps:get(<<"doc">>, R, R) || R <- Results], Meta};
+unwrap({error, _} = Err) ->
+    Err.
 
 %% @doc Return the query plan for a spec, for index-coverage assertions.
 -spec explain(db(), map()) -> {ok, map()} | {error, term()}.

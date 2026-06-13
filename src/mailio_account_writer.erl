@@ -21,7 +21,8 @@
 
 -include("mailio.hrl").
 
--export([start_link/1, ingest/4]).
+-export([start_link/1, ingest/4, apply_flags/4, remove_member/3]).
+-export([uidmap_id/3, lookup_uid/3]).
 -export([init/1, handle_call/3, handle_cast/2, handle_info/2, terminate/2]).
 
 -record(state, {account_id :: binary(),
@@ -44,8 +45,38 @@ start_link(AccountId) ->
 ingest(AccountId, MailboxId, Raw, Opts) ->
     gen_server:call(via(AccountId), {ingest, MailboxId, Raw, Opts}, 30000).
 
+%% @doc Apply a server-authoritative keyword set to an email (server wins
+%% for IMAP-representable keywords; local-only keywords are preserved).
+-spec apply_flags(binary(), binary(), binary(), [binary()]) -> ok | {error, term()}.
+apply_flags(AccountId, MailboxId, EmailId, ServerKeywords) ->
+    gen_server:call(via(AccountId), {apply_flags, MailboxId, EmailId, ServerKeywords}, 30000).
+
+%% @doc Remove an email's membership in a mailbox (expunge/move source). If
+%% it leaves no mailboxes, the email is destroyed.
+-spec remove_member(binary(), binary(), binary()) -> ok | {error, term()}.
+remove_member(AccountId, MailboxId, EmailId) ->
+    gen_server:call(via(AccountId), {remove_member, MailboxId, EmailId}, 30000).
+
 via(AccountId) ->
     {via, mailio_registry, {writer, AccountId}}.
+
+%% @doc Document id of the uid->email mapping for a mailbox + uid.
+-spec uidmap_id(binary(), binary(), term()) -> binary().
+uidmap_id(_AccountId, MailboxId, Uid) ->
+    UidBin = to_bin(Uid),
+    <<?ID_UIDMAP, MailboxId/binary, "/", UidBin/binary>>.
+
+%% @doc Look up the email id mapped to a mailbox + uid.
+-spec lookup_uid(binary(), binary(), term()) -> {ok, binary()} | {error, not_found}.
+lookup_uid(AccountId, MailboxId, Uid) ->
+    Db = mailio_account:db_name(AccountId),
+    case mailio_db:get(Db, uidmap_id(AccountId, MailboxId, Uid)) of
+        {ok, #{<<"emailId">> := EmailId}} -> {ok, EmailId};
+        {error, not_found} -> {error, not_found}
+    end.
+
+to_bin(Uid) when is_integer(Uid) -> integer_to_binary(Uid);
+to_bin(Uid) when is_binary(Uid) -> Uid.
 
 %%====================================================================
 %% gen_server
@@ -59,6 +90,14 @@ init(AccountId) ->
 
 handle_call({ingest, MailboxId, Raw, Opts}, _From, State) ->
     Result = do_ingest(State#state.db, MailboxId, Raw, Opts),
+    State1 = emit_events(State),
+    {reply, Result, State1};
+handle_call({apply_flags, MailboxId, EmailId, ServerKeywords}, _From, State) ->
+    Result = do_apply_flags(State#state.db, MailboxId, EmailId, ServerKeywords),
+    State1 = emit_events(State),
+    {reply, Result, State1};
+handle_call({remove_member, MailboxId, EmailId}, _From, State) ->
+    Result = do_remove_member(State#state.db, MailboxId, EmailId),
     State1 = emit_events(State),
     {reply, Result, State1};
 handle_call(_Req, _From, State) ->
@@ -99,9 +138,87 @@ merge_existing(Db, Existing, MailboxId, Opts) ->
     E2 = apply_keywords(E1, maps:get(keywords, Opts, [])),
     E3 = add_imap_entry(E2, MailboxId, Opts),
     {ok, _, _} = mailio_db:put(Db, E3),
+    maybe_write_uidmap(Db, MailboxId, Opts, mailio_email:id_of(Existing)),
     case AlreadyMember of
         true -> ok;
         false -> bump_mailbox(Db, MailboxId, +1, seen_delta(false, WasSeen))
+    end.
+
+%%====================================================================
+%% Server flag application and membership removal
+%%====================================================================
+
+do_apply_flags(Db, _MailboxId, EmailId, ServerKeywords) ->
+    DocId = <<?ID_EMAIL, EmailId/binary>>,
+    case mailio_db:get(Db, DocId) of
+        {ok, Email} ->
+            WasSeen = mailio_email:is_seen(Email),
+            Existing = mailio_email:keywords(Email),
+            LocalOnly = [K || K <- Existing,
+                              not mailio_imap_map:is_representable_keyword(K)],
+            New = lists:usort(ServerKeywords ++ LocalOnly),
+            Email1 = Email#{<<"keywords">> => keywords_map(New)},
+            {ok, _, _} = mailio_db:put(Db, Email1),
+            NowSeen = lists:member(?KW_SEEN, New),
+            adjust_unread(Db, mailio_email:mailbox_ids(Email1), WasSeen, NowSeen),
+            ok;
+        {error, not_found} ->
+            {error, not_found}
+    end.
+
+do_remove_member(Db, MailboxId, EmailId) ->
+    DocId = <<?ID_EMAIL, EmailId/binary>>,
+    case mailio_db:get(Db, DocId) of
+        {ok, Email} ->
+            WasSeen = mailio_email:is_seen(Email),
+            Email1 = mailio_email:remove_mailbox(Email, MailboxId),
+            bump_mailbox(Db, MailboxId, -1, seen_delta(WasSeen, true) * -1),
+            case mailio_email:mailbox_ids(Email1) of
+                [] ->
+                    destroy_email(Db, Email1);
+                _ ->
+                    {ok, _, _} = mailio_db:put(Db, Email1),
+                    ok
+            end,
+            _ = mailio_db:delete(Db, uidmap_id_for(Email, MailboxId)),
+            ok;
+        {error, not_found} ->
+            ok
+    end.
+
+%% Best-effort uidmap cleanup: derive any uid recorded for the mailbox.
+uidmap_id_for(Email, MailboxId) ->
+    case mailio_email:imap_entries(Email, MailboxId) of
+        [#{<<"uid">> := Uid} | _] ->
+            <<?ID_UIDMAP, MailboxId/binary, "/", (to_bin(Uid))/binary>>;
+        _ ->
+            <<?ID_UIDMAP, MailboxId/binary, "/none">>
+    end.
+
+destroy_email(Db, Email) ->
+    EmailId = mailio_email:id_of(Email),
+    BlobId = mailio_email:blob_id(Email),
+    _ = mailio_blob:remove_ref(Db, BlobId, <<?ID_EMAIL, EmailId/binary>>),
+    _ = mailio_db:delete(Db, <<?ID_TEXT, EmailId/binary>>),
+    {ok, _} = mailio_db:delete(Db, <<?ID_EMAIL, EmailId/binary>>),
+    ok.
+
+adjust_unread(_Db, _Mailboxes, Seen, Seen) -> ok;       %% no change
+adjust_unread(Db, Mailboxes, true, false) ->            %% became unread
+    [bump_mailbox(Db, M, 0, +1) || M <- Mailboxes], ok;
+adjust_unread(Db, Mailboxes, false, true) ->            %% became read
+    [bump_mailbox(Db, M, 0, -1) || M <- Mailboxes], ok.
+
+maybe_write_uidmap(Db, MailboxId, Opts, EmailId) ->
+    case maps:get(uid, Opts, undefined) of
+        undefined -> ok;
+        Uid ->
+            Doc = #{<<"id">> => <<?ID_UIDMAP, MailboxId/binary, "/", (to_bin(Uid))/binary>>,
+                    <<"mailboxId">> => MailboxId,
+                    <<"uid">> => Uid,
+                    <<"emailId">> => EmailId},
+            {ok, _, _} = mailio_db:put(Db, Doc),
+            ok
     end.
 
 full_ingest(Db, EmailId, DocId, MailboxId, Raw, Opts) ->
@@ -180,6 +297,7 @@ full_ingest(Db, EmailId, DocId, MailboxId, Raw, Opts) ->
     Supporting = [ThreadDoc | MsgidDocs] ++ [TextDoc],
     _ = mailio_db:put_batch(Db, Supporting),
     {ok, _, _} = mailio_db:put(Db, EmailDoc),
+    maybe_write_uidmap(Db, MailboxId, Opts, EmailId),
     bump_mailbox(Db, MailboxId, +1, seen_delta(is_seen_kw(Keywords), false)).
 
 %%====================================================================

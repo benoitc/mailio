@@ -9,7 +9,7 @@
 -behaviour(supervisor).
 
 -export([start_link/0]).
--export([start_account/1, stop_account/1, which_accounts/0]).
+-export([start_account/1, start_account/2, stop_account/1, which_accounts/0]).
 -export([init/1]).
 
 -define(SERVER, ?MODULE).
@@ -21,9 +21,15 @@ start_link() ->
 %% @doc Start a per-account subtree. Idempotent-ish: returns the existing
 %% child if already started.
 -spec start_account(binary()) -> {ok, pid()} | {error, term()}.
-start_account(AccountId) when is_binary(AccountId) ->
+start_account(AccountId) ->
+    start_account(AccountId, #{}).
+
+%% @doc Start a per-account subtree. `Opts' may contain `imap =>
+%% AdapterConfig' to also start the sync engine.
+-spec start_account(binary(), map()) -> {ok, pid()} | {error, term()}.
+start_account(AccountId, Opts) when is_binary(AccountId), is_map(Opts) ->
     Spec = #{id => {account, AccountId},
-             start => {mailio_account_sup, start_link, [AccountId]},
+             start => {mailio_account_sup, start_link, [AccountId, Opts]},
              restart => transient,
              shutdown => infinity,
              type => supervisor,
@@ -33,7 +39,7 @@ start_account(AccountId) when is_binary(AccountId) ->
         {error, {already_started, Pid}} -> {ok, Pid};
         {error, already_present} ->
             _ = supervisor:delete_child(?SERVER, {account, AccountId}),
-            start_account(AccountId);
+            start_account(AccountId, Opts);
         {error, _} = Err -> Err
     end.
 

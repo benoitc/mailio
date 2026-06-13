@@ -15,6 +15,7 @@
 -define(ID_IDENTITY,   "identity/").
 -define(ID_SUBMISSION, "submission/").
 -define(ID_SYNC_IMAP,  "sync/imap/").
+-define(ID_UIDMAP,     "uidmap/").
 -define(ID_RULE,       "rule/").
 -define(ID_JOB,        "job/").
 -define(ID_ACCOUNT,    "account/").

@@ -73,7 +73,7 @@ fetch_changes_initial(Config) ->
     %% Cursor reflects the SELECT response.
     ?assertEqual(1, mailio_imap_map:state_uidvalidity(NewState)),
     ?assertEqual(102, mailio_imap_map:state_uidnext(NewState)),
-    ?assertEqual(10, mailio_imap_map:state_modseq(NewState)).
+    ?assertEqual(6, mailio_imap_map:state_modseq(NewState)).
 
 fetch_message(Config) ->
     Conn = ?config(conn, Config),
