@@ -22,7 +22,7 @@
 -include("mailio.hrl").
 
 -export([start_link/1, ingest/4, apply_flags/4, remove_member/3, gc_blobs/2]).
--export([set_counters/4]).
+-export([set_counters/4, patch/3]).
 -export([uidmap_id/3, lookup_uid/3]).
 -export([init/1, handle_call/3, handle_cast/2, handle_info/2, terminate/2]).
 
@@ -68,6 +68,15 @@ gc_blobs(AccountId, GraceSecs) ->
 -spec set_counters(binary(), binary(), non_neg_integer(), non_neg_integer()) -> ok.
 set_counters(AccountId, MailboxId, Total, Unread) ->
     gen_server:call(via(AccountId), {set_counters, MailboxId, Total, Unread}, 30000).
+
+%% @doc Patch an email in one transaction: add/remove keywords and mailbox
+%% memberships. `Patch' keys (all optional, binary lists):
+%% `add_keywords', `remove_keywords', `set_keywords' (full replace),
+%% `add_mailboxes', `remove_mailboxes', `set_mailboxes'. Updates mailbox
+%% counters and emits events. Destroys the email if it ends with no mailbox.
+-spec patch(binary(), binary(), map()) -> ok | {error, term()}.
+patch(AccountId, EmailId, Patch) ->
+    gen_server:call(via(AccountId), {patch, EmailId, Patch}, 30000).
 
 via(AccountId) ->
     {via, mailio_registry, {writer, AccountId}}.
@@ -117,6 +126,10 @@ handle_call({gc_blobs, GraceSecs}, _From, State) ->
     {reply, Result, State};
 handle_call({set_counters, MailboxId, Total, Unread}, _From, State) ->
     Result = do_set_counters(State#state.db, MailboxId, Total, Unread),
+    State1 = emit_events(State),
+    {reply, Result, State1};
+handle_call({patch, EmailId, Patch}, _From, State) ->
+    Result = do_patch(State#state.db, EmailId, Patch),
     State1 = emit_events(State),
     {reply, Result, State1};
 handle_call(_Req, _From, State) ->
@@ -221,6 +234,60 @@ destroy_email(Db, Email) ->
     _ = mailio_db:delete(Db, <<?ID_TEXT, EmailId/binary>>),
     {ok, _} = mailio_db:delete(Db, <<?ID_EMAIL, EmailId/binary>>),
     ok.
+
+do_patch(Db, EmailId, Patch) ->
+    DocId = <<?ID_EMAIL, EmailId/binary>>,
+    case mailio_db:get(Db, DocId) of
+        {ok, Email} ->
+            OldSeen = mailio_email:is_seen(Email),
+            OldMbx = mailio_email:mailbox_ids(Email),
+            NewKw = apply_set(mailio_email:keywords(Email),
+                              maps:get(set_keywords, Patch, undefined),
+                              maps:get(add_keywords, Patch, []),
+                              maps:get(remove_keywords, Patch, [])),
+            NewMbx = apply_set(OldMbx,
+                               maps:get(set_mailboxes, Patch, undefined),
+                               maps:get(add_mailboxes, Patch, []),
+                               maps:get(remove_mailboxes, Patch, [])),
+            NewSeen = lists:member(?KW_SEEN, NewKw),
+            case NewMbx of
+                [] ->
+                    %% No mailboxes left -> destroy, undo its counters.
+                    [bump_mailbox(Db, M, -1, seen_delta(OldSeen, true) * -1) || M <- OldMbx],
+                    destroy_email(Db, Email);
+                _ ->
+                    Email1 = Email#{<<"keywords">> => to_map(NewKw),
+                                    <<"mailboxIds">> => to_map(NewMbx)},
+                    {ok, _, _} = mailio_db:put(Db, Email1),
+                    update_patch_counters(Db, OldMbx, NewMbx, OldSeen, NewSeen)
+            end,
+            ok;
+        {error, not_found} ->
+            {error, not_found}
+    end.
+
+update_patch_counters(Db, OldMbx, NewMbx, OldSeen, NewSeen) ->
+    Removed = OldMbx -- NewMbx,
+    Added = NewMbx -- OldMbx,
+    Retained = OldMbx -- Removed,
+    %% Removed: drop total, and the unread it had contributed (if it was unread).
+    [bump_mailbox(Db, M, -1, unread_of(OldSeen) * -1) || M <- Removed],
+    %% Added: add total, and unread if the email is currently unseen.
+    [bump_mailbox(Db, M, +1, unread_of(NewSeen)) || M <- Added],
+    %% Retained: only the unread delta from a seen-state change.
+    Delta = unread_of(NewSeen) - unread_of(OldSeen),
+    [bump_mailbox(Db, M, 0, Delta) || M <- Retained],
+    ok.
+
+unread_of(true) -> 0;
+unread_of(false) -> 1.
+
+%% Apply set/add/remove to a list, returning a sorted unique list.
+apply_set(Current, SetVal, Add, Remove) ->
+    Base = case SetVal of undefined -> Current; L when is_list(L) -> L end,
+    lists:usort((Base ++ Add) -- Remove).
+
+to_map(List) -> maps:from_list([{K, true} || K <- List]).
 
 do_set_counters(Db, MailboxId, Total, Unread) ->
     DocId = <<?ID_MAILBOX, MailboxId/binary>>,

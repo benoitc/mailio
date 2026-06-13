@@ -23,7 +23,7 @@
 -export([imap_entries/2, add_imap_entry/3]).
 
 %% JMAP Email facade
--export([get/3, query/2, changes/3]).
+-export([get/3, query/2, changes/3, set/3]).
 
 -export_type([email/0, address/0]).
 
@@ -345,3 +345,79 @@ group_changes(Envs) ->
                 destroyed -> {C, U, [Id | D]}
             end
         end, {[], [], []}, Envs).
+
+%%====================================================================
+%% JMAP Email/set
+%%====================================================================
+
+%% @doc RFC 8621 Email/set. Supports `update' (keyword/mailbox patches) and
+%% `destroy'; `create' (drafts) is not handled here (see mailio_submission).
+%% Mutations apply through the single-writer; counters and events follow.
+-spec set(binary(), map(), map()) -> {ok, map()}.
+set(Account, Request, _Opts) ->
+    OldState = mailio_account:state_token(Account),
+    Updates = maps:get(update, Request, maps:get(<<"update">>, Request, #{})),
+    Destroys = maps:get(destroy, Request, maps:get(<<"destroy">>, Request, [])),
+    Creates = maps:get(create, Request, maps:get(<<"create">>, Request, #{})),
+
+    {Updated, NotUpdated} = apply_updates(Account, Updates),
+    {Destroyed, NotDestroyed} = apply_destroys(Account, Destroys),
+    NotCreated = maps:map(fun(_, _) ->
+                              #{<<"type">> => <<"forbidden">>,
+                                <<"description">> => <<"Email/set create unsupported">>}
+                          end, Creates),
+
+    {ok, #{<<"accountId">> => Account,
+           <<"oldState">> => OldState,
+           <<"newState">> => mailio_account:state_token(Account),
+           <<"created">> => #{},
+           <<"updated">> => Updated,
+           <<"destroyed">> => Destroyed,
+           <<"notCreated">> => NotCreated,
+           <<"notUpdated">> => NotUpdated,
+           <<"notDestroyed">> => NotDestroyed}}.
+
+apply_updates(Account, Updates) ->
+    maps:fold(
+        fun(EmailId, PatchObj, {U, NU}) ->
+            case mailio_account_writer:patch(Account, EmailId, translate_patch(PatchObj)) of
+                ok -> {U#{EmailId => null}, NU};
+                {error, not_found} -> {U, NU#{EmailId => set_error(<<"notFound">>)}};
+                {error, _} -> {U, NU#{EmailId => set_error(<<"serverFail">>)}}
+            end
+        end, {#{}, #{}}, Updates).
+
+apply_destroys(Account, Destroys) ->
+    lists:foldr(
+        fun(EmailId, {D, ND}) ->
+            case mailio_account_writer:patch(Account, EmailId, #{set_mailboxes => []}) of
+                ok -> {[EmailId | D], ND};
+                {error, not_found} -> {D, ND#{EmailId => set_error(<<"notFound">>)}};
+                {error, _} -> {D, ND#{EmailId => set_error(<<"serverFail">>)}}
+            end
+        end, {[], #{}}, Destroys).
+
+set_error(Type) -> #{<<"type">> => Type}.
+
+%% Translate a JMAP patch object (full-replace maps and `path/key' patches)
+%% into the writer's add/remove/set lists.
+translate_patch(PatchObj) ->
+    maps:fold(fun translate_one/3, #{}, PatchObj).
+
+translate_one(<<"keywords">>, Map, Acc) when is_map(Map) ->
+    Acc#{set_keywords => true_keys(Map)};
+translate_one(<<"mailboxIds">>, Map, Acc) when is_map(Map) ->
+    Acc#{set_mailboxes => true_keys(Map)};
+translate_one(<<"keywords/", Kw/binary>>, true, Acc) ->
+    Acc#{add_keywords => [Kw | maps:get(add_keywords, Acc, [])]};
+translate_one(<<"keywords/", Kw/binary>>, null, Acc) ->
+    Acc#{remove_keywords => [Kw | maps:get(remove_keywords, Acc, [])]};
+translate_one(<<"mailboxIds/", M/binary>>, true, Acc) ->
+    Acc#{add_mailboxes => [M | maps:get(add_mailboxes, Acc, [])]};
+translate_one(<<"mailboxIds/", M/binary>>, null, Acc) ->
+    Acc#{remove_mailboxes => [M | maps:get(remove_mailboxes, Acc, [])]};
+translate_one(_Other, _Value, Acc) ->
+    Acc.
+
+true_keys(Map) ->
+    [K || {K, V} <- maps:to_list(Map), V =:= true].

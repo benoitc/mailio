@@ -14,7 +14,7 @@
 
 -include("mailio.hrl").
 
--export([matches/2, matches/3, needs_body/1, index_query/1]).
+-export([matches/2, matches/3, needs_body/1, index_query/1, normalize/1]).
 
 -export_type([filter/0]).
 
@@ -102,6 +102,49 @@ cond_matches(Ctx, text, Sub) ->
 cond_matches(_Ctx, _Unknown, _Value) ->
     %% Unknown conditions do not constrain (lenient).
     true.
+
+%%====================================================================
+%% Key normalization (for filters loaded from stored docs)
+%%====================================================================
+
+%% @doc Normalize a filter whose keys are binaries (e.g. round-tripped
+%% through CBOR/JSON from a rule document) into the atom-keyed form this
+%% module evaluates. Recurses through operator nodes.
+-spec normalize(filter()) -> filter().
+normalize(Filter) when is_map(Filter) ->
+    case operator_key(Filter) of
+        {ok, Op} ->
+            Conds = maps:get(conditions, Filter, maps:get(<<"conditions">>, Filter, [])),
+            #{operator => Op, conditions => [normalize(C) || C <- Conds]};
+        none ->
+            maps:fold(fun(K, V, Acc) -> Acc#{cond_key(K) => V} end, #{}, Filter)
+    end;
+normalize(Other) ->
+    Other.
+
+operator_key(#{operator := Op}) -> {ok, Op};
+operator_key(#{<<"operator">> := Op}) -> {ok, Op};
+operator_key(_) -> none.
+
+cond_key(K) when is_atom(K) -> K;
+cond_key(<<"inMailbox">>) -> inMailbox;
+cond_key(<<"inMailboxOtherThan">>) -> inMailboxOtherThan;
+cond_key(<<"before">>) -> before;
+cond_key(<<"after">>) -> 'after';
+cond_key(<<"minSize">>) -> minSize;
+cond_key(<<"maxSize">>) -> maxSize;
+cond_key(<<"hasKeyword">>) -> hasKeyword;
+cond_key(<<"notKeyword">>) -> notKeyword;
+cond_key(<<"hasAttachment">>) -> hasAttachment;
+cond_key(<<"inThread">>) -> inThread;
+cond_key(<<"from">>) -> from;
+cond_key(<<"to">>) -> to;
+cond_key(<<"cc">>) -> cc;
+cond_key(<<"bcc">>) -> bcc;
+cond_key(<<"subject">>) -> subject;
+cond_key(<<"body">>) -> body;
+cond_key(<<"text">>) -> text;
+cond_key(Other) -> Other.
 
 %%====================================================================
 %% Indexable subset extraction

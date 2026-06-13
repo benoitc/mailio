@@ -93,12 +93,14 @@ put(Db, Doc) when is_map(Doc) ->
 recreate_over_tombstone(Db, Doc) ->
     Id = maps:get(<<"id">>, Doc),
     case barrel_docdb:get_docs(Db, [Id], #{include_deleted => true}) of
-        [{ok, #{<<"_rev">> := Rev}}] ->
+        [{ok, #{<<"_deleted">> := true, <<"_rev">> := Rev}}] ->
+            %% A tombstone: revive it by supplying its rev.
             case barrel_docdb:put_doc(Db, Doc#{<<"_rev">> => Rev}) of
                 {ok, #{<<"id">> := Id2, <<"rev">> := R2}} -> {ok, Id2, R2};
                 {error, _} = Err -> Err
             end;
         _ ->
+            %% A live doc already exists: this create is a genuine conflict.
             {error, conflict}
     end.
 
