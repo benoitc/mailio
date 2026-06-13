@@ -1,0 +1,8 @@
+From: shop@example.com
+To: buyer@example.com
+Subject: Price list
+Content-Type: text/plain; charset=windows-1252
+Content-Transfer-Encoding: quoted-printable
+
+Smart quotes =91here=92 and a price of =80100 with a dash =96 done=
+.

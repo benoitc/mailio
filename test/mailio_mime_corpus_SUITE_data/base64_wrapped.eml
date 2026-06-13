@@ -1,0 +1,9 @@
+From: a@example.com
+To: b@example.com
+Subject: Wrapped base64
+Content-Type: text/plain; charset=utf-8
+Content-Transfer-Encoding: base64
+
+TG9yZW0gaXBzdW0gZG9sb3Igc2l0IGFtZXQsIGNvbnNlY3RldHVyIGFkaXBpc2NpbmcgZWxpdCwg
+c2VkIGRvIGVpdXNtb2QgdGVtcG9yIGluY2lkaWR1bnQgdXQgbGFib3JlIGV0IGRvbG9yZSBtYWdu
+YSBhbGlxdWEuIFV0IGVuaW0gYWQgbWluaW0gdmVuaWFtLg==
