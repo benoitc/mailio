@@ -143,36 +143,25 @@ sub_index(Cond) when is_map(Cond) ->
 sub_index(_) -> [].
 
 wrap([]) -> all;
-wrap(Wheres) -> {where, cap_compares(Wheres)}.
-
-%% barrel `find' returns nothing when a query carries two or more `compare'
-%% conditions (it does not intersect multiple ranges). Push every equality
-%% but AT MOST ONE compare; the dropped compares are still evaluated by the
-%% Erlang post-filter, so the result stays correct, just less pre-narrowed.
-cap_compares(Wheres) ->
-    {Compares, Others} = lists:partition(
-        fun(C) -> is_tuple(C) andalso element(1, C) =:= compare end, Wheres),
-    case Compares of
-        [] -> Others;
-        [First | _] -> Others ++ [First]
-    end.
+wrap(Wheres) -> {where, Wheres}.
 
 %% Map the indexable keys of a single condition map to barrel `where' clauses.
 condition_wheres(Cond) ->
     lists:flatmap(fun({K, V}) -> where_for(K, V) end, maps:to_list(Cond)).
 
-%% NOTE: at most ONE compare per path is pushed to the index. barrel `find'
-%% does not intersect two compares on the same path (a `>=' AND `<' range
-%% returns nothing), so only the lower bound is pushed; the upper bound
-%% (before/maxSize) is left to the Erlang post-filter, which evaluates it.
+%% Map the indexable keys of a condition to barrel `where' clauses. Ranges
+%% (before+after, min+maxSize) push both bounds; barrel_docdb >= 0.8.0
+%% intersects multiple compare conditions correctly.
 where_for(inMailbox, MbxId) -> [{path, [<<"mailboxIds">>, MbxId], true}];
 where_for(hasKeyword, Kw) -> [{path, [<<"keywords">>, Kw], true}];
 where_for(hasAttachment, true) -> [{path, [<<"hasAttachment">>], true}];
 where_for(inThread, Tid) -> [{path, [<<"threadId">>], Tid}];
 where_for(minSize, N) -> [{compare, [<<"size">>], '>=', N}];
+where_for(maxSize, N) -> [{compare, [<<"size">>], '=<', N}];
 where_for(after_, Date) -> [{compare, [?MAILIO_NS, <<"received_ts">>], '>=', to_epoch(Date)}];
 where_for('after', Date) -> [{compare, [?MAILIO_NS, <<"received_ts">>], '>=', to_epoch(Date)}];
-where_for(_K, _V) -> [].   %% before/maxSize/substring/negation: post-filter only
+where_for(before, Date) -> [{compare, [?MAILIO_NS, <<"received_ts">>], '<', to_epoch(Date)}];
+where_for(_K, _V) -> [].   %% substring/negation conditions: post-filter only
 
 %%====================================================================
 %% Field helpers
