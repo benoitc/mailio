@@ -88,4 +88,11 @@
 
 -callback unwatch(conn(), WatchRef :: term()) -> ok.
 
--optional_callbacks([watch/3, unwatch/2, append/4, move/4, expunge/3]).
+%% List all current message uids in a mailbox. Used by the sync engine to
+%% reconcile expunges on servers without QRESYNC (diff against locally
+%% known uids). Adapters that always report removals incrementally may omit
+%% this.
+-callback list_uids(conn(), MailboxId :: binary()) ->
+    {ok, [term()]} | {error, mailio_error:error_map()}.
+
+-optional_callbacks([watch/3, unwatch/2, append/4, move/4, expunge/3, list_uids/2]).

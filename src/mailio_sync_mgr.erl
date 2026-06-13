@@ -15,7 +15,8 @@
 
 -include("mailio.hrl").
 
--export([start_link/1, sync_all/1, sync_mailbox/2, mailboxes/1, watch_inbox/1]).
+-export([start_link/1, sync_all/1, sync_mailbox/2, reconcile_mailbox/2,
+         mailboxes/1, watch_inbox/1]).
 -export([init/1, handle_call/3, handle_cast/2, handle_info/2, terminate/2]).
 
 -record(state, {account_id :: binary(),
@@ -47,6 +48,14 @@ sync_all(AccountId) ->
 -spec sync_mailbox(binary(), binary()) -> {ok, map()} | {error, term()}.
 sync_mailbox(AccountId, ImapName) ->
     gen_server:call(via(AccountId), {sync_mailbox, ImapName}, 60000).
+
+%% @doc Reconcile expunges for servers without QRESYNC: list the server's
+%% current uids and remove any locally-known uid that is gone. This is a
+%% full-mailbox pass, intended to run periodically (throttled), not on every
+%% sync.
+-spec reconcile_mailbox(binary(), binary()) -> {ok, map()} | {error, term()}.
+reconcile_mailbox(AccountId, ImapName) ->
+    gen_server:call(via(AccountId), {reconcile_mailbox, ImapName}, 60000).
 
 -spec mailboxes(binary()) -> {ok, [binary()]}.
 mailboxes(AccountId) ->
@@ -82,6 +91,9 @@ handle_call(sync_all, _From, State) ->
     {reply, Result, State1};
 handle_call({sync_mailbox, ImapName}, _From, State) ->
     {Result, State1} = do_sync_mailbox(ImapName, State),
+    {reply, Result, State1};
+handle_call({reconcile_mailbox, ImapName}, _From, State) ->
+    {Result, State1} = do_reconcile(ImapName, State),
     {reply, Result, State1};
 handle_call(mailboxes, _From, State) ->
     {reply, {ok, maps:keys(State#state.mailbox_map)}, State};
@@ -242,6 +254,57 @@ apply_change(_State, _ImapName, _LocalId, reset, Stats) ->
     %% Full-resync signalling: handled by the next fetch returning all
     %% messages as `added' (content-addressed ids make this idempotent).
     bump(Stats, reset).
+
+%%====================================================================
+%% Reconcile (no-QRESYNC expunge detection)
+%%====================================================================
+
+do_reconcile(ImapName, #state{mailbox_map = Map} = State) ->
+    case maps:get(ImapName, Map, undefined) of
+        undefined ->
+            {{error, unknown_mailbox}, State};
+        LocalId ->
+            run_reconcile(ImapName, LocalId, State)
+    end.
+
+run_reconcile(ImapName, LocalId,
+              #state{adapter = Adapter, conn = Conn, db = Db,
+                     account_id = AccountId} = State) ->
+    case erlang:function_exported(Adapter, list_uids, 2) of
+        false ->
+            {{error, not_supported}, State};
+        true ->
+            case Adapter:list_uids(Conn, ImapName) of
+                {ok, ServerUids} ->
+                    ServerSet = sets:from_list(ServerUids),
+                    Local = local_uidmaps(Db, LocalId),
+                    Removed = lists:foldl(
+                        fun({Uid, EmailId, DocId}, N) ->
+                            case sets:is_element(Uid, ServerSet) of
+                                true -> N;
+                                false ->
+                                    _ = mailio_account_writer:remove_member(
+                                          AccountId, LocalId, EmailId),
+                                    _ = mailio_db:delete(Db, DocId),
+                                    N + 1
+                            end
+                        end, 0, Local),
+                    {{ok, #{removed => Removed}}, State};
+                {error, Reason} ->
+                    {{error, Reason}, State}
+            end
+    end.
+
+%% All {Uid, EmailId, UidmapDocId} the store knows for a local mailbox.
+local_uidmaps(Db, LocalId) ->
+    case mailio_db:find(Db, #{where => [{path, [<<"mailboxId">>], LocalId}]},
+                        #{include_docs => true, limit => 1000000}) of
+        {ok, Docs, _} ->
+            [{maps:get(<<"uid">>, D), maps:get(<<"emailId">>, D), maps:get(<<"id">>, D)}
+             || D <- Docs, maps:is_key(<<"uid">>, D)];
+        _ ->
+            []
+    end.
 
 fetch_raw(Adapter, Conn, ImapName, Uid) ->
     Self = self(),

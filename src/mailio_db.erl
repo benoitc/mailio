@@ -74,8 +74,32 @@ get_many(Db, Ids) ->
 -spec put(db(), doc()) -> {ok, doc_id(), rev()} | {error, term()}.
 put(Db, Doc) when is_map(Doc) ->
     case barrel_docdb:put_doc(Db, Doc) of
-        {ok, #{<<"id">> := Id, <<"rev">> := Rev}} -> {ok, Id, Rev};
-        {error, _} = Err -> Err
+        {ok, #{<<"id">> := Id, <<"rev">> := Rev}} ->
+            {ok, Id, Rev};
+        {error, conflict} ->
+            %% A create (no `_rev') conflicts only with a tombstone, since
+            %% all writes for an account are serialized by one writer.
+            %% Re-creating over a deleted doc requires its tombstone rev;
+            %% recover it and retry. Real updates (carrying `_rev') keep the
+            %% conflict.
+            case maps:is_key(<<"_rev">>, Doc) of
+                true -> {error, conflict};
+                false -> recreate_over_tombstone(Db, Doc)
+            end;
+        {error, _} = Err ->
+            Err
+    end.
+
+recreate_over_tombstone(Db, Doc) ->
+    Id = maps:get(<<"id">>, Doc),
+    case barrel_docdb:get_docs(Db, [Id], #{include_deleted => true}) of
+        [{ok, #{<<"_rev">> := Rev}}] ->
+            case barrel_docdb:put_doc(Db, Doc#{<<"_rev">> => Rev}) of
+                {ok, #{<<"id">> := Id2, <<"rev">> := R2}} -> {ok, Id2, R2};
+                {error, _} = Err -> Err
+            end;
+        _ ->
+            {error, conflict}
     end.
 
 %% @doc Batch write. Returns the raw per-doc result list (aligned with

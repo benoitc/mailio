@@ -21,7 +21,8 @@
 
 -include("mailio.hrl").
 
--export([start_link/1, ingest/4, apply_flags/4, remove_member/3]).
+-export([start_link/1, ingest/4, apply_flags/4, remove_member/3, gc_blobs/2]).
+-export([set_counters/4]).
 -export([uidmap_id/3, lookup_uid/3]).
 -export([init/1, handle_call/3, handle_cast/2, handle_info/2, terminate/2]).
 
@@ -56,6 +57,17 @@ apply_flags(AccountId, MailboxId, EmailId, ServerKeywords) ->
 -spec remove_member(binary(), binary(), binary()) -> ok | {error, term()}.
 remove_member(AccountId, MailboxId, EmailId) ->
     gen_server:call(via(AccountId), {remove_member, MailboxId, EmailId}, 30000).
+
+%% @doc Sweep blobs orphaned longer than `GraceSecs', in the writer process
+%% so it cannot race a concurrent re-ingest. Returns the count swept.
+-spec gc_blobs(binary(), non_neg_integer()) -> {ok, non_neg_integer()}.
+gc_blobs(AccountId, GraceSecs) ->
+    gen_server:call(via(AccountId), {gc_blobs, GraceSecs}, 60000).
+
+%% @doc Set a mailbox's counters to recomputed values (used by fsck repair).
+-spec set_counters(binary(), binary(), non_neg_integer(), non_neg_integer()) -> ok.
+set_counters(AccountId, MailboxId, Total, Unread) ->
+    gen_server:call(via(AccountId), {set_counters, MailboxId, Total, Unread}, 30000).
 
 via(AccountId) ->
     {via, mailio_registry, {writer, AccountId}}.
@@ -98,6 +110,13 @@ handle_call({apply_flags, MailboxId, EmailId, ServerKeywords}, _From, State) ->
     {reply, Result, State1};
 handle_call({remove_member, MailboxId, EmailId}, _From, State) ->
     Result = do_remove_member(State#state.db, MailboxId, EmailId),
+    State1 = emit_events(State),
+    {reply, Result, State1};
+handle_call({gc_blobs, GraceSecs}, _From, State) ->
+    Result = mailio_blob:sweep(State#state.db, erlang:system_time(second), GraceSecs),
+    {reply, Result, State};
+handle_call({set_counters, MailboxId, Total, Unread}, _From, State) ->
+    Result = do_set_counters(State#state.db, MailboxId, Total, Unread),
     State1 = emit_events(State),
     {reply, Result, State1};
 handle_call(_Req, _From, State) ->
@@ -202,6 +221,17 @@ destroy_email(Db, Email) ->
     _ = mailio_db:delete(Db, <<?ID_TEXT, EmailId/binary>>),
     {ok, _} = mailio_db:delete(Db, <<?ID_EMAIL, EmailId/binary>>),
     ok.
+
+do_set_counters(Db, MailboxId, Total, Unread) ->
+    DocId = <<?ID_MAILBOX, MailboxId/binary>>,
+    case mailio_db:get(Db, DocId) of
+        {ok, Doc} ->
+            Doc1 = Doc#{<<"totalEmails">> => Total, <<"unreadEmails">> => Unread},
+            {ok, _, _} = mailio_db:put(Db, Doc1),
+            ok;
+        {error, not_found} ->
+            {error, not_found}
+    end.
 
 adjust_unread(_Db, _Mailboxes, Seen, Seen) -> ok;       %% no change
 adjust_unread(Db, Mailboxes, true, false) ->            %% became unread

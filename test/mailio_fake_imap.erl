@@ -263,6 +263,7 @@ handle_uid(Sock, Tag, Args, State) ->
     case string:uppercase(Sub) of
         <<"FETCH">> -> handle_uid_fetch(Sock, Tag, Rest, State);
         <<"STORE">> -> handle_uid_store(Sock, Tag, Rest, State);
+        <<"SEARCH">> -> handle_uid_search(Sock, Tag, State);
         _ ->
             tagged(Sock, Tag, <<"BAD unsupported UID command">>),
             {continue, State}
@@ -292,6 +293,12 @@ handle_uid_fetch(Sock, Tag, Rest, #{messages := Ms} = State) ->
                     {continue, State}
             end
     end.
+
+handle_uid_search(Sock, Tag, #{messages := Ms} = State) ->
+    Uids = lists:join(<<" ">>, [integer_to_binary(U) || {_, U, _, _, _} <- Ms]),
+    send(Sock, [<<"* SEARCH ">>, Uids, <<"\r\n">>]),
+    tagged(Sock, Tag, <<"OK UID SEARCH done">>),
+    {continue, State}.
 
 changedsince(Bin) ->
     case re:run(string:uppercase(Bin), <<"CHANGEDSINCE ([0-9]+)">>,

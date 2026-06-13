@@ -15,6 +15,7 @@
 
 -export([blob_id/1, doc_id/1]).
 -export([put/3, get/2, exists/2, add_ref/3, remove_ref/3, ref_count/2]).
+-export([sweep/3]).
 
 %%====================================================================
 %% Ids
@@ -94,8 +95,9 @@ add_ref(Db, BlobIdOrHex, RefId) ->
             Err
     end.
 
-%% @doc Drop a reference. Returns `{ok, orphaned}' when the last reference
-%% is gone (the blob is then eligible for GC), `{ok, referenced}' otherwise.
+%% @doc Drop a reference. When the last reference is gone the blob is
+%% stamped `orphanedAt' (eligible for {@link sweep/3}); the stamp is cleared
+%% if a reference is later re-added. Returns `{ok, orphaned | referenced}'.
 -spec remove_ref(binary(), binary(), binary()) ->
     {ok, orphaned | referenced} | {error, term()}.
 remove_ref(Db, BlobIdOrHex, RefId) ->
@@ -103,18 +105,42 @@ remove_ref(Db, BlobIdOrHex, RefId) ->
     case mailio_db:get(Db, DocId) of
         {ok, Doc} ->
             Refs = maps:remove(RefId, maps:get(<<"refs">>, Doc, #{})),
-            Doc1 = Doc#{<<"refs">> => Refs},
+            {Doc1, Result} =
+                case maps:size(Refs) of
+                    0 -> {Doc#{<<"refs">> => Refs,
+                               <<"orphanedAt">> => erlang:system_time(second)},
+                          orphaned};
+                    _ -> {maps:remove(<<"orphanedAt">>, Doc#{<<"refs">> => Refs}),
+                          referenced}
+                end,
             case mailio_db:put(Db, Doc1) of
-                {ok, _, _} ->
-                    case maps:size(Refs) of
-                        0 -> {ok, orphaned};
-                        _ -> {ok, referenced}
-                    end;
-                {error, _} = Err ->
-                    Err
+                {ok, _, _} -> {ok, Result};
+                {error, _} = Err -> Err
             end;
         {error, _} = Err ->
             Err
+    end.
+
+%% @doc Delete blobs orphaned before `Now - GraceSecs'. Returns the number
+%% swept. Orphaned blobs keep a grace window so a delete immediately
+%% followed by a re-ingest (which re-references the same content) does not
+%% lose the bytes.
+-spec sweep(binary(), integer(), non_neg_integer()) -> {ok, non_neg_integer()}.
+sweep(Db, Now, GraceSecs) ->
+    Cutoff = Now - GraceSecs,
+    case mailio_db:find(Db, #{where => [{compare, [<<"orphanedAt">>], '=<', Cutoff}]}) of
+        {ok, Docs, _} ->
+            Deleted = lists:foldl(
+                fun(#{<<"id">> := Id, <<"refs">> := Refs}, N) when map_size(Refs) =:= 0 ->
+                        case mailio_db:delete(Db, Id) of
+                            {ok, _} -> N + 1;
+                            _ -> N
+                        end;
+                   (_, N) -> N
+                end, 0, Docs),
+            {ok, Deleted};
+        {error, _} ->
+            {ok, 0}
     end.
 
 -spec ref_count(binary(), binary()) -> non_neg_integer().
@@ -130,4 +156,5 @@ ref_count(Db, BlobIdOrHex) ->
 
 add_ref_to_doc(Doc, RefId) ->
     Refs = maps:get(<<"refs">>, Doc, #{}),
-    Doc#{<<"refs">> => Refs#{RefId => true}}.
+    %% Re-referencing revives an orphaned blob.
+    maps:remove(<<"orphanedAt">>, Doc#{<<"refs">> => Refs#{RefId => true}}).

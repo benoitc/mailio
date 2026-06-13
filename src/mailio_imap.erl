@@ -10,7 +10,7 @@
 
 -export([connect/1, close/1, capabilities/1, list_mailboxes/1,
          fetch_changes_since/4, fetch_message/4, set_keywords/5,
-         move/4, append/4, expunge/3, watch/3, unwatch/2]).
+         move/4, append/4, expunge/3, watch/3, unwatch/2, list_uids/2]).
 
 %% A connection handle: the FSM pid plus cached capabilities.
 -type conn() :: #{pid := pid(), caps := #{atom() => boolean()}}.
@@ -369,6 +369,22 @@ unwatch(#{pid := Pid}, {idle, Pid}) ->
     mailio_imap_conn:idle_stop(Pid);
 unwatch(_Conn, _Ref) ->
     ok.
+
+%% List all uids currently present (UID SEARCH ALL).
+-spec list_uids(conn(), binary()) -> {ok, [integer()]} | {error, term()}.
+list_uids(#{pid := Pid}, MailboxId) ->
+    case do_select(Pid, MailboxId) of
+        {ok, _} ->
+            case run(Pid, fun(T) -> {mailio_imap_proto:uid_search(T, <<"ALL">>), undefined} end) of
+                {ok, Untagged, {ok, _, _}} ->
+                    Uids = lists:append([Us || {search, Us} <- Untagged]),
+                    {ok, lists:usort(Uids)};
+                Other ->
+                    command_error(Other)
+            end;
+        Other ->
+            command_error(Other)
+    end.
 
 %%====================================================================
 %% Selection and cursor helpers
