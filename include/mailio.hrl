@@ -22,7 +22,13 @@
 
 %% Internal sub-map key. Fields under this key are Mailio-internal and are
 %% stripped when serializing to a JMAP HTTP client.
--define(MAILIO_NS, <<"_mailio">>).
+%%
+%% NOTE: must NOT start with an underscore. barrel excludes top-level keys
+%% beginning with `_' from its ARS path index (reserved, like `_rev'), so a
+%% `_mailio' namespace would make every internal field (subject_norm,
+%% from_norm, received_ts, ...) unqueryable. The JMAP layer strips this key
+%% explicitly rather than relying on an underscore convention.
+-define(MAILIO_NS, <<"mailio">>).
 
 %% System keyword (JMAP) strings.
 -define(KW_SEEN,     <<"$seen">>).
