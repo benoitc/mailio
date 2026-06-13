@@ -13,7 +13,7 @@
 -module(mailio_imap_proto).
 
 %% Command encoders
--export([capability/1, login/3, starttls/1, logout/1,
+-export([capability/1, login/3, starttls/1, logout/1, enable/2, select_qresync/4,
          select/2, examine/2, list/3, status/3,
          uid_fetch/3, uid_store/4, uid_search/2,
          uid_copy/3, uid_move/3, append/4, expunge/1, uid_expunge/2,
@@ -63,8 +63,19 @@ logout(Tag) -> [Tag, " LOGOUT\r\n"].
 -spec noop(binary()) -> iodata().
 noop(Tag) -> [Tag, " NOOP\r\n"].
 
+-spec enable(binary(), [binary()]) -> iodata().
+enable(Tag, Caps) -> [Tag, " ENABLE ", lists:join(" ", Caps), "\r\n"].
+
 -spec select(binary(), binary()) -> iodata().
 select(Tag, Mailbox) -> [Tag, " SELECT ", quote(Mailbox), "\r\n"].
+
+%% SELECT with the QRESYNC parameter (RFC 7162): the server replies with
+%% VANISHED (EARLIER) for expunged UIDs and FETCH for flag changes since
+%% the given mod-sequence.
+-spec select_qresync(binary(), binary(), non_neg_integer(), non_neg_integer()) -> iodata().
+select_qresync(Tag, Mailbox, UidValidity, ModSeq) ->
+    [Tag, " SELECT ", quote(Mailbox), " (QRESYNC (",
+     integer_to_binary(UidValidity), " ", integer_to_binary(ModSeq), "))\r\n"].
 
 -spec examine(binary(), binary()) -> iodata().
 examine(Tag, Mailbox) -> [Tag, " EXAMINE ", quote(Mailbox), "\r\n"].

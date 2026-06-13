@@ -27,6 +27,7 @@ connect(Config) ->
             case run(Pid, fun(T) -> {mailio_imap_proto:capability(T), undefined} end) of
                 {ok, Untagged, {ok, _, _}} ->
                     Caps = caps_map(collect_caps(Untagged, Pid)),
+                    maybe_enable_qresync(Pid, Caps),
                     {ok, #{pid => Pid, caps => Caps}};
                 {ok, _Untagged, {Status, _, Text}} ->
                     mailio_imap_conn:close(Pid),
@@ -47,6 +48,14 @@ close(#{pid := Pid}) ->
 
 -spec capabilities(conn()) -> #{atom() => boolean()}.
 capabilities(#{caps := Caps}) -> Caps.
+
+%% QRESYNC requires an explicit ENABLE (RFC 7162) before the QRESYNC SELECT
+%% parameter may be used.
+maybe_enable_qresync(Pid, #{qresync := true}) ->
+    _ = run(Pid, fun(T) -> {mailio_imap_proto:enable(T, [<<"QRESYNC">>]), undefined} end),
+    ok;
+maybe_enable_qresync(_Pid, _Caps) ->
+    ok.
 
 %%====================================================================
 %% Mailboxes
@@ -79,25 +88,73 @@ to_mailbox({list, Attrs, Delim, Name}) ->
     {ok, [mailio_adapter:change()], mailio_adapter:remote_state(), more | done}
   | {error, term()}.
 fetch_changes_since(#{pid := Pid, caps := Caps}, MailboxId, State, _Opts) ->
+    Prev = mailio_imap_map:decode_state(State),
+    case use_qresync(Caps, Prev) of
+        true -> qresync_changes(Pid, MailboxId, Prev);
+        false -> plain_changes(Pid, Caps, MailboxId, Prev)
+    end.
+
+use_qresync(Caps, Prev) ->
+    maps:get(qresync, Caps, false)
+        andalso maps:get(uidvalidity, Prev) =/= undefined
+        andalso maps:get(highestmodseq, Prev) =/= undefined.
+
+%% Plain / CONDSTORE path: SELECT, then UID-FETCH for new and (if CONDSTORE)
+%% CHANGEDSINCE for flag updates. Removals are not detected here.
+plain_changes(Pid, Caps, MailboxId, Prev) ->
     case do_select(Pid, MailboxId) of
         {ok, SelInfo} ->
-            Prev = mailio_imap_map:decode_state(State),
             New = sel_to_state(SelInfo),
             case uidvalidity_changed(Prev, New) of
                 true ->
                     {ok, [reset], encode(New), done};
                 false ->
-                    compute_changes(Pid, Caps, Prev, New)
+                    Added = fetch_added(Pid, maps:get(uidnext, Prev)),
+                    Updated = fetch_updated(Pid, Caps, maps:get(highestmodseq, Prev)),
+                    {ok, Added ++ Updated, encode(New), done}
             end;
         Other ->
             command_error(Other)
     end.
 
-compute_changes(Pid, Caps, Prev, New) ->
-    PrevUidNext = maps:get(uidnext, Prev),
-    Added = fetch_added(Pid, PrevUidNext),
-    Updated = fetch_updated(Pid, Caps, maps:get(highestmodseq, Prev)),
-    {ok, Added ++ Updated, encode(New), done}.
+%% QRESYNC path (RFC 7162): the QRESYNC SELECT volunteers VANISHED (EARLIER)
+%% for expunged UIDs and FETCH for flag changes since our mod-sequence, so
+%% we get removals and updates without extra round trips; new messages are
+%% still fetched by UID range.
+qresync_changes(Pid, MailboxId, Prev) ->
+    UidValidity = maps:get(uidvalidity, Prev),
+    ModSeq = maps:get(highestmodseq, Prev),
+    case do_select_qresync(Pid, MailboxId, UidValidity, ModSeq) of
+        {ok, SelInfo, Vanished, Updated} ->
+            New = sel_to_state(SelInfo),
+            case uidvalidity_changed(Prev, New) of
+                true ->
+                    {ok, [reset], encode(New), done};
+                false ->
+                    Added = fetch_added(Pid, maps:get(uidnext, Prev)),
+                    Removed = [{removed, U} || U <- Vanished],
+                    {ok, Added ++ Updated ++ Removed, encode(New), done}
+            end;
+        Other ->
+            command_error(Other)
+    end.
+
+do_select_qresync(Pid, MailboxId, UidValidity, ModSeq) ->
+    Builder = fun(T) ->
+        {mailio_imap_proto:select_qresync(T, MailboxId, UidValidity, ModSeq), undefined}
+    end,
+    case run(Pid, Builder) of
+        {ok, Untagged, {ok, _, _}} ->
+            SelInfo = parse_select(Untagged),
+            Vanished = lists:append([Uids || {vanished, _Earlier, Uids} <- Untagged]),
+            Updated = [{updated, #{uid => proplists:get_value(uid, I),
+                                   keywords => keywords_of(I)}}
+                       || {fetch, _Seq, I} <- Untagged,
+                          proplists:is_defined(uid, I)],
+            {ok, SelInfo, Vanished, Updated};
+        Other ->
+            Other
+    end.
 
 %% Added: messages with UID >= the previously seen UIDNEXT (or all, initially).
 fetch_added(Pid, undefined) ->

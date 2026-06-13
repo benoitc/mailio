@@ -15,13 +15,17 @@
 -export([backfill_ingests_messages/1,
          backfill_emits_events/1,
          cursor_persists_no_redundant_fetch/1,
-         flag_change_updates_email/1]).
+         flag_change_updates_email/1,
+         qresync_expunge_removes_email/1,
+         idle_push_triggers_sync/1]).
 
 all() ->
     [backfill_ingests_messages,
      backfill_emits_events,
      cursor_persists_no_redundant_fetch,
-     flag_change_updates_email].
+     flag_change_updates_email,
+     qresync_expunge_removes_email,
+     idle_push_triggers_sync].
 
 init_per_suite(Config) ->
     {ok, _} = application:ensure_all_started(ssl),
@@ -121,6 +125,53 @@ flag_change_updates_email(Config) ->
     {ok, LocalId} = inbox_local_id(Account),
     {ok, Mbx} = mailio_db:get(Db, <<?ID_MAILBOX, LocalId/binary>>),
     ?assertEqual(0, maps:get(<<"unreadEmails">>, Mbx)).
+
+%% A server-side expunge is reported via QRESYNC VANISHED on the next sync
+%% and removes the email locally.
+qresync_expunge_removes_email(Config) ->
+    Account = ?config(account, Config),
+    Db = mailio_account:db_name(Account),
+    Srv = ?config(srv, Config),
+    {ok, _} = mailio_sync_mgr:sync_mailbox(Account, <<"INBOX">>),
+    ?assertEqual(2, length(all_emails(Db))),
+    E = email_by_subject(Db, <<"Second message">>),
+    EmailId = mailio_email:id_of(E),
+
+    ok = mailio_fake_imap:expunge(Srv, 101),
+    {ok, Stats} = mailio_sync_mgr:sync_mailbox(Account, <<"INBOX">>),
+    ?assertEqual(1, maps:get(removed, Stats)),
+
+    %% The email is gone and its mailbox counter dropped.
+    ?assertEqual(1, length(all_emails(Db))),
+    ?assertEqual({error, not_found}, mailio_db:get(Db, <<?ID_EMAIL, EmailId/binary>>)),
+    {ok, LocalId} = inbox_local_id(Account),
+    {ok, Mbx} = mailio_db:get(Db, <<?ID_MAILBOX, LocalId/binary>>),
+    ?assertEqual(1, maps:get(<<"totalEmails">>, Mbx)).
+
+%% A new message pushed by the server while IDLE wakes the sync engine and
+%% the message is ingested without an explicit sync call.
+idle_push_triggers_sync(Config) ->
+    Account = ?config(account, Config),
+    Db = mailio_account:db_name(Account),
+    Srv = ?config(srv, Config),
+    {ok, _} = mailio_sync_mgr:sync_mailbox(Account, <<"INBOX">>),
+    ?assertEqual(2, length(all_emails(Db))),
+
+    ok = mailio_sync_mgr:watch_inbox(Account),
+    ok = mailio_fake_imap:deliver(Srv, <<"Pushed message">>),
+
+    %% Wait for the IDLE-driven resync to ingest the new message.
+    ok = wait_until(fun() -> length(all_emails(Db)) =:= 3 end, 5000),
+    Subjects = [maps:get(<<"subject">>, E) || E <- all_emails(Db)],
+    ?assert(lists:member(<<"Pushed message">>, Subjects)).
+
+wait_until(Pred, Timeout) when Timeout =< 0 ->
+    case Pred() of true -> ok; false -> error(timeout) end;
+wait_until(Pred, Timeout) ->
+    case Pred() of
+        true -> ok;
+        false -> timer:sleep(100), wait_until(Pred, Timeout - 100)
+    end.
 
 %%====================================================================
 %% Helpers

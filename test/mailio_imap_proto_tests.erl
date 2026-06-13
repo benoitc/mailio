@@ -26,6 +26,14 @@ seqset_list_test() ->
     ?assertEqual(<<"1,3:5,9">>,
                  iolist_to_binary(?P:format_seqset([1, {range, 3, 5}, 9]))).
 
+enable_test() ->
+    ?assertEqual(<<"a1 ENABLE QRESYNC CONDSTORE\r\n">>,
+                 iolist_to_binary(?P:enable(<<"a1">>, [<<"QRESYNC">>, <<"CONDSTORE">>]))).
+
+select_qresync_test() ->
+    ?assertEqual(<<"a2 SELECT \"INBOX\" (QRESYNC (1 6))\r\n">>,
+                 iolist_to_binary(?P:select_qresync(<<"a2">>, <<"INBOX">>, 1, 6))).
+
 append_prefix_test() ->
     {Prefix, Data} = ?P:append(<<"a4">>, <<"Sent">>, [<<"\\Seen">>], <<"hello">>),
     ?assertEqual(<<"a4 APPEND \"Sent\" (\\Seen) {5}\r\n">>, iolist_to_binary(Prefix)),

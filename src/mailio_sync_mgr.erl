@@ -94,10 +94,14 @@ handle_call(_Req, _From, State) ->
 handle_cast(_Msg, State) ->
     {noreply, State}.
 
-%% IDLE nudge: something changed in the watched mailbox -> resync it.
+%% IDLE nudge: something changed in the watched mailbox. The watch holds the
+%% only connection in IDLE, which cannot also run commands, so stop the
+%% watch, resync, and resume watching.
 handle_info({imap_idle_event, _Pid, _Event}, State) ->
-    {_Result, State1} = do_sync_mailbox(State#state.watch_mailbox, State),
-    {noreply, State1};
+    State1 = stop_watch(State),
+    {_Result, State2} = do_sync_mailbox(State1#state.watch_mailbox, State1),
+    State3 = start_watch(State2),
+    {noreply, State3};
 handle_info(_Info, State) ->
     {noreply, State}.
 
@@ -281,17 +285,33 @@ initial_marker() -> <<>>.
 %% IDLE watch
 %%====================================================================
 
-do_watch(#state{adapter = Adapter, conn = Conn, caps = Caps,
-                watch_mailbox = ImapName} = State) ->
+do_watch(#state{caps = Caps} = State) ->
     case maps:get(idle, Caps, false) of
         false ->
             {{error, idle_not_supported}, State};
         true ->
-            case Adapter:watch(Conn, ImapName, self()) of
-                {ok, Ref} -> {ok, State#state{watch = Ref}};
-                {error, _} = Err -> {Err, State}
+            State1 = start_watch(State),
+            case State1#state.watch of
+                undefined -> {{error, watch_failed}, State1};
+                _ -> {ok, State1}
             end
     end.
+
+start_watch(#state{adapter = Adapter, conn = Conn, watch = undefined,
+                   watch_mailbox = ImapName} = State) ->
+    case Adapter:watch(Conn, ImapName, self()) of
+        {ok, Ref} -> State#state{watch = Ref};
+        {error, _} -> State
+    end;
+start_watch(State) ->
+    State.
+
+stop_watch(#state{adapter = Adapter, conn = Conn, watch = Ref} = State)
+  when Ref =/= undefined ->
+    _ = Adapter:unwatch(Conn, Ref),
+    State#state{watch = undefined};
+stop_watch(State) ->
+    State.
 
 %%====================================================================
 %% Helpers

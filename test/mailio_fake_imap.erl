@@ -1,14 +1,17 @@
 %%% @doc Scripted fake IMAP server for adapter and sync tests.
 %%%
-%%% Implements just enough of IMAP4rev1 (+ CONDSTORE-style CHANGEDSINCE) to
-%%% drive the adapter and sync engine end to end against a real socket:
-%%% greeting, CAPABILITY, LOGIN, LIST, SELECT, UID FETCH (metadata,
-%%% BODY.PEEK[], and CHANGEDSINCE), UID STORE, NOOP, LOGOUT. Messages carry
-%%% a MODSEQ so a flag change can be replayed to the client. Not a
-%%% conformant server — a test double.
+%%% Implements enough of IMAP4rev1 + CONDSTORE/QRESYNC + IDLE to drive the
+%%% adapter and sync engine end to end over a real socket: greeting,
+%%% CAPABILITY, LOGIN, ENABLE, LIST, SELECT (plain and QRESYNC), UID FETCH
+%%% (metadata, BODY.PEEK[], CHANGEDSINCE), UID STORE, IDLE/DONE, NOOP,
+%%% LOGOUT. Messages carry a MODSEQ; expunged UIDs are remembered with the
+%%% MODSEQ at which they vanished so a QRESYNC SELECT can replay VANISHED.
+%%% Control messages let a test change flags, deliver new mail, and expunge.
+%%% Not a conformant server — a test double.
 -module(mailio_fake_imap).
 
--export([start/0, start/1, stop/1, port/1, last_flags/2, set_flags/3]).
+-export([start/0, start/1, stop/1, port/1]).
+-export([last_flags/2, set_flags/3, deliver/2, expunge/2]).
 
 -record(srv, {port, pid, ref}).
 
@@ -45,15 +48,19 @@ stop(#srv{pid = Pid}) -> exit(Pid, shutdown), ok.
 
 port(#srv{port = Port}) -> Port.
 
-last_flags(#srv{pid = Pid, ref = Ref}, Uid) ->
-    Pid ! {get_flags, self(), Ref, Uid},
-    receive {flags, Ref, Flags} -> Flags after 1000 -> timeout end.
+last_flags(Srv, Uid) -> call(Srv, {get_flags, Uid}, flags).
 
-%% @doc Change a message's flags and bump its MODSEQ, so the next
-%% CHANGEDSINCE sync reports it as updated.
-set_flags(#srv{pid = Pid, ref = Ref}, Uid, Flags) ->
-    Pid ! {set_flags, self(), Ref, Uid, Flags},
-    receive {ok, Ref} -> ok after 1000 -> timeout end.
+set_flags(Srv, Uid, Flags) -> call(Srv, {set_flags, Uid, Flags}, ok).
+
+%% @doc Deliver a new message to INBOX (uid auto-assigned).
+deliver(Srv, Subject) -> call(Srv, {deliver, Subject}, ok).
+
+%% @doc Expunge a message by uid.
+expunge(Srv, Uid) -> call(Srv, {expunge, Uid}, ok).
+
+call(#srv{pid = Pid, ref = Ref}, Msg, Reply) ->
+    Pid ! {control, self(), Ref, Msg},
+    receive {Reply, Ref, Result} -> Result after 2000 -> timeout end.
 
 %%====================================================================
 %% Server loop
@@ -64,11 +71,15 @@ accept_loop(LSock, Opts, Ref) ->
         {ok, Sock} ->
             gen_tcp:send(Sock, <<"* OK [CAPABILITY IMAP4rev1 IDLE CONDSTORE QRESYNC MOVE UIDPLUS SPECIAL-USE] ready\r\n">>),
             inet:setopts(Sock, [{active, once}]),
-            loop(Sock, #{messages => messages(), selected => undefined}, Ref),
+            loop(Sock, init_state(), Ref),
             accept_loop(LSock, Opts, Ref);
         {error, _} ->
             ok
     end.
+
+init_state() ->
+    #{messages => messages(), selected => undefined,
+      idling => undefined, vanished => [], uidnext => 102}.
 
 loop(Sock, State, Ref) ->
     receive
@@ -80,12 +91,9 @@ loop(Sock, State, Ref) ->
                 stop ->
                     gen_tcp:close(Sock)
             end;
-        {get_flags, From, Ref, Uid} ->
-            From ! {flags, Ref, flags_for(State, Uid)},
-            loop(Sock, State, Ref);
-        {set_flags, From, Ref, Uid, Flags} ->
-            State1 = do_set_flags(State, Uid, Flags),
-            From ! {ok, Ref},
+        {control, From, Ref, Msg} ->
+            {Reply, State1} = handle_control(Sock, Ref, Msg, State),
+            From ! Reply,
             loop(Sock, State1, Ref);
         {tcp_closed, Sock} ->
             ok;
@@ -93,31 +101,77 @@ loop(Sock, State, Ref) ->
             gen_tcp:close(Sock)
     end.
 
+%%====================================================================
+%% Control handling
+%%====================================================================
+
+handle_control(_Sock, Ref, {get_flags, Uid}, State) ->
+    {{flags, Ref, flags_for(State, Uid)}, State};
+handle_control(_Sock, Ref, {set_flags, Uid, Flags}, #{messages := Ms} = State) ->
+    Next = highestmodseq(State) + 1,
+    Ms1 = [case M of {Seq, U, _F, _MS, Raw} when U =:= Uid -> {Seq, U, Flags, Next, Raw};
+                     _ -> M end || M <- Ms],
+    {{ok, Ref, ok}, State#{messages => Ms1}};
+handle_control(Sock, Ref, {deliver, Subject}, #{messages := Ms, uidnext := Uid} = State) ->
+    Next = highestmodseq(State) + 1,
+    Seq = length(Ms) + 1,
+    Raw = msg(<<"new@x">>, Subject),
+    Ms1 = Ms ++ [{Seq, Uid, [], Next, Raw}],
+    State1 = State#{messages => Ms1, uidnext => Uid + 1},
+    notify_exists(Sock, State1),
+    {{ok, Ref, ok}, State1};
+handle_control(Sock, Ref, {expunge, Uid}, #{messages := Ms, vanished := V} = State) ->
+    Next = highestmodseq(State) + 1,
+    case lists:keyfind(Uid, 2, Ms) of
+        {Seq, Uid, _F, _MS, _Raw} ->
+            Ms1 = lists:keydelete(Uid, 2, Ms),
+            State1 = State#{messages => Ms1, vanished => [{Uid, Next} | V]},
+            notify_expunge(Sock, Seq, State1),
+            {{ok, Ref, ok}, State1};
+        false ->
+            {{ok, Ref, ok}, State}
+    end.
+
+notify_exists(Sock, #{idling := Tag, messages := Ms}) when Tag =/= undefined ->
+    N = integer_to_binary(length(Ms)),
+    gen_tcp:send(Sock, <<"* ", N/binary, " EXISTS\r\n">>);
+notify_exists(_Sock, _State) -> ok.
+
+notify_expunge(Sock, Seq, #{idling := Tag}) when Tag =/= undefined ->
+    SeqB = integer_to_binary(Seq),
+    gen_tcp:send(Sock, <<"* ", SeqB/binary, " EXPUNGE\r\n">>);
+notify_expunge(_Sock, _Seq, _State) -> ok.
+
 flags_for(#{messages := Ms}, Uid) ->
     case lists:keyfind(Uid, 2, Ms) of
         {_, _, Flags, _, _} -> Flags;
         false -> undefined
     end.
 
-do_set_flags(#{messages := Ms} = State, Uid, Flags) ->
-    Next = highestmodseq(Ms) + 1,
-    Ms1 = [case M of
-               {Seq, U, _F, _MS, Raw} when U =:= Uid -> {Seq, U, Flags, Next, Raw};
-               _ -> M
-           end || M <- Ms],
-    State#{messages => Ms1}.
-
-highestmodseq(Ms) -> lists:max([MS || {_, _, _, MS, _} <- Ms]).
+highestmodseq(#{messages := Ms, vanished := V}) ->
+    MsSeqs = [MS || {_, _, _, MS, _} <- Ms],
+    VSeqs = [MS || {_, MS} <- V],
+    lists:max([0 | MsSeqs ++ VSeqs]).
 
 %%====================================================================
 %% Command handling
 %%====================================================================
 
 handle_line(Sock, Line, State) ->
-    case binary:split(chomp(Line), <<" ">>) of
-        [Tag, Rest] -> dispatch(Sock, Tag, Rest, State);
-        [_] -> {continue, State}
+    case chomp(Line) of
+        <<"DONE">> -> handle_done(Sock, State);
+        Trimmed ->
+            case binary:split(Trimmed, <<" ">>) of
+                [Tag, Rest] -> dispatch(Sock, Tag, Rest, State);
+                [_] -> {continue, State}
+            end
     end.
+
+handle_done(Sock, #{idling := Tag} = State) when Tag =/= undefined ->
+    tagged(Sock, Tag, <<"OK IDLE terminated">>),
+    {continue, State#{idling => undefined}};
+handle_done(_Sock, State) ->
+    {continue, State}.
 
 chomp(Bin) ->
     S = byte_size(Bin),
@@ -136,9 +190,16 @@ dispatch(Sock, Tag, Rest, State) ->
         <<"LOGIN">> ->
             tagged(Sock, Tag, <<"OK LOGIN completed">>),
             {continue, State};
+        <<"ENABLE">> ->
+            send(Sock, <<"* ENABLED QRESYNC\r\n">>),
+            tagged(Sock, Tag, <<"OK ENABLE done">>),
+            {continue, State};
         <<"NOOP">> ->
             tagged(Sock, Tag, <<"OK NOOP done">>),
             {continue, State};
+        <<"IDLE">> ->
+            send(Sock, <<"+ idling\r\n">>),
+            {continue, State#{idling => Tag}};
         <<"LIST">> ->
             send(Sock, <<"* LIST (\\HasNoChildren) \"/\" \"INBOX\"\r\n">>),
             send(Sock, <<"* LIST (\\HasNoChildren \\Sent) \"/\" \"Sent\"\r\n">>),
@@ -146,10 +207,7 @@ dispatch(Sock, Tag, Rest, State) ->
             tagged(Sock, Tag, <<"OK LIST done">>),
             {continue, State};
         <<"SELECT">> ->
-            Mailbox = unquote(Args),
-            send_select(Sock, State),
-            tagged(Sock, Tag, <<"OK [READ-WRITE] SELECT completed">>),
-            {continue, State#{selected => Mailbox}};
+            handle_select(Sock, Tag, Args, State);
         <<"UID">> ->
             handle_uid(Sock, Tag, Args, State);
         <<"LOGOUT">> ->
@@ -161,15 +219,44 @@ dispatch(Sock, Tag, Rest, State) ->
             {continue, State}
     end.
 
-send_select(Sock, #{messages := Ms}) ->
+handle_select(Sock, Tag, Args, State) ->
+    Mailbox = unquote(first_token(Args)),
+    send_select(Sock, State),
+    case qresync_modseq(Args) of
+        {ok, Since} -> emit_qresync(Sock, State, Since);
+        none -> ok
+    end,
+    tagged(Sock, Tag, <<"OK [READ-WRITE] SELECT completed">>),
+    {continue, State#{selected => Mailbox}}.
+
+send_select(Sock, #{messages := Ms, uidnext := UidNext} = State) ->
     N = integer_to_binary(length(Ms)),
-    HMS = integer_to_binary(highestmodseq(Ms)),
+    HMS = integer_to_binary(highestmodseq(State)),
+    UN = integer_to_binary(UidNext),
     send(Sock, <<"* FLAGS (\\Answered \\Flagged \\Deleted \\Seen \\Draft)\r\n">>),
     send(Sock, <<"* ", N/binary, " EXISTS\r\n">>),
     send(Sock, <<"* 0 RECENT\r\n">>),
     send(Sock, <<"* OK [UIDVALIDITY 1] UIDs valid\r\n">>),
-    send(Sock, <<"* OK [UIDNEXT 102] Predicted next UID\r\n">>),
+    send(Sock, <<"* OK [UIDNEXT ", UN/binary, "] Predicted next UID\r\n">>),
     send(Sock, <<"* OK [HIGHESTMODSEQ ", HMS/binary, "] Highest\r\n">>).
+
+emit_qresync(Sock, #{vanished := V, messages := Ms}, Since) ->
+    Gone = [Uid || {Uid, MS} <- V, MS > Since],
+    case Gone of
+        [] -> ok;
+        _ ->
+            Set = lists:join(<<",">>, [integer_to_binary(U) || U <- lists:sort(Gone)]),
+            send(Sock, [<<"* VANISHED (EARLIER) ">>, Set, <<"\r\n">>])
+    end,
+    [send_changed(Sock, M) || {_, _, _, MS, _} = M <- Ms, MS > Since],
+    ok.
+
+qresync_modseq(Args) ->
+    case re:run(string:uppercase(Args), <<"QRESYNC \\([0-9]+ ([0-9]+)\\)">>,
+                [{capture, all_but_first, binary}]) of
+        {match, [N]} -> {ok, binary_to_integer(N)};
+        nomatch -> none
+    end.
 
 handle_uid(Sock, Tag, Args, State) ->
     {Sub, Rest} = split1(Args),
@@ -243,7 +330,7 @@ handle_uid_store(Sock, Tag, Rest, #{messages := Ms} = State) ->
     {OpBin, FlagsParen} = split1(OpAndFlags),
     Flags = parse_paren_flags(FlagsParen),
     Op = store_op(OpBin),
-    Ms1 = update_flags(Ms, Uid, Op, Flags),
+    Ms1 = update_flags(State, Ms, Uid, Op, Flags),
     tagged(Sock, Tag, <<"OK UID STORE done">>),
     {continue, State#{messages => Ms1}}.
 
@@ -251,8 +338,8 @@ store_op(<<"+FLAGS", _/binary>>) -> add;
 store_op(<<"-FLAGS", _/binary>>) -> remove;
 store_op(_) -> set.
 
-update_flags(Ms, Uid, Op, Flags) ->
-    Next = highestmodseq(Ms) + 1,
+update_flags(State, Ms, Uid, Op, Flags) ->
+    Next = highestmodseq(State) + 1,
     lists:map(
         fun({Seq, U, Existing, _MS, Raw}) when U =:= Uid ->
                 New = case Op of
@@ -291,6 +378,8 @@ unparen(Bin) ->
                  _ -> B2
              end
     end.
+
+first_token(Bin) -> hd(binary:split(string:trim(Bin, leading), <<" ">>)).
 
 unquote(Bin) ->
     T = string:trim(Bin),

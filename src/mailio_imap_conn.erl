@@ -253,22 +253,30 @@ idle(info, Event, Data) ->
     handle_socket_closed(Event, Data).
 
 handle_idle_responses(Data) ->
+    handle_idle_responses(Data, []).
+
+handle_idle_responses(Data, Acts) ->
     case take_one(Data) of
         more ->
-            {keep_state, Data};
+            {keep_state, Data, Acts};
+        {ok, {continuation, _Text}, Data1} ->
+            %% Server accepted IDLE: acknowledge the idle_start caller now,
+            %% while staying in the idle state.
+            {Data2, A} = ack_from(Data1),
+            handle_idle_responses(Data2, Acts ++ A);
         {ok, {tagged, Tag, _Status, _}, Data1} when Tag =:= Data#data.tag ->
             %% IDLE completed (after DONE): return to ready, ack the stopper.
-            Replies = case Data1#data.from of
-                          undefined -> [];
-                          From -> [{reply, From, ok}]
-                      end,
-            {next_state, ready, Data1#data{from = undefined, tag = undefined}, Replies};
+            {Data2, A} = ack_from(Data1),
+            {next_state, ready, Data2#data{tag = undefined}, Acts ++ A};
         {ok, {untagged, Event}, Data1} ->
             notify_idle(Data1, Event),
-            handle_idle_responses(Data1);
+            handle_idle_responses(Data1, Acts);
         {ok, _Other, Data1} ->
-            handle_idle_responses(Data1)
+            handle_idle_responses(Data1, Acts)
     end.
+
+ack_from(#data{from = undefined} = Data) -> {Data, []};
+ack_from(#data{from = From} = Data) -> {Data#data{from = undefined}, [{reply, From, ok}]}.
 
 notify_idle(#data{notify = Pid}, Event) when is_pid(Pid) ->
     Pid ! {imap_idle_event, self(), Event};
