@@ -143,7 +143,19 @@ sub_index(Cond) when is_map(Cond) ->
 sub_index(_) -> [].
 
 wrap([]) -> all;
-wrap(Wheres) -> {where, Wheres}.
+wrap(Wheres) -> {where, cap_compares(Wheres)}.
+
+%% barrel `find' returns nothing when a query carries two or more `compare'
+%% conditions (it does not intersect multiple ranges). Push every equality
+%% but AT MOST ONE compare; the dropped compares are still evaluated by the
+%% Erlang post-filter, so the result stays correct, just less pre-narrowed.
+cap_compares(Wheres) ->
+    {Compares, Others} = lists:partition(
+        fun(C) -> is_tuple(C) andalso element(1, C) =:= compare end, Wheres),
+    case Compares of
+        [] -> Others;
+        [First | _] -> Others ++ [First]
+    end.
 
 %% Map the indexable keys of a single condition map to barrel `where' clauses.
 condition_wheres(Cond) ->

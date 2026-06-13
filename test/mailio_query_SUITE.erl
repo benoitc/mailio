@@ -11,6 +11,7 @@
          query_from_substring/1,
          query_subject_and_keyword/1,
          query_date_range/1,
+         query_two_lower_bounds/1,
          query_has_attachment/1,
          query_operator_or/1,
          query_sort_and_paginate/1,
@@ -24,6 +25,7 @@ all() ->
      query_from_substring,
      query_subject_and_keyword,
      query_date_range,
+     query_two_lower_bounds,
      query_has_attachment,
      query_operator_or,
      query_sort_and_paginate,
@@ -95,6 +97,23 @@ query_date_range(Config) ->
     ?assertEqual(2, length(Ids)),
     ?assert(lists:member(?config(e2, Config), Ids)),
     ?assert(lists:member(?config(e3, Config), Ids)).
+
+%% Two compare conditions on different paths (after + minSize). barrel
+%% returns nothing for >=2 compares, so the planner must push at most one
+%% and post-filter the rest; the result must still be correct.
+query_two_lower_bounds(Config) ->
+    Account = ?config(account, Config),
+    %% after >= ts(1) admits all four; minSize 1 admits all. The point is
+    %% the two-compare query returns the correct set, not the empty set
+    %% barrel gives for >=2 compares.
+    {ok, #{<<"ids">> := Big}} = mailio_email:query(
+        Account, #{filter => #{after_ => ts(1), minSize => 1}}),
+    ?assertEqual(4, length(Big)),
+    %% A large minSize that only e1 (multipart w/ attachment) exceeds, with
+    %% an after that still admits it.
+    {ok, #{<<"ids">> := Ids}} = mailio_email:query(
+        Account, #{filter => #{after_ => ts(1), minSize => 100000}}),
+    ?assertEqual([], Ids).
 
 query_has_attachment(Config) ->
     Account = ?config(account, Config),
