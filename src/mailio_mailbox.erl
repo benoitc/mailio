@@ -10,6 +10,7 @@
 -export([new/1, new/2]).
 -export([doc_id/1, id_of/1, name/1, role/1, parent_id/1, imap_name/1, uidvalidity/1]).
 -export([with_counters/2]).
+-export([get/2, list/1]).
 
 -export_type([mailbox/0]).
 
@@ -75,6 +76,44 @@ with_counters(Mailbox, Counters) ->
                                        maps:get(<<"totalThreads">>, Mailbox)),
         <<"unreadThreads">> => maps:get(unread_threads, Counters,
                                         maps:get(<<"unreadThreads">>, Mailbox))}.
+
+%%====================================================================
+%% JMAP Mailbox facade
+%%====================================================================
+
+%% @doc RFC 8621 Mailbox/get. `Ids' is a list of mailbox ids or `all'.
+-spec get(binary(), [binary()] | all) -> {ok, map()}.
+get(Account, all) ->
+    Db = mailio_account:db_name(Account),
+    {ok, Docs, _} = mailio_db:find(
+        Db, #{where => [{exists, [<<"totalEmails">>]}]},
+        #{include_docs => true, limit => 100000}),
+    {ok, #{<<"accountId">> => Account,
+           <<"state">> => mailio_account:state_token(Account),
+           <<"list">> => [project(D) || D <- Docs],
+           <<"notFound">> => []}};
+get(Account, Ids) when is_list(Ids) ->
+    Db = mailio_account:db_name(Account),
+    {Found, NotFound} = lists:foldr(
+        fun(Id, {Acc, NF}) ->
+            case mailio_db:get(Db, <<?ID_MAILBOX, Id/binary>>) of
+                {ok, Doc} -> {[project(Doc) | Acc], NF};
+                {error, not_found} -> {Acc, [Id | NF]}
+            end
+        end, {[], []}, Ids),
+    {ok, #{<<"accountId">> => Account,
+           <<"state">> => mailio_account:state_token(Account),
+           <<"list">> => Found,
+           <<"notFound">> => NotFound}}.
+
+%% @doc List all mailbox ids for an account.
+-spec list(binary()) -> {ok, [binary()]}.
+list(Account) ->
+    {ok, #{<<"list">> := Mailboxes}} = get(Account, all),
+    {ok, [maps:get(<<"id">>, M) || M <- Mailboxes]}.
+
+project(Doc) ->
+    maps:remove(?MAILIO_NS, maps:remove(<<"_rev">>, Doc#{<<"id">> => id_of(Doc)})).
 
 -spec default_rights() -> map().
 default_rights() ->
