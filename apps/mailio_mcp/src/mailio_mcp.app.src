@@ -1,0 +1,9 @@
+{application, mailio_mcp, [
+    {description, "Email MCP service: search, read and reply with bounded context"},
+    {vsn, "0.1.0"},
+    {registered, [mailio_mcp_sup]},
+    {mod, {mailio_mcp_app, []}},
+    {applications, [kernel, stdlib, crypto, ssl, public_key, inets, mailio, barrel_mcp]},
+    {env, []},
+    {modules, []}
+]}.

@@ -1,0 +1,7 @@
+#!/bin/sh
+# Run the email MCP service. Usage: mailio-mcp [stdio|http]
+# Set MAILIO_MCP_CONFIG to a config file (see config/one-account.config).
+ROOT="$(cd "$(dirname "$0")/../../.." && pwd)"
+LIBS=""
+for d in "$ROOT"/_build/default/lib/*/ebin; do LIBS="$LIBS $d"; done
+exec erl -noshell -pa $LIBS -eval 'mailio_mcp_main:run(init:get_plain_arguments()), halt().' -extra "${1:-stdio}"
