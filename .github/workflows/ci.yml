@@ -35,8 +35,12 @@ jobs:
       # must not depend on mailio_store or barrel_docdb (see docs/architecture.md).
       - name: Dependency rule
         run: |
-          ! grep -E "mailio_store|mailio_mcp|barrel_docdb|barrel_mcp" apps/mailio/src/mailio.app.src
-          ! grep -E "mailio_store|barrel_docdb" apps/mailio_mcp/src/mailio_mcp.app.src
+          if grep -E "mailio_store|mailio_mcp|barrel_docdb|barrel_mcp" apps/mailio/src/mailio.app.src; then
+            echo "mailio must not depend on the store or the MCP server"; exit 1
+          fi
+          if grep -E "mailio_store|barrel_docdb" apps/mailio_mcp/src/mailio_mcp.app.src; then
+            echo "mailio_mcp must not depend on mailio_store or barrel_docdb"; exit 1
+          fi
 
       # Four warnings in old code are accepted. A fifth fails the build.
       - name: Dialyzer (at most 4 known warnings)
@@ -152,4 +156,6 @@ jobs:
         run: |
           mkdir /tmp/pkg && tar -xf _build/default/lib/mailio/hex/mailio-*[0-9].tar -C /tmp/pkg
           tar -tzf /tmp/pkg/contents.tar.gz | grep -x LICENSE
-          ! tar -tzf /tmp/pkg/contents.tar.gz | grep -E "mailio_(store|mcp)"
+          if tar -tzf /tmp/pkg/contents.tar.gz | grep -E "mailio_(store|mcp)"; then
+            echo "the package holds another app"; exit 1
+          fi
