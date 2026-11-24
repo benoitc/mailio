@@ -189,7 +189,13 @@ do_examine_qresync(Pid, MailboxId, UidValidity, ModSeq) ->
 fetch_added(Pid, undefined) ->
     fetch_range(Pid, {range, 1, '*'});
 fetch_added(Pid, PrevUidNext) ->
-    fetch_range(Pid, {range, PrevUidNext, '*'}).
+    %% `N:*' always includes the highest message, even when N is past it
+    %% (RFC 3501, section 9), so drop what we have already seen.
+    [
+        Change
+     || {added, #{uid := Uid}} = Change <- fetch_range(Pid, {range, PrevUidNext, '*'}),
+        Uid >= PrevUidNext
+    ].
 
 fetch_range(Pid, SeqSet) ->
     Items = [<<"UID">>, <<"FLAGS">>, <<"INTERNALDATE">>, <<"RFC822.SIZE">>],

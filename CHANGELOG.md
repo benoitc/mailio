@@ -4,6 +4,9 @@
 
 ### Fixed
 
+- Checking a mailbox for new mail no longer reports the newest message again
+  when nothing changed. Real servers return the last message for any range that
+  starts past the end.
 - Reading a message over POP3 now returns exactly what the server stored. The
   last line used to lose its line ending.
 - The IMAP connection now reports what the server supports even when the server

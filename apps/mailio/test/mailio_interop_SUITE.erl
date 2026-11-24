@@ -20,6 +20,7 @@
 
 -include_lib("common_test/include/ct.hrl").
 -include_lib("stdlib/include/assert.hrl").
+-include("mailio.hrl").
 
 -export([all/0, groups/0, init_per_suite/1, end_per_suite/1, init_per_group/2, end_per_group/2]).
 -export([init_per_testcase/2]).
@@ -34,16 +35,18 @@
     imap_implicit_tls_verified/1,
     imap_starttls_verified/1,
     imap_untrusted_certificate_refused/1,
+    adapter_reports_changes/1,
     pop3_roundtrip/1,
     pop3_uidl_stable_across_connections/1,
     pop3_implicit_tls/1,
+    pop3_stls_verified/1,
     pop3_listing_limit_holds/1,
     pop3_never_deletes/1,
     smtp_delivery_roundtrip/1,
     smtp_implicit_tls/1
 ]).
 
-all() -> [{group, dovecot}, {group, greenmail}].
+all() -> [{group, dovecot}, {group, greenmail}, {group, stalwart}].
 
 groups() ->
     Imap = [
@@ -56,19 +59,22 @@ groups() ->
         imap_literal_limit_holds,
         imap_implicit_tls_verified,
         imap_starttls_verified,
-        imap_untrusted_certificate_refused
+        imap_untrusted_certificate_refused,
+        adapter_reports_changes
     ],
     Pop3 = [
         pop3_roundtrip,
         pop3_uidl_stable_across_connections,
         pop3_implicit_tls,
+        pop3_stls_verified,
         pop3_listing_limit_holds,
         pop3_never_deletes
     ],
     Smtp = [smtp_delivery_roundtrip, smtp_implicit_tls],
     [
         {dovecot, [], Imap ++ Pop3},
-        {greenmail, [], Imap ++ Pop3 ++ Smtp}
+        {greenmail, [], Imap ++ Pop3 ++ Smtp},
+        {stalwart, [], Imap ++ Pop3 ++ Smtp}
     ].
 
 %%====================================================================
@@ -86,6 +92,7 @@ profile(dovecot) ->
         imap_tls => 31993,
         imap_starttls => true,
         exact_sizes => true,
+        pop3_stls => false,
         %% the host name in the certificate
         tls_host => <<"localhost">>,
         pop3 => 31110,
@@ -106,6 +113,25 @@ profile(greenmail) ->
         smtp => 3025,
         smtp_tls => 3465,
         %% GreenMail makes a self-signed certificate on every start
+        verify => none
+    };
+%% Stalwart: apps/mailio/test/stalwart/setup.sh. It refuses a plain login, so
+%% every connection upgrades with STARTTLS or STLS first.
+profile(stalwart) ->
+    #{
+        name => stalwart,
+        user => <<"alice@interop.test">>,
+        pass => <<"interop-secret">>,
+        address => <<"alice@interop.test">>,
+        plain_tls => starttls,
+        imap => 32143,
+        imap_tls => 32993,
+        imap_starttls => true,
+        pop3 => 32110,
+        pop3_tls => 32995,
+        pop3_stls => true,
+        smtp => 32587,
+        smtp_tls => 32465,
         verify => none
     }.
 
@@ -291,6 +317,63 @@ imap_untrusted_certificate_refused(Config) ->
     ?assertEqual({error, tls_failed}, noop(C)),
     mailio_imap_conn:close(C).
 
+%% The sync adapter the store uses: what it reports as the mailbox changes.
+%% Flag changes need CONDSTORE and removals need QRESYNC, so a server without
+%% them is only expected to report new mail.
+adapter_reports_changes(Config) ->
+    P = ?config(profile, Config),
+    {ok, Conn} = mailio_imap:connect(imap_cfg(P, #{})),
+    Caps = mailio_imap:capabilities(Conn),
+    {ok, Writer} = imap_open(P, #{}),
+    ok = append(Writer, message(<<"one">>, <<"1\r\n">>)),
+    ok = append(Writer, message(<<"two">>, <<"2\r\n">>)),
+    {ok, Initial, S1, done} = mailio_imap:fetch_changes_since(Conn, <<"INBOX">>, initial, #{}),
+    Uids = lists:sort([maps:get(uid, I) || {added, I} <- Initial]),
+    ?assertEqual(2, length(Uids)),
+    %% a new message is reported as added, once
+    ok = append(Writer, message(<<"three">>, <<"3\r\n">>)),
+    {ok, C2, S2, done} = mailio_imap:fetch_changes_since(Conn, <<"INBOX">>, S1, #{}),
+    ?assertEqual(1, length([A || {added, _} = A <- C2])),
+    {ok, C2b, S2b, done} = mailio_imap:fetch_changes_since(Conn, <<"INBOX">>, S2, #{}),
+    ?assertEqual([], C2b),
+    [First | _] = Uids,
+    %% a flag change is reported as updated, when the server has CONDSTORE
+    {ok, _, {ok, _, _}} = mailio_imap_conn:run(Writer, fun(T) ->
+        {mailio_imap_proto:select(T, <<"INBOX">>), undefined}
+    end),
+    {ok, _, {ok, _, _}} = mailio_imap_conn:run(Writer, fun(T) ->
+        {
+            mailio_imap_proto:uid_store(T, {range, First, First}, {add, true}, [<<"\\Flagged">>]),
+            undefined
+        }
+    end),
+    {ok, C3, S3, done} = mailio_imap:fetch_changes_since(Conn, <<"INBOX">>, S2b, #{}),
+    case maps:get(condstore, Caps, false) of
+        true ->
+            ?assertMatch([{updated, #{uid := First}}], [U || {updated, _} = U <- C3]);
+        false ->
+            ok
+    end,
+    %% an expunge is reported as removed, when the server has QRESYNC
+    {ok, _, {ok, _, _}} = mailio_imap_conn:run(Writer, fun(T) ->
+        {
+            mailio_imap_proto:uid_store(
+                T, {range, First, First}, {add, true}, [<<"\\Deleted">>]
+            ),
+            undefined
+        }
+    end),
+    {ok, _, {ok, _, _}} = mailio_imap_conn:run(Writer, fun(T) ->
+        {mailio_imap_proto:expunge(T), undefined}
+    end),
+    {ok, C4, _S4, done} = mailio_imap:fetch_changes_since(Conn, <<"INBOX">>, S3, #{}),
+    case maps:get(qresync, Caps, false) of
+        true -> ?assertEqual([{removed, First}], [R || {removed, _} = R <- C4]);
+        false -> ok
+    end,
+    mailio_imap_conn:close(Writer),
+    mailio_imap:close(Conn).
+
 %%====================================================================
 %% POP3 cases
 %%====================================================================
@@ -338,6 +421,21 @@ pop3_implicit_tls(Config) ->
     {ok, C} = pop3_open(P, #{tls => true, port => maps:get(pop3_tls, P)}),
     ?assertMatch({ok, 1, _}, mailio_pop3:stat(C)),
     mailio_pop3:close(C).
+
+pop3_stls_verified(Config) ->
+    P = ?config(profile, Config),
+    case maps:get(pop3_stls, P, false) of
+        false ->
+            {skip, "the server does not offer STLS"};
+        true ->
+            seed(P, [message(<<"stls">>, <<"x\r\n">>)]),
+            {ok, C} = pop3_open(P, #{tls => starttls}),
+            ?assertMatch({ok, 1, _}, mailio_pop3:stat(C)),
+            mailio_pop3:close(C),
+            %% a server that offers STLS must not be used without it: the
+            %% default refuses to send the password in the clear
+            ?assertMatch({error, _}, pop3_open(P, #{tls => false}))
+    end.
 
 pop3_listing_limit_holds(Config) ->
     P = ?config(profile, Config),
@@ -420,7 +518,7 @@ imap_cfg(P, Extra) ->
             #{
                 host => host(P, Extra),
                 port => maps:get(imap, P),
-                tls => false,
+                tls => maps:get(plain_tls, P, false),
                 credentials => {password, maps:get(user, P), maps:get(pass, P)}
             },
             tls_opts(P)
@@ -436,7 +534,7 @@ pop3_open(P, Extra) ->
         #{
             host => host(P, Extra),
             port => maps:get(pop3, P),
-            tls => false,
+            tls => maps:get(plain_tls, P, false),
             credentials => {password, maps:get(user, P), maps:get(pass, P)}
         },
         tls_opts(P)
@@ -449,7 +547,7 @@ smtp_cfg(P, Extra) ->
             #{
                 host => host(P, Extra),
                 port => maps:get(smtp, P),
-                tls => false,
+                tls => maps:get(plain_tls, P, false),
                 ehlo_name => <<"interop.test">>,
                 credentials => {password, maps:get(user, P), maps:get(pass, P)}
             },
@@ -460,7 +558,7 @@ smtp_cfg(P, Extra) ->
 
 %% Certificates name a host: connect by that name when TLS is on.
 host(P, Extra) ->
-    case maps:get(tls, Extra, false) of
+    case maps:get(tls, Extra, maps:get(plain_tls, P, false)) of
         false -> <<"127.0.0.1">>;
         _ -> maps:get(tls_host, P, <<"127.0.0.1">>)
     end.

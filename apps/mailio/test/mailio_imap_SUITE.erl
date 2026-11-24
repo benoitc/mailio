@@ -22,6 +22,7 @@
     fetch_message/1,
     set_keywords/1,
     reads_open_read_only/1,
+    unchanged_mailbox_reports_nothing/1,
     writes_open_read_write/1
 ]).
 
@@ -33,6 +34,7 @@ all() ->
         fetch_message,
         set_keywords,
         reads_open_read_only,
+        unchanged_mailbox_reports_nothing,
         writes_open_read_write
     ].
 
@@ -149,3 +151,11 @@ writes_open_read_write(Config) ->
     ok = mailio_imap:set_keywords(Conn, <<"INBOX">>, 101, [?KW_FLAGGED], []),
     Cmds = mailio_fake_imap:commands(Srv),
     ?assertNotEqual([], [C || C <- Cmds, binary:match(C, <<"SELECT ">>) =/= nomatch]).
+
+%% `N:*' matches the highest message even when N is past it. A poll of a
+%% mailbox that did not change must not report that message again.
+unchanged_mailbox_reports_nothing(Config) ->
+    Conn = ?config(conn, Config),
+    {ok, [_, _], State, done} = mailio_imap:fetch_changes_since(Conn, <<"INBOX">>, initial, #{}),
+    {ok, [], State2, done} = mailio_imap:fetch_changes_since(Conn, <<"INBOX">>, State, #{}),
+    {ok, [], _, done} = mailio_imap:fetch_changes_since(Conn, <<"INBOX">>, State2, #{}).

@@ -409,7 +409,18 @@ handle_uid_fetch(Sock, Tag, Rest, #{messages := Ms} = State) ->
                     {continue, State};
                 false ->
                     Lo = set_low(SetBin),
-                    [send_meta(Sock, M) || {_, Uid, _, _, _} = M <- Ms, Uid >= Lo],
+                    %% like a real server: `N:*' always includes the highest
+                    %% message, even when N is past it (RFC 3501, section 9)
+                    Hits =
+                        case [M || {_, Uid, _, _, _} = M <- Ms, Uid >= Lo] of
+                            [] when
+                                Ms =/= [], binary_part(SetBin, byte_size(SetBin), -1) =:= <<"*">>
+                            ->
+                                [lists:last(Ms)];
+                            Found ->
+                                Found
+                        end,
+                    [send_meta(Sock, M) || M <- Hits],
                     tagged(Sock, Tag, <<"OK UID FETCH done">>),
                     {continue, State}
             end

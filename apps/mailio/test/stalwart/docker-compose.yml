@@ -1,0 +1,23 @@
+# Stalwart, an all-in-one mail server (IMAP4rev2 and IMAP4rev1, POP3, SMTP
+# submission, JMAP), for the interoperability suite: a server written
+# independently of Dovecot and GreenMail.
+#   IMAP 32143 (STARTTLS required)   IMAPS 32993
+#   POP3 32110 (STLS offered)        POP3S 32995
+#   SMTP 32025 (delivery)   submission 32587 (STARTTLS)   SMTPS 32465
+#   HTTP 38080 (management)
+# The server starts empty. Run ./setup.sh, which recreates it and creates the
+# domain interop.test and the user alice@interop.test (password interop-secret).
+services:
+  stalwart:
+    image: stalwartlabs/stalwart:latest
+    ports:
+      - "32143:143"
+      - "32993:993"
+      - "32110:110"
+      - "32995:995"
+      - "32025:25"
+      - "32587:587"
+      - "32465:465"
+      - "38080:8080"
+    environment:
+      STALWART_RECOVERY_ADMIN: "admin:interop-pass"
