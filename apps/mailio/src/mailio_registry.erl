@@ -81,7 +81,7 @@ init([]) ->
         public,
         {read_concurrency, true}
     ]),
-    {ok, #{monitors => #{}}}.
+    {ok, #{monitors => #{}, names => #{}}}.
 
 handle_call({register, Name, Pid}, _From, State) ->
     case ets:lookup(?TABLE, Name) of
@@ -95,18 +95,19 @@ handle_call({register, Name, Pid}, _From, State) ->
     end;
 handle_call({unregister, Name}, _From, State) ->
     ets:delete(?TABLE, Name),
-    {reply, ok, State};
+    {reply, ok, drop_monitor(Name, State)};
 handle_call(_Req, _From, State) ->
     {reply, {error, unknown_request}, State}.
 
 handle_cast(_Msg, State) ->
     {noreply, State}.
 
-handle_info({'DOWN', MRef, process, _Pid, _Reason}, #{monitors := Mons} = State) ->
+handle_info({'DOWN', MRef, process, Pid, _Reason}, #{monitors := Mons, names := Names} = State) ->
     case maps:take(MRef, Mons) of
         {Name, Mons1} ->
-            ets:delete(?TABLE, Name),
-            {noreply, State#{monitors => Mons1}};
+            %% Only remove the entry if it still belongs to the process that died.
+            ets:match_delete(?TABLE, {Name, Pid}),
+            {noreply, State#{monitors => Mons1, names => maps:remove(Name, Names)}};
         error ->
             {noreply, State}
     end;
@@ -120,7 +121,20 @@ terminate(_Reason, _State) ->
 %% Internal
 %%====================================================================
 
-do_register(Name, Pid, #{monitors := Mons} = State) ->
+do_register(Name, Pid, State0) ->
+    #{monitors := Mons, names := Names} = drop_monitor(Name, State0),
     ets:insert(?TABLE, {Name, Pid}),
     MRef = erlang:monitor(process, Pid),
-    {reply, yes, State#{monitors => maps:put(MRef, Name, Mons)}}.
+    {reply, yes, State0#{
+        monitors => maps:put(MRef, Name, Mons),
+        names => maps:put(Name, MRef, Names)
+    }}.
+
+drop_monitor(Name, #{monitors := Mons, names := Names} = State) ->
+    case maps:take(Name, Names) of
+        {MRef, Names1} ->
+            erlang:demonitor(MRef, [flush]),
+            State#{monitors => maps:remove(MRef, Mons), names => Names1};
+        error ->
+            State
+    end.
