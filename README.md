@@ -5,7 +5,7 @@ An Erlang/OTP umbrella for working with mail. This page tells you which app to u
 | App | What it is | Depends on |
 |---|---|---|
 | `apps/mailio` | Mail protocol and MIME library: IMAP client, POP3 client, SMTP submission, RFC 5322, MIME parse and render, charsets, HTML to text. No database. | OTP only |
-| `apps/mailio_store` | Mail store, sync, search, threading, rules and the agent surface | `mailio`, `barrel_docdb` |
+| `apps/mailio_store` | Mail store, sync, search, threading, rules and the agent surface. Raw messages can be [kept as files](apps/mailio_store/doc/blobs.md) | `mailio`, `barrel_docdb` |
 | `apps/mailio_mcp` | MCP server: find mail, read the part you need, draft and send. See [client setup](apps/mailio_mcp/doc/client-setup.md) | `mailio`, `barrel_mcp` |
 
 ## Build and test

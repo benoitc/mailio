@@ -13,7 +13,7 @@
 -export([find/2, find/3, explain/2, by_id_prefix/2]).
 -export([version_count/2]).
 -export([changes/2, changes/3, subscribe_changes/2, subscribe_path/2, unsubscribe/1]).
--export([put_attachment/4, get_attachment/3, open_attachment_stream/3,
+-export([put_attachment/4, get_attachment/3, delete_attachment/3, open_attachment_stream/3,
          read_attachment_chunk/1, close_attachment_stream/1]).
 
 -export_type([db/0, doc/0, doc_id/0, rev/0, cursor/0, change/0]).
@@ -240,3 +240,12 @@ read_attachment_chunk(Stream) ->
 -spec close_attachment_stream(map()) -> ok.
 close_attachment_stream(Stream) ->
     barrel_docdb:close_attachment_stream(Stream).
+
+%% @doc Remove an attachment from a document. A missing one is not an error.
+-spec delete_attachment(db(), doc_id(), binary()) -> ok | {error, term()}.
+delete_attachment(Db, DocId, Name) ->
+    case barrel_docdb:delete_attachment(Db, DocId, Name) of
+        ok -> ok;
+        {error, not_found} -> ok;
+        {error, _} = Err -> Err
+    end.

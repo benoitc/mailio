@@ -11,6 +11,7 @@
 -include("mailio_store.hrl").
 
 -export([check_counters/1, repair_counters/1, recompute/1]).
+-export([check_blobs/1, repair_blobs/2]).
 
 -export_type([drift/0]).
 
@@ -60,6 +61,17 @@ recompute(AccountId) ->
     Db = mailio_account:db_name(AccountId),
     {ok, Emails} = mailio_db:by_id_prefix(Db, <<?ID_EMAIL>>),
     lists:foldl(fun tally_email/2, #{}, Emails).
+
+%% @doc Blobs without bytes, files that no longer match their name, and files
+%% no document names. See {@link mailio_blob:check/1}.
+-spec check_blobs(binary()) -> {ok, map()}.
+check_blobs(AccountId) ->
+    mailio_blob:check(mailio_account:db_name(AccountId)).
+
+%% @doc Repair the blob store of an account. See {@link mailio_blob:repair/2}.
+-spec repair_blobs(binary(), map()) -> {ok, map()}.
+repair_blobs(AccountId, Opts) ->
+    mailio_blob:repair(mailio_account:db_name(AccountId), Opts).
 
 %%====================================================================
 %% Internal

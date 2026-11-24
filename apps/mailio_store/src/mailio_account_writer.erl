@@ -21,7 +21,7 @@
 
 -include("mailio_store.hrl").
 
--export([start_link/1, ingest/4, apply_flags/4, remove_member/3, gc_blobs/2]).
+-export([start_link/1, ingest/4, apply_flags/4, remove_member/3, gc_blobs/2, migrate_blobs/2]).
 -export([set_counters/4, patch/3]).
 -export([uidmap_id/3, lookup_uid/3]).
 -export([init/1, handle_call/3, handle_cast/2, handle_info/2, terminate/2]).
@@ -60,6 +60,12 @@ remove_member(AccountId, MailboxId, EmailId) ->
 
 %% @doc Sweep blobs orphaned longer than `GraceSecs', in the writer process
 %% so it cannot race a concurrent re-ingest. Returns the count swept.
+%% @doc Move blob bytes from attachments to files, serialized with ingestion.
+%% See mailio_blob:migrate_to_files/2.
+-spec migrate_blobs(binary(), map()) -> {ok, map()}.
+migrate_blobs(AccountId, Opts) ->
+    gen_server:call(via(AccountId), {migrate_blobs, Opts}, infinity).
+
 -spec gc_blobs(binary(), non_neg_integer()) -> {ok, non_neg_integer()}.
 gc_blobs(AccountId, GraceSecs) ->
     gen_server:call(via(AccountId), {gc_blobs, GraceSecs}, 60000).
@@ -121,6 +127,8 @@ handle_call({remove_member, MailboxId, EmailId}, _From, State) ->
     Result = do_remove_member(State#state.db, MailboxId, EmailId),
     State1 = emit_events(State),
     {reply, Result, State1};
+handle_call({migrate_blobs, Opts}, _From, State) ->
+    {reply, mailio_blob:migrate_to_files(State#state.db, Opts), State};
 handle_call({gc_blobs, GraceSecs}, _From, State) ->
     Result = mailio_blob:sweep(State#state.db, erlang:system_time(second), GraceSecs),
     {reply, Result, State};
