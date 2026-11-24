@@ -457,7 +457,8 @@ read_multi(C, Acc, Bytes, Max) ->
             end
     end.
 
-join(Lines) -> iolist_to_binary(lists:join(<<"\r\n">>, Lines)).
+%% Every line ends with CRLF, as it came, so the bytes are the message itself.
+join(Lines) -> iolist_to_binary([[L, <<"\r\n">>] || L <- Lines]).
 
 chomp(Bin) ->
     Sz = byte_size(Bin),

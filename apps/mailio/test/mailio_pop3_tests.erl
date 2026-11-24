@@ -300,3 +300,15 @@ serve_liar(S) ->
         {error, _} ->
             ok
     end.
+
+retr_returns_the_message_bytes_test() ->
+    Msg = msg(<<"exact">>, <<"last line\r\n">>),
+    with(#{messages => [{<<"u">>, Msg}]}, fun(Srv) ->
+        {ok, C} = mailio_pop3:open(cfg(Srv)),
+        {ok, Got} = mailio_pop3:retr(C, 1, 100000),
+        %% including the line ending of the last line
+        ?assertEqual(Msg, Got),
+        {ok, Top} = mailio_pop3:top(C, 1, 0),
+        ?assertMatch({_, _}, binary:match(Top, <<"Subject: exact\r\n">>)),
+        mailio_pop3:close(C)
+    end).

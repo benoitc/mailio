@@ -4,6 +4,10 @@
 
 ### Fixed
 
+- Reading a message over POP3 now returns exactly what the server stored. The
+  last line used to lose its line ending.
+- The IMAP connection now reports what the server supports even when the server
+  does not announce it at login. It used to report nothing.
 - A mail server can no longer make mailio use unlimited memory. Oversized IMAP
   lines and messages, oversized POP3 and SMTP replies, and messages with
   thousands of parts are refused or cut off at a limit. The limits can be

@@ -369,3 +369,13 @@ io_hook_counts_bytes_test() ->
             )
         )
     end).
+
+capabilities_are_known_after_login_test() ->
+    with(#{}, fun(Srv) ->
+        {ok, Pid} = mailio_imap_conn:start_link(
+            cfg(Srv, #{credentials => {password, <<"u">>, <<"p">>}})
+        ),
+        Caps = [string:uppercase(C) || C <- mailio_imap_conn:capabilities(Pid)],
+        ?assert(lists:member(<<"IMAP4REV1">>, Caps)),
+        mailio_imap_conn:close(Pid)
+    end).

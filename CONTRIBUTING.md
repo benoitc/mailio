@@ -111,6 +111,21 @@ Then the suites against real servers that your change touches (see AGENTS.md).
 - A test must fail for one reason. A test that also passes when the call crashes,
   or that asserts a value it computed itself, is worse than no test.
 
+## Interoperability tests
+
+`apps/mailio/test/mailio_interop_SUITE.erl` runs the library's IMAP, POP3 and SMTP clients and the MIME code against real servers, with no MCP server or store involved. You run it when you change anything that reads or writes bytes for a server, or the MIME code. A server that is not running is skipped with one message.
+
+| Server | Gives you | Start it |
+|---|---|---|
+| Dovecot | IMAP and POP3, STARTTLS and implicit TLS, QRESYNC | `apps/mailio/test/mailpit/gen-certs.sh`, then `(cd apps/mailio_mcp/test/dovecot && docker compose up -d --build)` |
+| GreenMail | IMAP, POP3 and SMTP that delivers to the mailbox, implicit TLS | `(cd apps/mailio_mcp/test && docker compose up -d)` |
+
+```bash
+rebar3 ct --suite apps/mailio/test/mailio_interop_SUITE
+```
+
+Each case takes a server profile (ports, user, how its certificate is verified), so a new server is one more profile and one more group, not new cases. The suite covers: a message surviving render, SMTP, delivery, IMAP or POP3 and parse unchanged (UTF-8, a 300 KB attachment, a line that starts with a dot); reading never marking mail as seen; wrong passwords not being retried; IDLE waking for new mail; TLS being verified and an untrusted certificate refused; and the size limits holding against a server that is not ours.
+
 ## Documentation
 
 Write guides in the task-oriented style the existing ones use: one paragraph

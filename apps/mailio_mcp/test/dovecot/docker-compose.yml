@@ -1,6 +1,7 @@
 # A real IMAP server with CONDSTORE, QRESYNC, STARTTLS and implicit TLS, for
 # the adapter tests that the fake and GreenMail servers cannot cover.
 #   IMAP     31143 (STARTTLS offered)   IMAPS 31993
+#   POP3     31110 (STLS offered)       POP3S 31995
 #   user     testuser / testpass
 # The certificate comes from the Mailpit test setup: run
 # apps/mailio/test/mailpit/gen-certs.sh once, then docker compose up -d.
@@ -10,6 +11,8 @@ services:
     ports:
       - "31143:143"
       - "31993:993"
+      - "31110:110"
+      - "31995:995"
     volumes:
       - ./dovecot.conf:/etc/dovecot/dovecot.conf:ro
       - ./users:/etc/dovecot/users:ro

@@ -93,7 +93,15 @@ run(Pid, Builder, Timeout) ->
 
 -spec capabilities(pid()) -> [binary()].
 capabilities(Pid) ->
-    gen_statem:call(Pid, capabilities).
+    case gen_statem:call(Pid, capabilities) of
+        [] ->
+            %% A server need not announce its capabilities with the login reply:
+            %% ask once, then answer from what the connection learned.
+            _ = run(Pid, fun(Tag) -> {mailio_imap_proto:capability(Tag), undefined} end),
+            gen_statem:call(Pid, capabilities);
+        Caps ->
+            Caps
+    end.
 
 %% @doc Enter IDLE; unsolicited events are sent to NotifyPid as
 %% `{imap_idle_event, self(), Event}'.
