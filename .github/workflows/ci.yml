@@ -101,6 +101,9 @@ jobs:
           key: ${{ runner.os }}-interop-${{ hashFiles('apps/*/rebar.config', 'rebar.config') }}
           restore-keys: ${{ runner.os }}-interop-
 
+      # the stdio test starts bin/mailio-mcp, which loads the default build
+      - run: rebar3 compile
+
       - name: Test certificates
         run: apps/mailio/test/mailpit/gen-certs.sh
 

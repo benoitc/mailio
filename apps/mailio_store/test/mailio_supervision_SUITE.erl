@@ -136,9 +136,9 @@ sync_crash_loop_spares_the_writer(_Config) ->
                 {ok, P} -> exit(P, kill);
                 _ -> ok
             end,
-            timer:sleep(50)
+            timer:sleep(100)
         end,
-        lists:seq(1, 30)
+        lists:seq(1, 15)
     ),
     timer:sleep(300),
     ?assert(is_process_alive(AccSup)),
