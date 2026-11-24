@@ -221,3 +221,83 @@ starttls_test() ->
         ?assertEqual(smtp_tls_failed, code(E)),
         ?assertEqual(0, mailio_fake_smtp:data_count(Srv))
     end).
+
+%%====================================================================
+%% Bounded replies
+%%====================================================================
+
+%% A raw server where Reply(Command) gives the reply to each command and
+%% Reply(data_end) the reply after the message body.
+raw(Reply) ->
+    {ok, L} = gen_tcp:listen(0, [binary, {active, false}, {packet, line}, {reuseaddr, true}]),
+    {ok, Port} = inet:port(L),
+    spawn_link(fun() ->
+        {ok, S} = gen_tcp:accept(L),
+        gen_tcp:send(S, <<"220 hi\r\n">>),
+        raw_loop(S, Reply)
+    end),
+    {L, #{host => <<"127.0.0.1">>, port => Port, tls => false, ehlo_name => <<"t">>}}.
+
+raw_loop(S, Reply) ->
+    case gen_tcp:recv(S, 0, 3000) of
+        {ok, <<"DATA", _/binary>>} ->
+            gen_tcp:send(S, <<"354 go\r\n">>),
+            raw_body(S),
+            gen_tcp:send(S, Reply(data_end)),
+            raw_loop(S, Reply);
+        {ok, Line} ->
+            [Cmd | _] = binary:split(Line, [<<" ">>, <<"\r">>]),
+            gen_tcp:send(S, Reply(Cmd)),
+            raw_loop(S, Reply);
+        {error, _} ->
+            ok
+    end.
+
+raw_body(S) ->
+    case gen_tcp:recv(S, 0, 3000) of
+        {ok, <<".\r\n">>} -> ok;
+        {ok, _} -> raw_body(S);
+        {error, _} -> ok
+    end.
+
+normal(<<"EHLO">>) -> <<"250 ok\r\n">>;
+normal(<<"MAIL">>) -> <<"250 ok\r\n">>;
+normal(<<"RCPT">>) -> <<"250 ok\r\n">>;
+normal(<<"QUIT">>) -> <<"221 bye\r\n">>;
+normal(data_end) -> <<"250 queued\r\n">>;
+normal(_) -> <<"250 ok\r\n">>.
+
+reply_with_too_many_lines_before_body_is_transient_test() ->
+    {L, Cfg} = raw(fun
+        (<<"EHLO">>) -> [<<"250-line\r\n">> || _ <- lists:seq(1, 500)] ++ [<<"250 end\r\n">>];
+        (C) -> normal(C)
+    end),
+    R = mailio_smtp:submit(Cfg, <<"a@x">>, [<<"b@y">>], ?MSG),
+    ?assertEqual(smtp_transient, code(R)),
+    ?assert(retryable(R)),
+    gen_tcp:close(L).
+
+very_long_reply_line_is_refused_test() ->
+    {L, Cfg} = raw(fun
+        (<<"EHLO">>) -> [<<"250 ">>, binary:copy(<<"x">>, 8000), <<"\r\n">>];
+        (C) -> normal(C)
+    end),
+    ?assertEqual(smtp_transient, code(mailio_smtp:submit(Cfg, <<"a@x">>, [<<"b@y">>], ?MSG))),
+    gen_tcp:close(L).
+
+oversized_final_reply_leaves_the_outcome_unknown_test() ->
+    {L, Cfg} = raw(fun
+        (data_end) -> [<<"250-more\r\n">> || _ <- lists:seq(1, 500)] ++ [<<"250 end\r\n">>];
+        (C) -> normal(C)
+    end),
+    R = mailio_smtp:submit(Cfg, <<"a@x">>, [<<"b@y">>], ?MSG),
+    ?assertEqual(smtp_outcome_unknown, code(R)),
+    gen_tcp:close(L).
+
+multi_line_reply_under_the_limit_works_test() ->
+    {L, Cfg} = raw(fun
+        (<<"EHLO">>) -> [<<"250-line\r\n">> || _ <- lists:seq(1, 30)] ++ [<<"250 end\r\n">>];
+        (C) -> normal(C)
+    end),
+    ?assertMatch({ok, _}, mailio_smtp:submit(Cfg, <<"a@x">>, [<<"b@y">>], ?MSG)),
+    gen_tcp:close(L).

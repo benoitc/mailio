@@ -23,6 +23,9 @@
 
 -export_type([config/0, result/0]).
 
+-define(MAX_REPLY_LINES, 100).
+-define(MAX_REPLY_LINE, 4096).
+-define(MAX_REPLY_BYTES, 65536).
 -define(TIMEOUT, 30000).
 
 -type config() :: map().
@@ -372,15 +375,22 @@ read_reply(C) ->
         {error, R} -> transient(recv, #{reason => R})
     end.
 
-read_reply_quiet(C) -> read_reply(C, []).
+read_reply_quiet(C) -> read_reply(C, [], 0).
 
-read_reply(#c{mod = M, sock = S} = C, Acc) ->
+%% A reply is at most ?MAX_REPLY_LINES lines, ?MAX_REPLY_LINE bytes a line and
+%% ?MAX_REPLY_BYTES bytes in all: a server cannot make us buffer without bound.
+read_reply(_C, Acc, Bytes) when length(Acc) >= ?MAX_REPLY_LINES; Bytes > ?MAX_REPLY_BYTES ->
+    {error, reply_too_large};
+read_reply(#c{mod = M, sock = S} = C, Acc, Bytes) ->
     case M:recv(S, 0, ?TIMEOUT) of
+        {ok, Line} when byte_size(Line) > ?MAX_REPLY_LINE ->
+            {error, reply_too_large};
         {ok, Line} ->
             L = chomp(Line),
+            Bytes1 = Bytes + byte_size(Line),
             case L of
                 <<_:3/binary, $-, Rest/binary>> ->
-                    read_reply(C, [Rest | Acc]);
+                    read_reply(C, [Rest | Acc], Bytes1);
                 <<Code:3/binary, Rest/binary>> ->
                     try binary_to_integer(Code) of
                         N ->
