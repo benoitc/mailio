@@ -152,6 +152,16 @@ token_fun_is_resolved_test() ->
         ?assertMatch([{xoauth2, _}], mailio_fake_smtp:auth_seen(Srv))
     end).
 
+credential_provider_error_does_not_leak_test() ->
+    with(#{auth => plain}, fun(Srv) ->
+        F = fun() -> {error, {provider_failed, <<"secret material">>}} end,
+        E = mailio_smtp:submit(
+            cfg(Srv, #{credentials => {token_fun, F}}), <<"a@x">>, [<<"b@y">>], ?MSG
+        ),
+        ?assertEqual(smtp_auth_failed, code(E)),
+        ?assertEqual(#{}, detail(E))
+    end).
+
 %%--------------------------------------------------------------------
 %% TLS: certificates are generated for the test; the host name is checked
 

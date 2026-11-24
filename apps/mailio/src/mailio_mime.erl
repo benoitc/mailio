@@ -91,13 +91,16 @@ classify(Base, <<"multipart">>, _Sub, CtParams, Body, Depth, Budget) ->
         _Boundary when Depth >= ?MAX_DEPTH ->
             leaf(add_defect(Base, max_depth_exceeded), Body);
         Boundary ->
-            case split_parts(Body, Boundary) of
-                {[], _Closed} ->
+            Remaining = max(0, max_parts() - counters:get(Budget, 1)),
+            case split_parts(Body, Boundary, Remaining) of
+                {[], _Closed, true} ->
+                    leaf(add_defect(Base, too_many_parts), Body);
+                {[], _Closed, false} ->
                     leaf(add_defect(Base, empty_multipart), Body);
-                {PartBins, Closed} ->
+                {PartBins, Closed, SplitDropped} ->
                     {Children, Dropped} = parse_children(PartBins, Depth + 1, Budget, []),
                     B0 =
-                        case Dropped of
+                        case SplitDropped orelse Dropped of
                             true -> add_defect(Base, too_many_parts);
                             false -> Base
                         end,
@@ -150,27 +153,36 @@ add_defect(#{defects := D} = Part, Defect) ->
 
 %% Returns {[PartBytes], Closed :: boolean()}. The preamble (before the
 %% first delimiter) and epilogue (after the close delimiter) are dropped.
-split_parts(Body, Boundary) ->
+split_parts(Body, Boundary, MaxParts) ->
     Delim = <<"\n--", Boundary/binary>>,
     %% Prepend a newline so a delimiter at offset 0 is matched too; the
     %% resulting empty preamble is discarded.
-    Segments = binary:split(<<"\n", Body/binary>>, Delim, [global]),
-    case Segments of
+    case binary:split(<<"\n", Body/binary>>, Delim) of
         %% no delimiter found at all
-        [_Preamble] -> {[], false};
-        [_Preamble | Rest] -> collect_segments(Rest, [])
+        [_Preamble] -> {[], false, false};
+        [_Preamble, Rest] -> collect_segments(Rest, Delim, MaxParts, [])
     end.
 
-collect_segments([], Acc) ->
-    %% Ran out without a close delimiter.
-    {lists:reverse(Acc), false};
-collect_segments([Seg | Rest], Acc) ->
+%% Split one boundary at a time so a message with millions of delimiters never
+%% creates an unbounded intermediate list before the part budget is applied.
+collect_segments(<<"--", _/binary>>, _Delim, 0, Acc) ->
+    {lists:reverse(Acc), true, false};
+collect_segments(<<>>, _Delim, 0, Acc) ->
+    {lists:reverse(Acc), false, false};
+collect_segments(_Rest, _Delim, 0, Acc) ->
+    {lists:reverse(Acc), false, true};
+collect_segments(Rest, Delim, Left, Acc) ->
+    [Seg | Tail] = binary:split(Rest, Delim),
     case Seg of
         <<"--", _/binary>> ->
             %% Close delimiter: everything after is epilogue.
-            {lists:reverse(Acc), true};
+            {lists:reverse(Acc), true, false};
         _ ->
-            collect_segments(Rest, [clean_part(Seg) | Acc])
+            Acc1 = [clean_part(Seg) | Acc],
+            case Tail of
+                [] -> {lists:reverse(Acc1), false, false};
+                [Next] -> collect_segments(Next, Delim, Left - 1, Acc1)
+            end
     end.
 
 %% A raw segment is `[transport-padding] CRLF <part> CR' (the trailing LF

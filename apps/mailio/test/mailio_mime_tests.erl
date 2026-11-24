@@ -147,3 +147,26 @@ message_under_the_budget_is_untouched_test() ->
     P = mailio_mime:parse(flat_multipart(20)),
     ?assertEqual(21, count_parts(P)),
     ?assertNot(lists:member(too_many_parts, mailio_mime:defects(P))).
+
+part_budget_is_applied_before_building_the_segment_list_test() ->
+    Raw = flat_multipart(20000),
+    application:set_env(mailio, max_mime_parts, 4),
+    Parent = self(),
+    try
+        {Pid, MRef} = spawn_monitor(fun() ->
+            process_flag(max_heap_size, #{size => 50000, kill => true, error_logger => false}),
+            Parent ! {parsed, count_parts(mailio_mime:parse(Raw))}
+        end),
+        receive
+            {parsed, Count} ->
+                erlang:demonitor(MRef, [flush]),
+                ?assertEqual(4, Count);
+            {'DOWN', MRef, process, Pid, Reason} ->
+                error({parse_process_died, Reason})
+        after 5000 ->
+            exit(Pid, kill),
+            ?assert(false)
+        end
+    after
+        application:unset_env(mailio, max_mime_parts)
+    end.

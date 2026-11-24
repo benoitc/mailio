@@ -86,7 +86,7 @@ connect(#{host := Host} = Config) ->
 default_port(true) -> 465;
 default_port(_) -> 587.
 
-sock_opts() -> [{active, false}, binary, {packet, line}].
+sock_opts() -> [{active, false}, binary, {packet, line}, {packet_size, ?MAX_REPLY_LINE}].
 
 ssl_opts(#{host := Host} = Config) ->
     Base = [{server_name_indication, to_list(Host)}, {versions, ['tlsv1.3', 'tlsv1.2']}],
@@ -139,7 +139,7 @@ ehlo(#c{config = Config} = C, Config) ->
             ok = inet:setopts(C#c.sock, [{packet, raw}]),
             case ssl:connect(C#c.sock, ssl_opts(Config), ?TIMEOUT) of
                 {ok, S} ->
-                    ok = ssl:setopts(S, [{packet, line}]),
+                    ok = ssl:setopts(S, [{packet, line}, {packet_size, ?MAX_REPLY_LINE}]),
                     C2 = C#c{mod = ssl, sock = S},
                     {250, Text2} = cmd(C2, [<<"EHLO ">>, Name]),
                     {C2, caps(Text2)};
@@ -166,13 +166,13 @@ force({token_fun, F}) ->
     case F() of
         {ok, Cred} ->
             force(Cred);
-        {error, R} ->
+        {error, _Reason} ->
             throw(
                 {mailio_smtp,
                     mailio_error:new(
                         smtp_auth_failed,
                         <<"credentials unavailable">>,
-                        #{reason => R}
+                        #{}
                     )}
             )
     end;
@@ -379,7 +379,7 @@ read_reply_quiet(C) -> read_reply(C, [], 0).
 
 %% A reply is at most ?MAX_REPLY_LINES lines, ?MAX_REPLY_LINE bytes a line and
 %% ?MAX_REPLY_BYTES bytes in all: a server cannot make us buffer without bound.
-read_reply(_C, Acc, Bytes) when length(Acc) >= ?MAX_REPLY_LINES; Bytes > ?MAX_REPLY_BYTES ->
+read_reply(_C, Acc, _Bytes) when length(Acc) >= ?MAX_REPLY_LINES ->
     {error, reply_too_large};
 read_reply(#c{mod = M, sock = S} = C, Acc, Bytes) ->
     case M:recv(S, 0, ?TIMEOUT) of
@@ -388,24 +388,30 @@ read_reply(#c{mod = M, sock = S} = C, Acc, Bytes) ->
         {ok, Line} ->
             L = chomp(Line),
             Bytes1 = Bytes + byte_size(Line),
-            case L of
-                <<_:3/binary, $-, Rest/binary>> ->
-                    read_reply(C, [Rest | Acc], Bytes1);
-                <<Code:3/binary, Rest/binary>> ->
-                    try binary_to_integer(Code) of
-                        N ->
-                            {ok,
-                                {N,
-                                    iolist_to_binary(
-                                        lists:join(
-                                            <<"\n">>, lists:reverse([string:trim(Rest) | Acc])
-                                        )
-                                    )}}
-                    catch
-                        error:badarg -> {error, bad_reply}
-                    end;
-                _ ->
-                    {error, bad_reply}
+            case Bytes1 > ?MAX_REPLY_BYTES of
+                true ->
+                    {error, reply_too_large};
+                false ->
+                    case L of
+                        <<_:3/binary, $-, Rest/binary>> ->
+                            read_reply(C, [Rest | Acc], Bytes1);
+                        <<Code:3/binary, Rest/binary>> ->
+                            try binary_to_integer(Code) of
+                                N ->
+                                    {ok,
+                                        {N,
+                                            iolist_to_binary(
+                                                lists:join(
+                                                    <<"\n">>,
+                                                    lists:reverse([string:trim(Rest) | Acc])
+                                                )
+                                            )}}
+                            catch
+                                error:badarg -> {error, bad_reply}
+                            end;
+                        _ ->
+                            {error, bad_reply}
+                    end
             end;
         {error, R} ->
             {error, R}

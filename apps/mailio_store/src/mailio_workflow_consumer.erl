@@ -77,10 +77,11 @@ init(#{account_id := Account, name := Name} = Args) ->
         handler = maps:get(handler, Args),
         cursor = Cursor
     },
-    case maps:get(subscribe, Args, false) of
-        true -> _ = mailio_events:subscribe(#{account => Account, types => State#state.types});
-        false -> ok
-    end,
+    _ =
+        case maps:get(subscribe, Args, false) of
+            true -> mailio_events:subscribe(#{account => Account, types => State#state.types});
+            false -> ok
+        end,
     {ok, State}.
 
 handle_call(run, _From, State) ->

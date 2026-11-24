@@ -25,5 +25,7 @@
 - Reading mail now opens mailboxes read-only. Only changing flags, moving and
   deleting open them for writing.
 - Unsubscribing from events no longer leaks a monitor.
+- POP3 and SMTP credential-provider failures no longer copy provider details
+  into errors returned to callers.
 - The Dovecot test suite waits once for the server and then skips with one
   clear message, instead of failing or skipping each case.

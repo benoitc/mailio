@@ -31,6 +31,7 @@
 %% `max_top_bytes'.
 -define(MAX_LIST_BYTES, 33554432).
 -define(MAX_TOP_BYTES, 1048576).
+-define(MAX_LINE_BYTES, 65536).
 -define(RETR_SLACK, 65536).
 
 -opaque conn() :: #{mod := gen_tcp | ssl, sock := term(), caps := [binary()], config := map()}.
@@ -74,12 +75,12 @@ capabilities(#{caps := Caps}) -> Caps.
 connect(Host, Port, Config) ->
     case maps:get(tls, Config, starttls) of
         true ->
-            case ssl:connect(Host, Port, ssl_opts(Config, Host) ++ sock_opts(), ?TIMEOUT) of
+            case ssl:connect(Host, Port, ssl_opts(Config, Host) ++ sock_opts(Config), ?TIMEOUT) of
                 {ok, S} -> {ssl, S};
                 {error, R} -> fail(tls_failed(R))
             end;
         _ ->
-            case gen_tcp:connect(Host, Port, sock_opts(), ?TIMEOUT) of
+            case gen_tcp:connect(Host, Port, sock_opts(Config), ?TIMEOUT) of
                 {ok, S} ->
                     {gen_tcp, S};
                 {error, R} ->
@@ -93,7 +94,13 @@ connect(Host, Port, Config) ->
             end
     end.
 
-sock_opts() -> [{active, false}, binary, {packet, line}].
+sock_opts(Config) ->
+    [
+        {active, false},
+        binary,
+        {packet, line},
+        {packet_size, maps:get(max_line_bytes, Config, ?MAX_LINE_BYTES)}
+    ].
 
 ssl_opts(Config, Host) ->
     Base = [{server_name_indication, Host}, {versions, ['tlsv1.3', 'tlsv1.2']}],
@@ -145,7 +152,10 @@ stls(#{mod := gen_tcp, config := Config} = C) ->
             Host = to_list(maps:get(host, Config)),
             case ssl:connect(maps:get(sock, C), ssl_opts(Config, Host), ?TIMEOUT) of
                 {ok, S} ->
-                    ok = ssl:setopts(S, [{packet, line}]),
+                    ok = ssl:setopts(S, [
+                        {packet, line},
+                        {packet_size, maps:get(max_line_bytes, Config, ?MAX_LINE_BYTES)}
+                    ]),
                     refresh_caps(C#{mod := ssl, sock := S});
                 {error, R} ->
                     fail(tls_failed(R))
@@ -166,8 +176,8 @@ force({token_fun, F}) ->
     case F() of
         {ok, Cred} ->
             force(Cred);
-        {error, R} ->
-            fail(mailio_error:new(pop3_auth_failed, <<"credentials unavailable">>, #{reason => R}))
+        {error, _Reason} ->
+            fail(mailio_error:new(pop3_auth_failed, <<"credentials unavailable">>, #{}))
     end;
 force(Cred) ->
     Cred.
@@ -390,6 +400,14 @@ read_line(#{mod := M, sock := S}) ->
     case M:recv(S, 0, ?TIMEOUT) of
         {ok, L} ->
             {ok, chomp(L)};
+        {error, emsgsize} ->
+            fail(
+                mailio_error:new(
+                    pop3_response_too_large,
+                    <<"the POP3 reply line is larger than the limit">>,
+                    #{}
+                )
+            );
         {error, timeout} ->
             fail(mailio_error:new(pop3_timeout, <<"the POP3 server did not answer in time">>, #{}));
         {error, R} ->
@@ -415,20 +433,25 @@ limit(#{config := Config}, top) -> maps:get(max_top_bytes, Config, ?MAX_TOP_BYTE
 
 %% Multi-line reply ended by a lone dot; dot-unstuffed. A reply that grows
 %% past `Max' bytes ends the connection.
-read_multi(C, _Acc, Bytes, Max) when Bytes > Max ->
-    close(C),
-    fail(
-        mailio_error:new(pop3_response_too_large, <<"the POP3 reply is larger than the limit">>, #{
-            limit => Max
-        })
-    );
 read_multi(C, Acc, Bytes, Max) ->
     {ok, L} = read_line(C),
     Bytes1 = Bytes + byte_size(L) + 2,
-    case L of
-        <<".">> -> lists:reverse(Acc);
-        <<"..", R/binary>> -> read_multi(C, [<<".", R/binary>> | Acc], Bytes1, Max);
-        _ -> read_multi(C, [L | Acc], Bytes1, Max)
+    case Bytes1 > Max of
+        true ->
+            close(C),
+            fail(
+                mailio_error:new(
+                    pop3_response_too_large,
+                    <<"the POP3 reply is larger than the limit">>,
+                    #{limit => Max}
+                )
+            );
+        false ->
+            case L of
+                <<".">> -> lists:reverse(Acc);
+                <<"..", R/binary>> -> read_multi(C, [<<".", R/binary>> | Acc], Bytes1, Max);
+                _ -> read_multi(C, [L | Acc], Bytes1, Max)
+            end
     end.
 
 join(Lines) -> iolist_to_binary(lists:join(<<"\r\n">>, Lines)).

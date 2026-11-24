@@ -31,9 +31,14 @@ run(Fun, Timeout) when is_function(Fun, 0) ->
             {error, {crashed, Reason}}
     after Timeout ->
         exit(Pid, kill),
-        erlang:demonitor(MRef, [flush]),
         receive
-            {Ref, Result} -> Result
-        after 0 -> {error, timeout}
-        end
+            {'DOWN', MRef, process, Pid, _} -> ok
+        end,
+        %% A result racing with the timeout does not change the timeout
+        %% contract. Discard it after the isolated process is certainly dead.
+        receive
+            {Ref, _Result} -> ok
+        after 0 -> ok
+        end,
+        {error, timeout}
     end.

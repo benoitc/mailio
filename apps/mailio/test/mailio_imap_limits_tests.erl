@@ -96,3 +96,40 @@ legal_large_literal_still_works_test() ->
     ?assertMatch({ok, [_ | _], {ok, _, _}}, noop(C)),
     mailio_imap_conn:close(C),
     gen_tcp:close(L).
+
+oversized_unsolicited_response_is_terminal_test() ->
+    Parent = self(),
+    {ok, L} = gen_tcp:listen(0, [binary, {active, false}, {reuseaddr, true}]),
+    {ok, Port} = inet:port(L),
+    Server = spawn_link(fun() ->
+        {ok, S} = gen_tcp:accept(L),
+        ok = gen_tcp:send(S, <<"* PREAUTH ready\r\n">>),
+        receive
+            send_oversized ->
+                ok = gen_tcp:send(S, binary:copy(<<"x">>, 8192)),
+                Parent ! oversized_sent
+        end,
+        timer:sleep(500),
+        gen_tcp:close(S)
+    end),
+    C = connect(Port, #{max_line => 4096}),
+    ok = wait_state(C, ready, 100),
+    Server ! send_oversized,
+    receive
+        oversized_sent -> ok
+    after 1000 -> error(server_timeout)
+    end,
+    ok = wait_state(C, response_too_large, 100),
+    ?assertEqual({error, response_too_large}, noop(C)),
+    gen_tcp:close(L).
+
+wait_state(_Pid, _Expected, 0) ->
+    error(state_timeout);
+wait_state(Pid, Expected, Left) ->
+    case sys:get_state(Pid) of
+        {Expected, _} ->
+            ok;
+        _ ->
+            timer:sleep(10),
+            wait_state(Pid, Expected, Left - 1)
+    end.

@@ -377,7 +377,10 @@ ready(info, {T, Sock, Bin}, #data{sock = Sock} = Data) when
 ->
     %% Unsolicited data while idle-at-ready: buffer and drop framed responses.
     Data1 = set_active(append_buf(Data, Bin)),
-    {keep_state, drain_unsolicited(Data1)};
+    case drain_unsolicited(Data1) of
+        {ok, Data2} -> {keep_state, Data2};
+        {error, response_too_large} -> {next_state, response_too_large, Data1}
+    end;
 ready(info, Event, Data) ->
     handle_socket_closed(Event, Data).
 
@@ -519,8 +522,8 @@ maybe_capture_caps(Data, _) -> Data.
 %% stray unsolicited data we are not actively collecting).
 drain_unsolicited(Data) ->
     case take_one(Data) of
-        more -> Data;
-        {error, response_too_large} -> Data#data{buffer = <<>>};
+        more -> {ok, Data};
+        {error, response_too_large} -> {error, response_too_large};
         {ok, _Resp, Data1} -> drain_unsolicited(Data1)
     end.
 

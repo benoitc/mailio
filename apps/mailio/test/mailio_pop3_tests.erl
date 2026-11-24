@@ -33,6 +33,7 @@ with(Opts, Fun) ->
     end.
 
 code({error, #{code := C}}) -> C.
+detail({error, #{detail := D}}) -> D.
 
 listing_and_identity_test() ->
     with(#{messages => msgs()}, fun(Srv) ->
@@ -118,6 +119,14 @@ connect_refused_test() ->
     E = mailio_pop3:open(#{host => <<"127.0.0.1">>, port => Port, tls => false}),
     ?assertEqual(pop3_connect_failed, code(E)),
     ?assert(mailio_error:is_retryable(E)).
+
+credential_provider_error_does_not_leak_test() ->
+    with(#{messages => msgs()}, fun(Srv) ->
+        F = fun() -> {error, {provider_failed, <<"secret material">>}} end,
+        E = mailio_pop3:open(cfg(Srv, #{credentials => {token_fun, F}})),
+        ?assertEqual(pop3_auth_failed, code(E)),
+        ?assertEqual(#{}, detail(E))
+    end).
 
 authentication_test() ->
     with(#{messages => msgs(), auth => #{pass => <<"p">>}}, fun(Srv) ->
@@ -213,6 +222,23 @@ oversized_listing_is_refused_test() ->
         %% the connection was closed, not left half read
         ?assertEqual(pop3_disconnected, code(mailio_pop3:stat(C)))
     end).
+
+oversized_line_is_refused_while_read_test() ->
+    {ok, L} = gen_tcp:listen(0, [binary, {active, false}, {reuseaddr, true}]),
+    {ok, Port} = inet:port(L),
+    spawn_link(fun() ->
+        {ok, S} = gen_tcp:accept(L),
+        gen_tcp:send(S, [<<"+OK ">>, binary:copy(<<"x">>, 1000), <<"\r\n">>]),
+        gen_tcp:close(S)
+    end),
+    E = mailio_pop3:open(#{
+        host => <<"127.0.0.1">>,
+        port => Port,
+        tls => false,
+        max_line_bytes => 128
+    }),
+    ?assertEqual(pop3_response_too_large, code(E)),
+    gen_tcp:close(L).
 
 listing_under_the_limit_works_test() ->
     with(#{messages => many_msgs(400)}, fun(Srv) ->
