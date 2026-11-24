@@ -30,6 +30,7 @@
 -define(MAX_REPLY_LINE, 4096).
 -define(MAX_REPLY_BYTES, 65536).
 -define(TIMEOUT, 30000).
+-define(TRACKED, mailio_smtp_submit).
 
 -type config() :: map().
 -type result() :: #{
@@ -45,16 +46,38 @@
     {ok, result()} | mailio_error:t().
 submit(Config, From, Rcpts, Data) ->
     try
-        C0 = connect(Config),
+        C0 = track(connect(Config)),
         {220, _} = read_reply(C0),
         {C1, Caps} = ehlo(C0, Config),
-        C2 = auth(C1, Config, Caps),
+        C2 = auth(track(C1), Config, Caps),
         session(C2, From, Rcpts, Data)
     catch
         throw:{mailio_smtp, Error} ->
             Error;
         error:{badmatch, {Code, Text}} when is_integer(Code) ->
             transient(unexpected_reply, #{code => Code, reply => bin(Text)})
+    after
+        release()
+    end.
+
+%% The newest connection of a submission in progress. Whatever ends the call,
+%% its socket is closed here: a failed TLS upgrade leaves the plain socket
+%% open, and a finished session never closed it.
+track(C) ->
+    put(?TRACKED, C),
+    C.
+
+release() ->
+    case erase(?TRACKED) of
+        #c{mod = M, sock = S} -> catch_all(fun() -> M:close(S) end);
+        undefined -> ok
+    end.
+
+catch_all(F) ->
+    try
+        F()
+    catch
+        _:_ -> ok
     end.
 
 %%====================================================================
@@ -161,26 +184,27 @@ has(Caps, Word) ->
 
 auth(C, Config, Caps) ->
     case maps:get(credentials, Config, undefined) of
-        undefined -> C;
-        Cred -> auth_with(C, force(Cred), Caps)
+        undefined ->
+            C;
+        Cred ->
+            case mailio_credentials:resolve(Cred, cred_opts(Config)) of
+                {ok, Resolved} ->
+                    auth_with(C, Resolved, Caps);
+                {error, _Why} ->
+                    %% the provider's own words may hold a secret: not repeated
+                    throw(
+                        {mailio_smtp,
+                            mailio_error:new(
+                                smtp_auth_failed,
+                                <<"credentials unavailable">>,
+                                #{}
+                            )}
+                    )
+            end
     end.
 
-force({token_fun, F}) ->
-    case F() of
-        {ok, Cred} ->
-            force(Cred);
-        {error, _Reason} ->
-            throw(
-                {mailio_smtp,
-                    mailio_error:new(
-                        smtp_auth_failed,
-                        <<"credentials unavailable">>,
-                        #{}
-                    )}
-            )
-    end;
-force(Cred) ->
-    Cred.
+cred_opts(#{credentials_timeout := T}) -> #{timeout => T};
+cred_opts(_) -> #{}.
 
 auth_with(C, {oauth2, User, Token}, _Caps) ->
     Init = base64:encode(<<"user=", User/binary, 1, "auth=Bearer ", Token/binary, 1, 1>>),

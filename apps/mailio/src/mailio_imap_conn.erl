@@ -199,18 +199,21 @@ mailio_tls_opts(Config) ->
             ]
     end.
 
-%% The credentials from the config, forcing a token_fun.
-credentials(#{credentials := Cred}) -> force_credentials(Cred);
-credentials(#{username := User, password := Pass}) -> {password, User, Pass};
-credentials(_) -> {error, no_credentials}.
-
-force_credentials({token_fun, F}) ->
-    case F() of
-        {ok, Cred} -> force_credentials(Cred);
+%% The credentials from the config. A token_fun is resolved by
+%% mailio_credentials in a process of its own, with a depth and time limit, so
+%% a provider cannot make this process loop or wait for ever.
+credentials(#{credentials := Cred} = Config) ->
+    case mailio_credentials:resolve(Cred, cred_opts(Config)) of
+        {ok, Resolved} -> Resolved;
         {error, _} = E -> E
     end;
-force_credentials(Cred) ->
-    Cred.
+credentials(#{username := User, password := Pass}) ->
+    {password, User, Pass};
+credentials(_) ->
+    {error, no_credentials}.
+
+cred_opts(#{credentials_timeout := T}) -> #{timeout => T};
+cred_opts(_) -> #{}.
 
 %%====================================================================
 %% State: greeting
@@ -295,8 +298,12 @@ auth(enter, _Old, #data{config = Config} = Data) ->
             ],
             {keep_state, Data1#data{tag = Tag, untagged = [], literal = Replies}};
         {error, _} ->
-            {next_state, auth_failed, Data1}
+            %% a state change is not allowed from an enter call (nor a next_event):
+            %% a zero state timeout makes the change the next thing that happens
+            {keep_state, Data1, [{state_timeout, 0, credentials_failed}]}
     end;
+auth(state_timeout, credentials_failed, Data) ->
+    {next_state, auth_failed, Data};
 auth(info, {T, Sock, Bin}, #data{sock = Sock} = Data) when
     T =:= tcp; T =:= ssl
 ->

@@ -29,6 +29,8 @@
 -export_type([conn/0]).
 
 -define(TIMEOUT, 30000).
+-define(TRACKED, mailio_pop3_open).
+
 %% Largest multi-line reply accepted, per command. The message size for RETR
 %% comes from the caller. Overridable in the config with `max_list_bytes' and
 %% `max_top_bytes'.
@@ -48,19 +50,38 @@ open(#{host := Host} = Config) ->
     try
         Port = maps:get(port, Config, default_port(maps:get(tls, Config, starttls))),
         {Mod, Sock} = connect(to_list(Host), Port, Config),
-        C0 = #{mod => Mod, sock => Sock, caps => [], config => Config},
+        C0 = track(#{mod => Mod, sock => Sock, caps => [], config => Config}),
         {ok, <<"+OK", _/binary>>} = read_line(C0),
         C1 = refresh_caps(C0),
-        C2 = stls(C1),
+        C2 = track(stls(C1)),
         C3 = auth(C2),
-        {ok, refresh_caps(C3)}
+        Open = refresh_caps(C3),
+        erase(?TRACKED),
+        {ok, Open}
     catch
         throw:{mailio_pop3, Error} ->
+            release(),
             Error;
         error:{badmatch, _} ->
+            release(),
             mailio_error:new(
                 pop3_connect_failed, <<"unexpected greeting from the POP3 server">>, #{}
-            )
+            );
+        Class:Reason:Stack ->
+            release(),
+            erlang:raise(Class, Reason, Stack)
+    end.
+
+%% The newest connection of an open that has not finished. If the open fails,
+%% its socket is closed here, whichever step failed.
+track(C) ->
+    put(?TRACKED, C),
+    C.
+
+release() ->
+    case erase(?TRACKED) of
+        #{mod := M, sock := S} -> catch_all(fun() -> M:close(S) end);
+        undefined -> ok
     end.
 
 default_port(true) -> 995;
@@ -171,19 +192,20 @@ stls(C) ->
 
 auth(#{config := Config} = C) ->
     case maps:get(credentials, Config, undefined) of
-        undefined -> C;
-        Cred -> auth_with(C, force(Cred))
+        undefined ->
+            C;
+        Cred ->
+            case mailio_credentials:resolve(Cred, cred_opts(Config)) of
+                {ok, Resolved} ->
+                    auth_with(C, Resolved);
+                {error, _Why} ->
+                    %% the provider's own words may hold a secret: not repeated
+                    fail(mailio_error:new(pop3_auth_failed, <<"credentials unavailable">>, #{}))
+            end
     end.
 
-force({token_fun, F}) ->
-    case F() of
-        {ok, Cred} ->
-            force(Cred);
-        {error, _Reason} ->
-            fail(mailio_error:new(pop3_auth_failed, <<"credentials unavailable">>, #{}))
-    end;
-force(Cred) ->
-    Cred.
+cred_opts(#{credentials_timeout := T}) -> #{timeout => T};
+cred_opts(_) -> #{}.
 
 auth_with(C, {password, User, Pass}) ->
     case cmd(C, [<<"USER ">>, User]) of
