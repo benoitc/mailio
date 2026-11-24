@@ -10,3 +10,7 @@ erl_crash.dump
 doc/edoc/
 logs/
 .DS_Store
+apps/*/doc/*.html
+apps/*/doc/dist/
+apps/*/doc/*.epub
+apps/*/doc/.build
