@@ -199,3 +199,74 @@ stls_test() ->
         ?assertEqual(pop3_tls_failed, code(E)),
         ?assertEqual([], mailio_fake_pop3:auth_seen(Srv))
     end).
+
+%%====================================================================
+%% Bounded replies
+%%====================================================================
+
+many_msgs(N) -> [{integer_to_binary(I), msg(<<"s">>, <<"b\r\n">>)} || I <- lists:seq(1, N)].
+
+oversized_listing_is_refused_test() ->
+    with(#{messages => many_msgs(400)}, fun(Srv) ->
+        {ok, C} = mailio_pop3:open(cfg(Srv, #{max_list_bytes => 1000})),
+        ?assertEqual(pop3_response_too_large, code(mailio_pop3:uidl(C))),
+        %% the connection was closed, not left half read
+        ?assertEqual(pop3_disconnected, code(mailio_pop3:stat(C)))
+    end).
+
+listing_under_the_limit_works_test() ->
+    with(#{messages => many_msgs(400)}, fun(Srv) ->
+        {ok, C} = mailio_pop3:open(cfg(Srv, #{max_list_bytes => 100000})),
+        ?assertMatch({ok, [_ | _]}, mailio_pop3:uidl(C)),
+        mailio_pop3:close(C)
+    end).
+
+oversized_top_is_refused_test() ->
+    Big = msg(binary:copy(<<"long subject word ">>, 1), <<"b">>),
+    Hdrs = iolist_to_binary([
+        <<"X-H", (integer_to_binary(I))/binary, ": value\r\n">>
+     || I <- lists:seq(1, 300)
+    ]),
+    BigMsg = <<Hdrs/binary, Big/binary>>,
+    with(#{messages => [{<<"u">>, BigMsg}]}, fun(Srv) ->
+        {ok, C} = mailio_pop3:open(cfg(Srv, #{max_top_bytes => 500})),
+        ?assertEqual(pop3_response_too_large, code(mailio_pop3:top(C, 1, 1000))),
+        ok
+    end).
+
+server_that_lies_about_size_cannot_overflow_retr_test() ->
+    {ok, L} = gen_tcp:listen(0, [binary, {active, false}, {packet, line}, {reuseaddr, true}]),
+    {ok, Port} = inet:port(L),
+    spawn_link(fun() ->
+        {ok, S} = gen_tcp:accept(L),
+        gen_tcp:send(S, <<"+OK hi\r\n">>),
+        serve_liar(S)
+    end),
+    {ok, C} = mailio_pop3:open(#{
+        host => <<"127.0.0.1">>,
+        port => Port,
+        tls => false,
+        credentials => {password, <<"u">>, <<"p">>}
+    }),
+    ?assertEqual(pop3_response_too_large, code(mailio_pop3:retr(C, 1, 100))),
+    gen_tcp:close(L).
+
+serve_liar(S) ->
+    case gen_tcp:recv(S, 0, 3000) of
+        {ok, <<"CAPA", _/binary>>} ->
+            gen_tcp:send(S, <<"+OK\r\nUIDL\r\n.\r\n">>),
+            serve_liar(S);
+        {ok, <<"LIST 1", _/binary>>} ->
+            gen_tcp:send(S, <<"+OK 1 10\r\n">>),
+            serve_liar(S);
+        {ok, <<"RETR", _/binary>>} ->
+            gen_tcp:send(S, <<"+OK\r\n">>),
+            Line = binary:copy(<<"x">>, 1000),
+            [gen_tcp:send(S, [Line, <<"\r\n">>]) || _ <- lists:seq(1, 400)],
+            ok;
+        {ok, _} ->
+            gen_tcp:send(S, <<"+OK\r\n">>),
+            serve_liar(S);
+        {error, _} ->
+            ok
+    end.

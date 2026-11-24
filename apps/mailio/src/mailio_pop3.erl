@@ -26,6 +26,12 @@
 -export_type([conn/0]).
 
 -define(TIMEOUT, 30000).
+%% Largest multi-line reply accepted, per command. The message size for RETR
+%% comes from the caller. Overridable in the config with `max_list_bytes' and
+%% `max_top_bytes'.
+-define(MAX_LIST_BYTES, 33554432).
+-define(MAX_TOP_BYTES, 1048576).
+-define(RETR_SLACK, 65536).
 
 -opaque conn() :: #{mod := gen_tcp | ssl, sock := term(), caps := [binary()], config := map()}.
 
@@ -116,7 +122,7 @@ tls_failed(R) ->
     }).
 
 refresh_caps(C) ->
-    case cmd_multi(C, [<<"CAPA">>]) of
+    case cmd_multi(C, [<<"CAPA">>], limit(C, list)) of
         {ok, Lines} ->
             C#{caps => [string:uppercase(hd(binary:split(L, <<" ">>))) || L <- Lines]};
         {err, _} ->
@@ -213,7 +219,7 @@ stat(C) ->
 -spec list(conn()) -> {ok, [{pos_integer(), non_neg_integer()}]} | mailio_error:t().
 list(C) ->
     wrap(fun() ->
-        case cmd_multi(C, [<<"LIST">>]) of
+        case cmd_multi(C, [<<"LIST">>], limit(C, list)) of
             {ok, Lines} ->
                 {ok, [
                     {binary_to_integer(N), binary_to_integer(S)}
@@ -228,7 +234,7 @@ list(C) ->
 -spec uidl(conn()) -> {ok, [{pos_integer(), binary()}]} | mailio_error:t().
 uidl(C) ->
     wrap(fun() ->
-        case cmd_multi(C, [<<"UIDL">>]) of
+        case cmd_multi(C, [<<"UIDL">>], limit(C, list)) of
             {ok, Lines} ->
                 {ok, [
                     {binary_to_integer(N), U}
@@ -246,7 +252,13 @@ uidl(C) ->
 -spec top(conn(), pos_integer(), non_neg_integer()) -> {ok, binary()} | mailio_error:t().
 top(C, N, Lines) ->
     wrap(fun() ->
-        case cmd_multi(C, [<<"TOP ">>, integer_to_binary(N), <<" ">>, integer_to_binary(Lines)]) of
+        case
+            cmd_multi(
+                C,
+                [<<"TOP ">>, integer_to_binary(N), <<" ">>, integer_to_binary(Lines)],
+                limit(C, top)
+            )
+        of
             {ok, L} -> {ok, join(L)};
             {err, T} -> top_error(T)
         end
@@ -274,7 +286,7 @@ retr(C, N, MaxBytes) ->
                     #{size => Size, limit => MaxBytes}
                 );
             {ok, _} ->
-                case cmd_multi(C, [<<"RETR ">>, integer_to_binary(N)]) of
+                case cmd_multi(C, [<<"RETR ">>, integer_to_binary(N)], MaxBytes + ?RETR_SLACK) of
                     {ok, L} ->
                         {ok, join(L)};
                     {err, T} ->
@@ -392,19 +404,31 @@ cmd(C, Parts) ->
         {ok, Other} -> {err, Other}
     end.
 
-cmd_multi(C, Parts) ->
+cmd_multi(C, Parts, Max) ->
     case cmd(C, Parts) of
-        {ok, _} -> {ok, read_multi(C, [])};
+        {ok, _} -> {ok, read_multi(C, [], 0, Max)};
         {err, _} = E -> E
     end.
 
-%% Multi-line reply ended by a lone dot; dot-unstuffed.
-read_multi(C, Acc) ->
+limit(#{config := Config}, list) -> maps:get(max_list_bytes, Config, ?MAX_LIST_BYTES);
+limit(#{config := Config}, top) -> maps:get(max_top_bytes, Config, ?MAX_TOP_BYTES).
+
+%% Multi-line reply ended by a lone dot; dot-unstuffed. A reply that grows
+%% past `Max' bytes ends the connection.
+read_multi(C, _Acc, Bytes, Max) when Bytes > Max ->
+    close(C),
+    fail(
+        mailio_error:new(pop3_response_too_large, <<"the POP3 reply is larger than the limit">>, #{
+            limit => Max
+        })
+    );
+read_multi(C, Acc, Bytes, Max) ->
     {ok, L} = read_line(C),
+    Bytes1 = Bytes + byte_size(L) + 2,
     case L of
         <<".">> -> lists:reverse(Acc);
-        <<"..", R/binary>> -> read_multi(C, [<<".", R/binary>> | Acc]);
-        _ -> read_multi(C, [L | Acc])
+        <<"..", R/binary>> -> read_multi(C, [<<".", R/binary>> | Acc], Bytes1, Max);
+        _ -> read_multi(C, [L | Acc], Bytes1, Max)
     end.
 
 join(Lines) -> iolist_to_binary(lists:join(<<"\r\n">>, Lines)).
