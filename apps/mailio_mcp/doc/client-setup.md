@@ -115,6 +115,10 @@ export MAILIO_MCP_STATE_KEY="$(openssl rand -base64 48)"
 
 `{file, Path}` and `{cmd, Command}` work as well. The server refuses to start if the reference cannot be read or the key is shorter than 32 bytes. Use the same key on every node.
 
+## Run in a container
+
+If you do not want to install Erlang, [run the server in a container](docker.md): it covers both stdio and HTTP.
+
 ## Check that it works
 
 Ask your agent to list the accounts, or call the tools directly. A search for one local day:

@@ -1,0 +1,22 @@
+# Run the MCP server over HTTP. From this folder:
+#   export WORK_MAIL_PASSWORD=... MAILIO_MCP_JWT_SECRET=... MAILIO_MCP_STATE_KEY=...
+#   docker compose up -d --build
+# The port is published on the host loopback only. Put a TLS proxy in front
+# before you expose it any further.
+services:
+  mailio-mcp:
+    build:
+      context: ../../..
+    command: ["http"]
+    ports:
+      - "127.0.0.1:8420:8420"
+    environment:
+      WORK_MAIL_PASSWORD:
+      MAILIO_MCP_JWT_SECRET:
+      MAILIO_MCP_STATE_KEY:
+    volumes:
+      - ./mail.config:/config/mail.config:ro
+      - mailio-data:/data
+    restart: unless-stopped
+volumes:
+  mailio-data:

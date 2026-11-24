@@ -2,6 +2,17 @@
 
 ## Unreleased
 
+### Added
+
+- The MCP server can run in a container. A Dockerfile, an example config and a
+  Compose file are in the repository, with a page that explains how to run it
+  over HTTP or stdio. The image is not published.
+- The HTTP settings of the MCP server can now name the address as text and read
+  the token secret from an environment variable or a file, so a config file
+  does not have to hold a secret.
+- The MCP server stops at start with a clear message when its config file
+  cannot be read.
+
 ### Fixed
 
 - Checking a mailbox for new mail no longer reports the newest message again

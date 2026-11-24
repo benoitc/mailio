@@ -173,3 +173,21 @@ jobs:
           if tar -tzf /tmp/pkg/contents.tar.gz | grep -E "mailio_(store|mcp)"; then
             echo "the package holds another app"; exit 1
           fi
+
+  container:
+    name: MCP server container
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build the image
+        run: docker build -t mailio-mcp .
+
+      - name: Smoke test over HTTP
+        run: apps/mailio_mcp/docker/smoke.sh mailio-mcp
+
+      - name: Smoke test over stdio
+        run: |
+          (printf '%s\n' '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"ci","version":"1"}}}'; sleep 8) \
+            | docker run -i --rm -e MAILIO_MCP_CONFIG= mailio-mcp stdio 2>/dev/null \
+            | grep -q '"protocolVersion"'

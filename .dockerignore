@@ -1,0 +1,7 @@
+_build
+.git
+data
+**/erl_crash.dump
+**/doc/*.html
+**/doc/dist
+apps/*/test/mailpit/certs

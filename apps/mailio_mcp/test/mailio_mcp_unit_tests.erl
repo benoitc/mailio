@@ -310,3 +310,32 @@ request_state_key_test_() ->
             ?assertMatch({error, {missing_env, _}}, mailio_mcp_config:apply_request_state_key())
         end
     ]}.
+
+http_options_test_() ->
+    Cleanup = fun(_) -> application:unset_env(mailio_mcp, http) end,
+    {setup, fun() -> ok end, Cleanup, [
+        fun() ->
+            application:unset_env(mailio_mcp, http),
+            ?assertEqual({ok, #{port => 8420}}, mailio_mcp_config:http_options())
+        end,
+        fun() ->
+            application:set_env(mailio_mcp, http, #{port => 1, ip => "0.0.0.0"}),
+            ?assertEqual({ok, #{port => 1, ip => {0, 0, 0, 0}}}, mailio_mcp_config:http_options())
+        end,
+        fun() ->
+            application:set_env(mailio_mcp, http, #{ip => "not an address"}),
+            ?assertMatch({error, {bad_ip, _}}, mailio_mcp_config:http_options())
+        end,
+        fun() ->
+            application:set_env(mailio_mcp, http, #{
+                port => 1,
+                auth => #{
+                    provider => barrel_mcp_auth_bearer,
+                    provider_opts => #{secret => {value, <<"s3cret">>}, audience => <<"mail">>}
+                }
+            }),
+            {ok, #{auth := #{provider_opts := PO}}} = mailio_mcp_config:http_options(),
+            ?assertEqual(<<"s3cret">>, maps:get(secret, PO)),
+            ?assertEqual(<<"mail">>, maps:get(audience, PO))
+        end
+    ]}.

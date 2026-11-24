@@ -12,6 +12,7 @@
 -export([
     load_env_file/0,
     apply_request_state_key/0,
+    http_options/0,
     accounts/0,
     account/1,
     principal/1,
@@ -23,23 +24,30 @@
 
 -define(APP, mailio_mcp).
 
+-spec load_env_file() -> ok | {error, {config_file, string(), term()}}.
 load_env_file() ->
     case os:getenv("MAILIO_MCP_CONFIG") of
         false ->
             ok;
+        "" ->
+            ok;
         Path ->
-            {ok, Terms} = file:consult(Path),
-            lists:foreach(
-                fun(Config) ->
+            case file:consult(Path) of
+                {ok, Terms} ->
                     lists:foreach(
-                        fun({App, Env}) ->
-                            [application:set_env(App, K, V) || {K, V} <- Env]
+                        fun(Config) ->
+                            lists:foreach(
+                                fun({App, Env}) ->
+                                    [application:set_env(App, K, V) || {K, V} <- Env]
+                                end,
+                                Config
+                            )
                         end,
-                        Config
-                    )
-                end,
-                Terms
-            )
+                        Terms
+                    );
+                {error, Reason} ->
+                    {error, {config_file, Path, Reason}}
+            end
     end.
 
 %% @doc Give barrel_mcp its request-state signing key from the secret
@@ -63,6 +71,36 @@ apply_request_state_key() ->
                     E
             end
     end.
+
+%% @doc The options for the HTTP transport, from the `http' entry. Two things
+%% can be written as text so that a container or a config file need not hold
+%% a secret or an address tuple: `ip' as `"0.0.0.0"', and the bearer `secret'
+%% as a reference (`{env, _}', `{file, _}' or `{cmd, _}').
+-spec http_options() -> {ok, map()} | {error, term()}.
+http_options() ->
+    Opts = application:get_env(?APP, http, #{port => 8420}),
+    maybe
+        {ok, O1} ?= http_ip(Opts),
+        http_secret(O1)
+    end.
+
+http_ip(#{ip := Ip} = Opts) when is_list(Ip); is_binary(Ip) ->
+    case inet:parse_address(unicode:characters_to_list(Ip)) of
+        {ok, Tuple} -> {ok, Opts#{ip := Tuple}};
+        {error, _} -> {error, {bad_ip, Ip}}
+    end;
+http_ip(Opts) ->
+    {ok, Opts}.
+
+http_secret(#{auth := #{provider_opts := #{secret := Ref} = PO} = Auth} = Opts) when
+    is_tuple(Ref)
+->
+    case resolve_secret(Ref) of
+        {ok, Secret} -> {ok, Opts#{auth := Auth#{provider_opts := PO#{secret := Secret}}}};
+        {error, _} = E -> E
+    end;
+http_secret(Opts) ->
+    {ok, Opts}.
 
 %% @doc All configured accounts, normalized.
 -spec accounts() -> [map()].
