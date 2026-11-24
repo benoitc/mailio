@@ -1,5 +1,9 @@
 %%% @doc Root supervisor.
 %%%
+%%% Strategy is `rest_for_one' in start order: the registry owns the name
+%%% table, so when it restarts the event server and every account subtree
+%%% restart too. Accounts must be started again after that.
+%%%
 %%% Holds the static infrastructure layer. The dynamic per-account session
 %%% layer lives under {@link mailio_accounts_sup}. Milestones add children
 %%% here (events, pools, workflow, submit) as those subsystems land.
@@ -18,7 +22,7 @@ start_link() ->
 -spec init([]) -> {ok, {supervisor:sup_flags(), [supervisor:child_spec()]}}.
 init([]) ->
     SupFlags = #{
-        strategy => one_for_one,
+        strategy => rest_for_one,
         intensity => 3,
         period => 30
     },
