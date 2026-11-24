@@ -24,7 +24,7 @@
     capabilities/1,
     close/1
 ]).
--export([callback_mode/0, init/1, terminate/3]).
+-export([callback_mode/0, init/1, terminate/3, format_status/1]).
 -export([
     connect/3,
     greeting/3,
@@ -41,6 +41,9 @@
 
 -define(CONNECT_TIMEOUT, 30000).
 -define(CMD_TIMEOUT, 30000).
+%% The state machine enforces every deadline itself; a caller's own wait is only
+%% a backstop for a machine that no longer exists.
+-define(CALL_CAP, 120000).
 -define(BACKOFF_MIN, 1000).
 -define(BACKOFF_MAX, 300000).
 
@@ -51,6 +54,10 @@
     buffer = <<>> :: binary(),
     tagn = 0 :: non_neg_integer(),
     from :: gen_statem:from() | undefined,
+    %% who asked to stop IDLE, kept apart from the caller that started it
+    stopper :: gen_statem:from() | undefined,
+    %% absolute (monotonic ms) time by which the running command must be answered
+    deadline :: integer() | undefined,
     tag :: binary() | undefined,
     untagged = [] :: [term()],
     literal :: binary() | [binary()] | undefined,
@@ -89,16 +96,31 @@ run(Pid, Builder) ->
 -spec run(pid(), fun((binary()) -> {iodata(), binary() | undefined}), timeout()) ->
     {ok, [term()], {atom(), term(), binary()}} | {error, term()}.
 run(Pid, Builder, Timeout) ->
-    gen_statem:call(Pid, {run, Builder}, Timeout).
+    Deadline = now_ms() + Timeout,
+    call(Pid, {run, Builder, Deadline}).
+
+%% The connection answers by the deadline, whatever the server does. A call
+%% that finds the process gone is a lost connection, not a crash of the caller.
+call(Pid, Request) ->
+    try
+        gen_statem:call(Pid, Request, ?CALL_CAP)
+    catch
+        exit:{timeout, _} ->
+            {error, imap_timeout};
+        exit:{Reason, _} when Reason =:= noproc; Reason =:= normal; Reason =:= shutdown ->
+            {error, imap_disconnected}
+    end.
+
+now_ms() -> erlang:monotonic_time(millisecond).
 
 -spec capabilities(pid()) -> [binary()].
 capabilities(Pid) ->
-    case gen_statem:call(Pid, capabilities) of
+    case call(Pid, capabilities) of
         [] ->
             %% A server need not announce its capabilities with the login reply:
             %% ask once, then answer from what the connection learned.
             _ = run(Pid, fun(Tag) -> {mailio_imap_proto:capability(Tag), undefined} end),
-            gen_statem:call(Pid, capabilities);
+            call(Pid, capabilities);
         Caps ->
             Caps
     end.
@@ -107,11 +129,11 @@ capabilities(Pid) ->
 %% `{imap_idle_event, self(), Event}'.
 -spec idle_start(pid(), pid()) -> ok | {error, term()}.
 idle_start(Pid, NotifyPid) ->
-    gen_statem:call(Pid, {idle_start, NotifyPid}).
+    call(Pid, {idle_start, NotifyPid}).
 
--spec idle_stop(pid()) -> ok.
+-spec idle_stop(pid()) -> ok | {error, term()}.
 idle_stop(Pid) ->
-    gen_statem:call(Pid, idle_stop).
+    call(Pid, idle_stop).
 
 -spec close(pid()) -> ok.
 close(Pid) ->
@@ -220,7 +242,9 @@ cred_opts(_) -> #{}.
 %%====================================================================
 
 greeting(enter, _Old, Data) ->
-    {keep_state, set_active(Data)};
+    {keep_state, set_active(Data), [{state_timeout, cmd_timeout(Data), handshake_timeout}]};
+greeting(state_timeout, handshake_timeout, Data) ->
+    drop(Data);
 greeting(info, {Tag, Sock, Bin}, #data{sock = Sock} = Data) when
     Tag =:= tcp; Tag =:= ssl
 ->
@@ -252,7 +276,11 @@ after_greeting(_) -> auth.
 starttls(enter, _Old, Data) ->
     {Tag, Data1} = next_tag(Data),
     _ = send(Data1, mailio_imap_proto:starttls(Tag)),
-    {keep_state, Data1#data{tag = Tag, untagged = []}};
+    {keep_state, Data1#data{tag = Tag, untagged = []}, [
+        {state_timeout, cmd_timeout(Data1), handshake_timeout}
+    ]};
+starttls(state_timeout, handshake_timeout, Data) ->
+    drop(Data);
 starttls(info, {T, Sock, Bin}, #data{sock = Sock} = Data) when
     T =:= tcp; T =:= ssl
 ->
@@ -288,7 +316,9 @@ auth(enter, _Old, #data{config = Config} = Data) ->
     case credentials(Config) of
         {password, User, Pass} ->
             _ = send(Data1, mailio_imap_proto:login(Tag, User, Pass)),
-            {keep_state, Data1#data{tag = Tag, untagged = []}};
+            {keep_state, Data1#data{tag = Tag, untagged = []}, [
+                {state_timeout, cmd_timeout(Data1), handshake_timeout}
+            ]};
         {oauth2, User, Token} ->
             _ = send(Data1, mailio_imap_proto:authenticate_xoauth2(Tag)),
             %% the token answers the first `+'; an error challenge after it is
@@ -296,7 +326,9 @@ auth(enter, _Old, #data{config = Config} = Data) ->
             Replies = [
                 iolist_to_binary(mailio_imap_proto:xoauth2_response(User, Token)), <<"\r\n">>
             ],
-            {keep_state, Data1#data{tag = Tag, untagged = [], literal = Replies}};
+            {keep_state, Data1#data{tag = Tag, untagged = [], literal = Replies}, [
+                {state_timeout, cmd_timeout(Data1), handshake_timeout}
+            ]};
         {error, _} ->
             %% a state change is not allowed from an enter call (nor a next_event):
             %% a zero state timeout makes the change the next thing that happens
@@ -304,6 +336,8 @@ auth(enter, _Old, #data{config = Config} = Data) ->
     end;
 auth(state_timeout, credentials_failed, Data) ->
     {next_state, auth_failed, Data};
+auth(state_timeout, handshake_timeout, Data) ->
+    drop(Data);
 auth(info, {T, Sock, Bin}, #data{sock = Sock} = Data) when
     T =:= tcp; T =:= ssl
 ->
@@ -377,17 +411,40 @@ response_too_large(_Type, _Event, Data) ->
 
 ready(enter, _Old, Data) ->
     {keep_state, Data#data{from = undefined, tag = undefined, untagged = []}};
-ready({call, From}, {run, Builder}, Data) ->
-    {Tag, Data1} = next_tag(Data),
-    {IoData, Literal} = Builder(Tag),
-    send(Data1, IoData),
-    {next_state, running, Data1#data{from = From, tag = Tag, untagged = [], literal = Literal}};
+ready({call, From}, {run, Builder, Deadline}, Data) ->
+    case now_ms() >= Deadline of
+        true ->
+            %% the caller has given up: do not send what it asked for
+            {keep_state, Data, [{reply, From, {error, imap_timeout}}]};
+        false ->
+            {Tag, Data1} = next_tag(Data),
+            try Builder(Tag) of
+                {IoData, Literal} ->
+                    case send(Data1, IoData) of
+                        ok ->
+                            {next_state, running, Data1#data{
+                                from = From,
+                                deadline = Deadline,
+                                tag = Tag,
+                                untagged = [],
+                                literal = Literal
+                            }};
+                        {error, _} ->
+                            drop(Data1, [{reply, From, {error, imap_disconnected}}])
+                    end
+            catch
+                Class:Reason ->
+                    {keep_state, Data1, [{reply, From, {error, {builder_failed, {Class, Reason}}}}]}
+            end
+    end;
 ready({call, From}, capabilities, Data) ->
     {keep_state, Data, [{reply, From, Data#data.caps}]};
 ready({call, From}, {idle_start, NotifyPid}, Data) ->
     {Tag, Data1} = next_tag(Data),
-    send(Data1, mailio_imap_proto:idle(Tag)),
-    {next_state, idle, Data1#data{from = From, tag = Tag, notify = NotifyPid, untagged = []}};
+    _ = send(Data1, mailio_imap_proto:idle(Tag)),
+    {next_state, idle, Data1#data{from = From, tag = Tag, notify = NotifyPid, untagged = []}, [
+        {state_timeout, cmd_timeout(Data1), idle_timeout}
+    ]};
 ready({call, From}, idle_stop, Data) ->
     {keep_state, Data, [{reply, From, ok}]};
 ready(info, {T, Sock, Bin}, #data{sock = Sock} = Data) when
@@ -406,8 +463,12 @@ ready(info, Event, Data) ->
 %% State: running
 %%====================================================================
 
-running(enter, _Old, Data) ->
-    {keep_state, Data};
+running(enter, _Old, #data{deadline = Deadline} = Data) ->
+    {keep_state, Data, [{state_timeout, max(0, Deadline - now_ms()), command_timeout}]};
+running(state_timeout, command_timeout, #data{from = From} = Data) ->
+    %% The reply was lost or never comes. Reading on would put every later
+    %% answer against the wrong command, so the connection is dropped.
+    drop(Data, [{reply, From, {error, imap_timeout}}]);
 running(info, {T, Sock, Bin}, #data{sock = Sock} = Data) when
     T =:= tcp; T =:= ssl
 ->
@@ -420,7 +481,7 @@ running(info, {T, Sock, Bin}, #data{sock = Sock} = Data) when
         end
     );
 running(info, Event, Data) ->
-    reply_error_and(Event, Data);
+    handle_socket_closed(Event, Data);
 running({call, _From}, _Req, Data) ->
     {keep_state, Data, [{postpone, true}]}.
 
@@ -430,10 +491,14 @@ running({call, _From}, _Req, Data) ->
 
 idle(enter, _Old, Data) ->
     {keep_state, Data};
-idle({call, From}, idle_stop, Data) ->
-    send(Data, mailio_imap_proto:idle_done()),
+idle({call, From}, idle_stop, #data{stopper = undefined} = Data) ->
+    _ = send(Data, mailio_imap_proto:idle_done()),
     %% Wait for the tagged completion of the IDLE command.
-    {keep_state, Data#data{from = From}};
+    {keep_state, Data#data{stopper = From}, [{state_timeout, cmd_timeout(Data), idle_timeout}]};
+idle({call, From}, idle_stop, Data) ->
+    {keep_state, Data, [{reply, From, {error, already_stopping}}]};
+idle(state_timeout, idle_timeout, Data) ->
+    drop(Data, [], imap_timeout);
 idle({call, _From}, _Req, Data) ->
     {keep_state, Data, [{postpone, true}]};
 idle(info, {T, Sock, Bin}, #data{sock = Sock} = Data) when
@@ -457,17 +522,21 @@ handle_idle_responses(Data, Acts) ->
             %% Server accepted IDLE: acknowledge the idle_start caller now,
             %% while staying in the idle state.
             {Data2, A} = ack_from(Data1),
-            handle_idle_responses(Data2, Acts ++ A);
+            handle_idle_responses(Data2, Acts ++ [{state_timeout, cancel} | A]);
         {ok, {tagged, Tag, _Status, _}, Data1} when Tag =:= Data#data.tag ->
             %% IDLE completed (after DONE): return to ready, ack the stopper.
             {Data2, A} = ack_from(Data1),
-            {next_state, ready, Data2#data{tag = undefined}, Acts ++ A};
+            {Data3, B} = ack_stopper(Data2),
+            {next_state, ready, Data3#data{tag = undefined}, Acts ++ A ++ B};
         {ok, {untagged, Event}, Data1} ->
             _ = notify_idle(Data1, Event),
             handle_idle_responses(Data1, Acts);
         {ok, _Other, Data1} ->
             handle_idle_responses(Data1, Acts)
     end.
+
+ack_stopper(#data{stopper = undefined} = Data) -> {Data, []};
+ack_stopper(#data{stopper = From} = Data) -> {Data#data{stopper = undefined}, [{reply, From, ok}]}.
 
 ack_from(#data{from = undefined} = Data) -> {Data, []};
 ack_from(#data{from = From} = Data) -> {Data#data{from = undefined}, [{reply, From, ok}]}.
@@ -602,21 +671,66 @@ catch_close(ssl, Sock) ->
 handle_socket_closed({Closed, _Sock}, Data) when
     Closed =:= tcp_closed; Closed =:= ssl_closed
 ->
-    {next_state, backoff, Data#data{sock = undefined, buffer = <<>>}};
+    drop(Data);
 handle_socket_closed({Err, _Sock, _Reason}, Data) when
     Err =:= tcp_error; Err =:= ssl_error
 ->
-    {next_state, backoff, Data#data{sock = undefined, buffer = <<>>}};
+    drop(Data);
 handle_socket_closed(_Other, Data) ->
     {keep_state, Data}.
 
-reply_error_and(Event, #data{from = From} = Data) ->
-    Replies =
-        case From of
-            undefined -> [];
-            _ -> [{reply, From, {error, connection_lost}}]
+%% Give up the connection: close the socket, answer whoever is waiting, and
+%% go to the reconnect state. Calls that arrive meanwhile get `not_connected'.
+drop(Data) ->
+    drop(Data, [], imap_disconnected).
+
+drop(Data, Replies) ->
+    drop(Data, Replies, imap_disconnected).
+
+drop(#data{transport = T, sock = Sock} = Data, Replies, Why) ->
+    _ =
+        case Sock of
+            undefined -> ok;
+            _ -> catch_close(T, Sock)
         end,
-    case handle_socket_closed(Event, Data) of
-        {next_state, S, Data1} -> {next_state, S, Data1#data{from = undefined}, Replies};
-        Other -> Other
-    end.
+    {Cleared, Pending} = pending_replies(Data, Why),
+    {next_state, backoff,
+        Cleared#data{sock = undefined, buffer = <<>>, tag = undefined, deadline = undefined},
+        Replies ++ Pending}.
+
+%% Replies owed to the caller of a command, an IDLE start or an IDLE stop.
+pending_replies(#data{from = From, stopper = Stopper} = Data, Why) ->
+    Replies = [{reply, F, {error, Why}} || F <- [From, Stopper], F =/= undefined],
+    {Data#data{from = undefined, stopper = undefined}, Replies}.
+
+cmd_timeout(#data{config = #{command_timeout := T}}) -> T;
+cmd_timeout(_) -> ?CMD_TIMEOUT.
+
+%% What a crash report or sys:get_status shows: no credentials, no mail.
+format_status(#{data := #data{config = Config} = Data} = Status) ->
+    Status#{
+        data := #{
+            config => redact_config(Config),
+            transport => Data#data.transport,
+            tag => Data#data.tag,
+            caps => Data#data.caps,
+            backoff => Data#data.backoff,
+            buffer => {redacted, byte_size(Data#data.buffer)},
+            untagged => {redacted, length(Data#data.untagged)}
+        }
+    };
+format_status(Status) ->
+    Status.
+
+redact_config(Config) ->
+    maps:map(
+        fun
+            (K, _) when
+                K =:= credentials; K =:= username; K =:= password; K =:= token; K =:= secret
+            ->
+                '***';
+            (_, V) ->
+                V
+        end,
+        Config
+    ).
