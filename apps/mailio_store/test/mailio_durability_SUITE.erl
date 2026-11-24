@@ -11,20 +11,29 @@
 -include_lib("stdlib/include/assert.hrl").
 -include("mailio_store.hrl").
 
--export([all/0, init_per_suite/1, end_per_suite/1,
-         init_per_testcase/2, end_per_testcase/2]).
--export([persists_across_reopen/1,
-         destroy_then_reingest_reindexes/1,
-         blob_gc_respects_grace/1,
-         fsck_detects_and_repairs_drift/1,
-         reconcile_removes_expunged/1]).
+-export([
+    all/0,
+    init_per_suite/1,
+    end_per_suite/1,
+    init_per_testcase/2,
+    end_per_testcase/2
+]).
+-export([
+    persists_across_reopen/1,
+    destroy_then_reingest_reindexes/1,
+    blob_gc_respects_grace/1,
+    fsck_detects_and_repairs_drift/1,
+    reconcile_removes_expunged/1
+]).
 
 all() ->
-    [persists_across_reopen,
-     destroy_then_reingest_reindexes,
-     blob_gc_respects_grace,
-     fsck_detects_and_repairs_drift,
-     reconcile_removes_expunged].
+    [
+        persists_across_reopen,
+        destroy_then_reingest_reindexes,
+        blob_gc_respects_grace,
+        fsck_detects_and_repairs_drift,
+        reconcile_removes_expunged
+    ].
 
 init_per_suite(Config) ->
     {ok, _} = application:ensure_all_started(ssl),
@@ -46,9 +55,21 @@ init_per_testcase(_TC, Config) ->
 
 end_per_testcase(_TC, Config) ->
     Account = ?config(account, Config),
-    try mailio_accounts_sup:stop_account(Account) catch _:_ -> ok end,
-    try mailio_db:delete_db(mailio_account:db_name(Account)) catch _:_ -> ok end,
-    try mailio_fake_imap:stop(?config(srv, Config)) catch _:_ -> ok end,
+    try
+        mailio_accounts_sup:stop_account(Account)
+    catch
+        _:_ -> ok
+    end,
+    try
+        mailio_db:delete_db(mailio_account:db_name(Account))
+    catch
+        _:_ -> ok
+    end,
+    try
+        mailio_fake_imap:stop(?config(srv, Config))
+    catch
+        _:_ -> ok
+    end,
     ok.
 
 %%====================================================================
@@ -124,8 +145,10 @@ fsck_detects_and_repairs_drift(Config) ->
 
     %% Corrupt the counter behind the writer's back.
     {ok, Mbx} = mailio_db:get(Db, <<?ID_MAILBOX, "inbox">>),
-    {ok, _, _} = mailio_db:put(Db, Mbx#{<<"totalEmails">> => 99,
-                                        <<"unreadEmails">> => 99}),
+    {ok, _, _} = mailio_db:put(Db, Mbx#{
+        <<"totalEmails">> => 99,
+        <<"unreadEmails">> => 99
+    }),
 
     {ok, [Drift]} = mailio_fsck:check_counters(Account),
     ?assertEqual({99, 1}, maps:get(total, Drift)),
@@ -142,8 +165,13 @@ reconcile_removes_expunged(Config) ->
     Srv = ?config(srv, Config),
     Account = ?config(account, Config),
     Db = mailio_account:db_name(Account),
-    Imap = #{host => <<"127.0.0.1">>, port => mailio_fake_imap:port(Srv),
-             tls => false, username => <<"u">>, password => <<"p">>},
+    Imap = #{
+        host => <<"127.0.0.1">>,
+        port => mailio_fake_imap:port(Srv),
+        tls => false,
+        username => <<"u">>,
+        password => <<"p">>
+    },
     {ok, _} = mailio_accounts_sup:start_account(Account, #{imap => Imap}),
     {ok, _} = mailio_sync_mgr:sync_mailbox(Account, <<"INBOX">>),
     ?assertEqual(2, count_emails(Db)),
@@ -159,8 +187,10 @@ reconcile_removes_expunged(Config) ->
 
 find_by_subject_count(Db, Subject) ->
     {ok, Docs, _} = mailio_db:find(
-        Db, #{where => [{path, [<<"subject">>], Subject}]},
-        #{include_docs => true}),
+        Db,
+        #{where => [{path, [<<"subject">>], Subject}]},
+        #{include_docs => true}
+    ),
     length(Docs).
 
 count_emails(Db) ->
@@ -168,11 +198,6 @@ count_emails(Db) ->
     length(Emails).
 
 sample() ->
-    <<"From: alice@example.com\r\n",
-      "To: bob@example.com\r\n",
-      "Subject: Sample subject\r\n",
-      "Message-ID: <sample@example.com>\r\n",
-      "Date: Mon, 2 Jun 2025 09:00:00 +0000\r\n",
-      "Content-Type: text/plain; charset=utf-8\r\n",
-      "\r\n",
-      "Sample body.\r\n">>.
+    <<"From: alice@example.com\r\n", "To: bob@example.com\r\n", "Subject: Sample subject\r\n",
+        "Message-ID: <sample@example.com>\r\n", "Date: Mon, 2 Jun 2025 09:00:00 +0000\r\n",
+        "Content-Type: text/plain; charset=utf-8\r\n", "\r\n", "Sample body.\r\n">>.

@@ -6,12 +6,23 @@
 
 cfg(Srv) -> cfg(Srv, #{}).
 cfg(Srv, Extra) ->
-    maps:merge(#{host => <<"127.0.0.1">>, port => mailio_fake_smtp:port(Srv), tls => false,
-                 ehlo_name => <<"test.local">>}, Extra).
+    maps:merge(
+        #{
+            host => <<"127.0.0.1">>,
+            port => mailio_fake_smtp:port(Srv),
+            tls => false,
+            ehlo_name => <<"test.local">>
+        },
+        Extra
+    ).
 
 with(Opts, Fun) ->
     Srv = mailio_fake_smtp:start(Opts),
-    try Fun(Srv) after mailio_fake_smtp:stop(Srv) end.
+    try
+        Fun(Srv)
+    after
+        mailio_fake_smtp:stop(Srv)
+    end.
 
 code({error, #{code := C}}) -> C.
 detail({error, #{detail := D}}) -> D.
@@ -81,33 +92,53 @@ connect_refused_is_retryable_test() ->
     {ok, L} = gen_tcp:listen(0, []),
     {ok, Port} = inet:port(L),
     gen_tcp:close(L),
-    E = mailio_smtp:submit(#{host => <<"127.0.0.1">>, port => Port, tls => false}, <<"a@x">>, [<<"b@y">>], ?MSG),
+    E = mailio_smtp:submit(
+        #{host => <<"127.0.0.1">>, port => Port, tls => false}, <<"a@x">>, [<<"b@y">>], ?MSG
+    ),
     ?assertEqual(smtp_connect_failed, code(E)),
     ?assert(retryable(E)).
 
 auth_plain_login_xoauth2_test() ->
     with(#{auth => plain}, fun(Srv) ->
-        {ok, _} = mailio_smtp:submit(cfg(Srv, #{credentials => {password, <<"u">>, <<"p">>}}),
-                                     <<"a@x">>, [<<"b@y">>], ?MSG),
-        ?assertEqual([{plain, binary_to_list(base64:encode(<<0, "u", 0, "p">>))}],
-                     mailio_fake_smtp:auth_seen(Srv))
+        {ok, _} = mailio_smtp:submit(
+            cfg(Srv, #{credentials => {password, <<"u">>, <<"p">>}}),
+            <<"a@x">>,
+            [<<"b@y">>],
+            ?MSG
+        ),
+        ?assertEqual(
+            [{plain, binary_to_list(base64:encode(<<0, "u", 0, "p">>))}],
+            mailio_fake_smtp:auth_seen(Srv)
+        )
     end),
     with(#{auth => login}, fun(Srv) ->
-        {ok, _} = mailio_smtp:submit(cfg(Srv, #{credentials => {password, <<"u">>, <<"p">>}}),
-                                     <<"a@x">>, [<<"b@y">>], ?MSG),
+        {ok, _} = mailio_smtp:submit(
+            cfg(Srv, #{credentials => {password, <<"u">>, <<"p">>}}),
+            <<"a@x">>,
+            [<<"b@y">>],
+            ?MSG
+        ),
         ?assertMatch([{login, _, _}], mailio_fake_smtp:auth_seen(Srv))
     end),
     with(#{auth => plain}, fun(Srv) ->
-        {ok, _} = mailio_smtp:submit(cfg(Srv, #{credentials => {oauth2, <<"u@x">>, <<"tok">>}}),
-                                     <<"a@x">>, [<<"b@y">>], ?MSG),
+        {ok, _} = mailio_smtp:submit(
+            cfg(Srv, #{credentials => {oauth2, <<"u@x">>, <<"tok">>}}),
+            <<"a@x">>,
+            [<<"b@y">>],
+            ?MSG
+        ),
         [{xoauth2, B64}] = mailio_fake_smtp:auth_seen(Srv),
         ?assertEqual(<<"user=u@x", 1, "auth=Bearer tok", 1, 1>>, base64:decode(list_to_binary(B64)))
     end).
 
 auth_failure_test() ->
     with(#{mode => auth_fail}, fun(Srv) ->
-        E = mailio_smtp:submit(cfg(Srv, #{credentials => {password, <<"u">>, <<"bad">>}}),
-                               <<"a@x">>, [<<"b@y">>], ?MSG),
+        E = mailio_smtp:submit(
+            cfg(Srv, #{credentials => {password, <<"u">>, <<"bad">>}}),
+            <<"a@x">>,
+            [<<"b@y">>],
+            ?MSG
+        ),
         ?assertEqual(smtp_auth_failed, code(E)),
         ?assertEqual(0, mailio_fake_smtp:data_count(Srv))
     end).
@@ -115,7 +146,9 @@ auth_failure_test() ->
 token_fun_is_resolved_test() ->
     with(#{auth => plain}, fun(Srv) ->
         F = fun() -> {ok, {oauth2, <<"u">>, <<"fresh">>}} end,
-        {ok, _} = mailio_smtp:submit(cfg(Srv, #{credentials => {token_fun, F}}), <<"a@x">>, [<<"b@y">>], ?MSG),
+        {ok, _} = mailio_smtp:submit(
+            cfg(Srv, #{credentials => {token_fun, F}}), <<"a@x">>, [<<"b@y">>], ?MSG
+        ),
         ?assertMatch([{xoauth2, _}], mailio_fake_smtp:auth_seen(Srv))
     end).
 
@@ -129,25 +162,41 @@ certs() ->
     #{server_config := Server, client_config := Client} =
         public_key:pkix_test_data(#{
             server_chain => #{root => [Key, Dig], peer => [Key, Dig, {extensions, [SAN]}]},
-            client_chain => #{root => [Key, Dig], peer => [Key, Dig]}}),
+            client_chain => #{root => [Key, Dig], peer => [Key, Dig]}
+        }),
     {Server, Client}.
 
 tls_cfg(Srv, Extra) ->
-    maps:merge(#{host => <<"localhost">>, port => mailio_fake_smtp:port(Srv), ehlo_name => <<"test.local">>}, Extra).
+    maps:merge(
+        #{
+            host => <<"localhost">>,
+            port => mailio_fake_smtp:port(Srv),
+            ehlo_name => <<"test.local">>
+        },
+        Extra
+    ).
 
 implicit_tls_verified_test() ->
     {Server, Client} = certs(),
     CACerts = proplists:get_value(cacerts, Client),
     with(#{tls => implicit, tls_opts => Server}, fun(Srv) ->
         %% trusted chain and matching host name: accepted
-        {ok, _} = mailio_smtp:submit(tls_cfg(Srv, #{tls => true, cacerts => CACerts}),
-                                     <<"a@x">>, [<<"b@y">>], ?MSG),
+        {ok, _} = mailio_smtp:submit(
+            tls_cfg(Srv, #{tls => true, cacerts => CACerts}),
+            <<"a@x">>,
+            [<<"b@y">>],
+            ?MSG
+        ),
         %% default trust store does not contain the test CA: refused
         E = mailio_smtp:submit(tls_cfg(Srv, #{tls => true}), <<"a@x">>, [<<"b@y">>], ?MSG),
         ?assertEqual(smtp_tls_failed, code(E)),
         %% the host name must match the certificate
-        E2 = mailio_smtp:submit(tls_cfg(Srv, #{tls => true, cacerts => CACerts, host => <<"127.0.0.1">>}),
-                                <<"a@x">>, [<<"b@y">>], ?MSG),
+        E2 = mailio_smtp:submit(
+            tls_cfg(Srv, #{tls => true, cacerts => CACerts, host => <<"127.0.0.1">>}),
+            <<"a@x">>,
+            [<<"b@y">>],
+            ?MSG
+        ),
         ?assertEqual(smtp_tls_failed, code(E2)),
         ?assertEqual(1, mailio_fake_smtp:data_count(Srv))
     end).
@@ -156,8 +205,12 @@ starttls_test() ->
     {Server, Client} = certs(),
     CACerts = proplists:get_value(cacerts, Client),
     with(#{tls => starttls, tls_opts => Server}, fun(Srv) ->
-        {ok, _} = mailio_smtp:submit(tls_cfg(Srv, #{tls => starttls, cacerts => CACerts}),
-                                     <<"a@x">>, [<<"b@y">>], ?MSG),
+        {ok, _} = mailio_smtp:submit(
+            tls_cfg(Srv, #{tls => starttls, cacerts => CACerts}),
+            <<"a@x">>,
+            [<<"b@y">>],
+            ?MSG
+        ),
         ?assertEqual(1, mailio_fake_smtp:data_count(Srv)),
         E = mailio_smtp:submit(tls_cfg(Srv, #{tls => starttls}), <<"a@x">>, [<<"b@y">>], ?MSG),
         ?assertEqual(smtp_tls_failed, code(E))

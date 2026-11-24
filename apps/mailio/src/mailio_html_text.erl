@@ -28,9 +28,12 @@ sanitize(Bin) ->
 preview(Html, Max) ->
     Text = to_text(Html),
     case string:length(Text) =< Max of
-        true -> Text;
-        false -> unicode:characters_to_binary(
-                   string:slice(Text, 0, Max))
+        true ->
+            Text;
+        false ->
+            unicode:characters_to_binary(
+                string:slice(Text, 0, Max)
+            )
     end.
 
 %%====================================================================
@@ -38,7 +41,8 @@ preview(Html, Max) ->
 %%====================================================================
 
 %% Mode is `normal' or `{skip, EndTag}' while inside script/style.
-strip(<<>>, _Mode, Acc) -> Acc;
+strip(<<>>, _Mode, Acc) ->
+    Acc;
 strip(<<$<, Rest/binary>>, normal, Acc) ->
     {TagName, Rest1} = read_tag(Rest),
     case classify_tag(TagName) of
@@ -54,7 +58,8 @@ strip(<<C, Rest/binary>>, normal, Acc) ->
 %% Skipping inside script/style: look for the matching close tag.
 strip(<<$<, Rest/binary>> = Bin, {skip, End}, Acc) ->
     case is_close_tag(Rest, End) of
-        {true, Rest1} -> strip(Rest1, normal, Acc);
+        {true, Rest1} ->
+            strip(Rest1, normal, Acc);
         false ->
             <<_, R/binary>> = Bin,
             strip(R, {skip, End}, Acc)
@@ -74,22 +79,29 @@ take_until_gt(<<C, Rest/binary>>, Acc) -> take_until_gt(Rest, <<Acc/binary, C>>)
 
 tag_name(Inner) ->
     Trimmed = string:trim(Inner, leading),
-    NoSlash = case Trimmed of
-                  <<$/, R/binary>> -> R;
-                  _ -> Trimmed
-              end,
+    NoSlash =
+        case Trimmed of
+            <<$/, R/binary>> -> R;
+            _ -> Trimmed
+        end,
     Name = take_name(NoSlash, <<>>),
     string:lowercase(Name).
 
-take_name(<<>>, Acc) -> Acc;
-take_name(<<C, Rest/binary>>, Acc)
-  when C =/= $\s, C =/= $\t, C =/= $\r, C =/= $\n, C =/= $/, C =/= $> ->
+take_name(<<>>, Acc) ->
+    Acc;
+take_name(<<C, Rest/binary>>, Acc) when
+    C =/= $\s, C =/= $\t, C =/= $\r, C =/= $\n, C =/= $/, C =/= $>
+->
     take_name(Rest, <<Acc/binary, C>>);
-take_name(_, Acc) -> Acc.
+take_name(_, Acc) ->
+    Acc.
 
-classify_tag(<<"script">>) -> {skip_until, <<"script">>};
-classify_tag(<<"style">>) -> {skip_until, <<"style">>};
-classify_tag(<<"head">>) -> {skip_until, <<"head">>};
+classify_tag(<<"script">>) ->
+    {skip_until, <<"script">>};
+classify_tag(<<"style">>) ->
+    {skip_until, <<"style">>};
+classify_tag(<<"head">>) ->
+    {skip_until, <<"head">>};
 classify_tag(Name) ->
     case lists:member(Name, block_tags()) of
         true -> block;
@@ -97,10 +109,30 @@ classify_tag(Name) ->
     end.
 
 block_tags() ->
-    [<<"p">>, <<"br">>, <<"div">>, <<"li">>, <<"tr">>, <<"table">>,
-     <<"h1">>, <<"h2">>, <<"h3">>, <<"h4">>, <<"h5">>, <<"h6">>,
-     <<"ul">>, <<"ol">>, <<"blockquote">>, <<"pre">>, <<"hr">>,
-     <<"section">>, <<"article">>, <<"header">>, <<"footer">>, <<"td">>].
+    [
+        <<"p">>,
+        <<"br">>,
+        <<"div">>,
+        <<"li">>,
+        <<"tr">>,
+        <<"table">>,
+        <<"h1">>,
+        <<"h2">>,
+        <<"h3">>,
+        <<"h4">>,
+        <<"h5">>,
+        <<"h6">>,
+        <<"ul">>,
+        <<"ol">>,
+        <<"blockquote">>,
+        <<"pre">>,
+        <<"hr">>,
+        <<"section">>,
+        <<"article">>,
+        <<"header">>,
+        <<"footer">>,
+        <<"td">>
+    ].
 
 %% Check whether Bin begins with "/End>" (the close tag for a skip region).
 is_close_tag(Bin, End) ->
@@ -111,7 +143,8 @@ is_close_tag(Bin, End) ->
                 End -> {true, Rest};
                 _ -> false
             end;
-        _ -> false
+        _ ->
+            false
     end.
 
 %%====================================================================
@@ -131,12 +164,14 @@ read_entity(Bin) ->
 
 %% Read up to ';' (bounded, so a stray '&' doesn't swallow the document).
 take_entity(<<$;, Rest/binary>>, Acc) when Acc =/= <<>> -> {ok, Acc, Rest};
-take_entity(<<C, Rest/binary>>, Acc)
-  when byte_size(Acc) < 32,
-       ((C >= $a andalso C =< $z) orelse (C >= $A andalso C =< $Z)
-        orelse (C >= $0 andalso C =< $9) orelse C =:= $#) ->
+take_entity(<<C, Rest/binary>>, Acc) when
+    byte_size(Acc) < 32 andalso
+        ((C >= $a andalso C =< $z) orelse (C >= $A andalso C =< $Z) orelse
+            (C >= $0 andalso C =< $9) orelse C =:= $#)
+->
     take_entity(Rest, <<Acc/binary, C>>);
-take_entity(_, _) -> error.
+take_entity(_, _) ->
+    error.
 
 decode_entity(<<$#, $x, Hex/binary>>) -> codepoint(Hex, 16);
 decode_entity(<<$#, $X, Hex/binary>>) -> codepoint(Hex, 16);
@@ -146,10 +181,15 @@ decode_entity(Name) -> named_entity(Name).
 codepoint(Bin, Base) ->
     Str = binary_to_list(Bin),
     try list_to_integer(Str, Base) of
-        CP when is_integer(CP), CP > 0, CP =< 16#10FFFF, (CP < 16#D800 orelse CP > 16#DFFF) ->
+        CP when
+            is_integer(CP) andalso CP > 0 andalso CP =< 16#10FFFF andalso
+                (CP < 16#D800 orelse CP > 16#DFFF)
+        ->
             {ok, <<CP/utf8>>};
-        _ -> error
-    catch _:_ -> error
+        _ ->
+            error
+    catch
+        _:_ -> error
     end.
 
 named_entity(<<"amp">>) -> {ok, <<"&">>};
@@ -183,14 +223,17 @@ named_entity(_) -> error.
 collapse(Bin) ->
     mailio_ascii:trim(collapse(Bin, <<>>, start)).
 
-collapse(<<>>, Acc, _State) -> Acc;
+collapse(<<>>, Acc, _State) ->
+    Acc;
 collapse(<<$\n, Rest/binary>>, Acc, State) ->
     case State of
-        nl -> collapse(Rest, Acc, nl);          %% swallow repeated newlines
+        %% swallow repeated newlines
+        nl -> collapse(Rest, Acc, nl);
         _ -> collapse(Rest, <<Acc/binary, $\n>>, nl)
     end;
-collapse(<<C, Rest/binary>>, Acc, State)
-  when C =:= $\s; C =:= $\t; C =:= $\r ->
+collapse(<<C, Rest/binary>>, Acc, State) when
+    C =:= $\s; C =:= $\t; C =:= $\r
+->
     case State of
         space -> collapse(Rest, Acc, space);
         nl -> collapse(Rest, Acc, nl);

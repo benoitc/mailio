@@ -18,7 +18,8 @@
 
 -export_type([header_list/0, address/0]).
 
--type header_list() :: [{binary(), binary()}].   %% {lowercased name, unfolded raw value}
+%% {lowercased name, unfolded raw value}
+-type header_list() :: [{binary(), binary()}].
 -type address() :: #{name := binary() | undefined, email := binary()}.
 
 %%====================================================================
@@ -43,8 +44,10 @@ headers(Raw) ->
 split_block(Raw) ->
     case first_blank_line(Raw, 0) of
         {Pos, SepLen} ->
-            {binary:part(Raw, 0, Pos),
-             binary:part(Raw, Pos + SepLen, byte_size(Raw) - Pos - SepLen)};
+            {
+                binary:part(Raw, 0, Pos),
+                binary:part(Raw, Pos + SepLen, byte_size(Raw) - Pos - SepLen)
+            };
         none ->
             {Raw, <<>>}
     end.
@@ -58,10 +61,12 @@ first_blank_line(Raw, Off) when Off =< byte_size(Raw) ->
         _ when Off < byte_size(Raw) -> first_blank_line(Raw, Off + 1);
         _ -> none
     end;
-first_blank_line(_Raw, _Off) -> none.
+first_blank_line(_Raw, _Off) ->
+    none.
 
 %% Split a header block into unfolded fields.
-parse_header_block(<<>>) -> [];
+parse_header_block(<<>>) ->
+    [];
 parse_header_block(Block) ->
     Lines = split_lines(Block),
     Fields = unfold(Lines, undefined, []),
@@ -80,10 +85,13 @@ strip_cr(B) ->
     end.
 
 %% Continuation lines (starting with SP/HT) belong to the previous field.
-unfold([], undefined, Acc) -> lists:reverse(Acc);
-unfold([], Cur, Acc) -> lists:reverse([Cur | Acc]);
-unfold([<<C, _/binary>> = Line | Rest], Cur, Acc)
-  when (C =:= $\s orelse C =:= $\t), Cur =/= undefined ->
+unfold([], undefined, Acc) ->
+    lists:reverse(Acc);
+unfold([], Cur, Acc) ->
+    lists:reverse([Cur | Acc]);
+unfold([<<C, _/binary>> = Line | Rest], Cur, Acc) when
+    (C =:= $\s orelse C =:= $\t) andalso Cur =/= undefined
+->
     unfold(Rest, <<Cur/binary, Line/binary>>, Acc);
 unfold([Line | Rest], undefined, Acc) ->
     unfold(Rest, Line, Acc);
@@ -128,8 +136,7 @@ all_headers(Name, Headers) ->
 %% @doc Decode an unstructured header value (RFC 2047 + collapse folding WSP).
 -spec decode_unstructured(binary() | undefined) -> binary() | undefined.
 decode_unstructured(undefined) -> undefined;
-decode_unstructured(Value) ->
-    mailio_mime_decode:decode_words(Value).
+decode_unstructured(Value) -> mailio_mime_decode:decode_words(Value).
 
 %%====================================================================
 %% Address parsing
@@ -138,15 +145,19 @@ decode_unstructured(Value) ->
 %% @doc Parse an address-list header (From/To/Cc/...). Group syntax is
 %% flattened to its member addresses.
 -spec parse_addresses(binary() | undefined) -> [address()].
-parse_addresses(undefined) -> [];
+parse_addresses(undefined) ->
+    [];
 parse_addresses(Value) ->
     Specs = split_address_list(Value),
-    lists:filtermap(fun(S) ->
-                        case parse_address(S) of
-                            skip -> false;
-                            Addr -> {true, Addr}
-                        end
-                    end, Specs).
+    lists:filtermap(
+        fun(S) ->
+            case parse_address(S) of
+                skip -> false;
+                Addr -> {true, Addr}
+            end
+        end,
+        Specs
+    ).
 
 %% Split on top-level commas, group ':' and ';' markers, ignoring those
 %% inside quoted strings, comments (parens) and angle brackets.
@@ -210,12 +221,14 @@ extract_angle(Bin) ->
                 [Addr, _After] -> {Before, Addr};
                 [Addr] -> {Before, Addr}
             end;
-        [_] -> none
+        [_] ->
+            none
     end.
 
 display_name(Bin) ->
     case mailio_ascii:trim(Bin) of
-        <<>> -> undefined;
+        <<>> ->
+            undefined;
         Trimmed ->
             Unquoted = unquote(Trimmed),
             case mailio_mime_decode:decode_words(Unquoted) of
@@ -232,9 +245,11 @@ unquote(Bin) ->
                 $" when byte_size(T) >= 2 ->
                     Inner = binary:part(T, 1, byte_size(T) - 2),
                     unescape(Inner);
-                _ -> T
+                _ ->
+                    T
             end;
-        _ -> T
+        _ ->
+            T
     end.
 
 unescape(Bin) -> unescape(Bin, <<>>).
@@ -244,7 +259,8 @@ unescape(<<C, Rest/binary>>, Acc) -> unescape(Rest, <<Acc/binary, C>>).
 
 %% Remove RFC 5322 comments (parenthesised, nestable), outside quotes.
 strip_comments(Bin) -> strip_comments(Bin, <<>>, 0, false).
-strip_comments(<<>>, Acc, _Depth, _Q) -> Acc;
+strip_comments(<<>>, Acc, _Depth, _Q) ->
+    Acc;
 strip_comments(<<$\\, C, Rest/binary>>, Acc, 0, Q) ->
     strip_comments(Rest, <<Acc/binary, $\\, C>>, 0, Q);
 strip_comments(<<$", Rest/binary>>, Acc, 0, Q) ->
@@ -266,7 +282,8 @@ strip_comments(<<C, Rest/binary>>, Acc, 0, false) ->
 
 %% @doc First msg-id token (e.g. of a Message-ID header), without angles.
 -spec parse_message_id(binary() | undefined) -> binary() | undefined.
-parse_message_id(undefined) -> undefined;
+parse_message_id(undefined) ->
+    undefined;
 parse_message_id(Value) ->
     case parse_message_ids(Value) of
         [Id | _] -> Id;
@@ -276,8 +293,7 @@ parse_message_id(Value) ->
 %% @doc All msg-id tokens (References / In-Reply-To), angles stripped.
 -spec parse_message_ids(binary() | undefined) -> [binary()].
 parse_message_ids(undefined) -> [];
-parse_message_ids(Value) ->
-    collect_ids(strip_comments(Value), []).
+parse_message_ids(Value) -> collect_ids(strip_comments(Value), []).
 
 collect_ids(Bin, Acc) ->
     case binary:split(Bin, <<"<">>) of
@@ -294,9 +310,14 @@ collect_ids(Bin, Acc) ->
         [_NoAngle] ->
             %% Fall back: bare addr-spec tokens separated by whitespace.
             case Acc of
-                [] -> [T || T <- binary:split(mailio_ascii:trim(Bin), <<" ">>, [global]),
-                            T =/= <<>>];
-                _ -> lists:reverse(Acc)
+                [] ->
+                    [
+                        T
+                     || T <- binary:split(mailio_ascii:trim(Bin), <<" ">>, [global]),
+                        T =/= <<>>
+                    ];
+                _ ->
+                    lists:reverse(Acc)
             end
     end.
 
@@ -307,7 +328,8 @@ collect_ids(Bin, Acc) ->
 %% @doc Parse Content-Type into `{Type, SubType, Params}', lowercased
 %% type/subtype. Defaults to text/plain when absent or unparseable.
 -spec parse_content_type(binary() | undefined) -> {binary(), binary(), map()}.
-parse_content_type(undefined) -> {<<"text">>, <<"plain">>, #{}};
+parse_content_type(undefined) ->
+    {<<"text">>, <<"plain">>, #{}};
 parse_content_type(Value) ->
     {Main, Params} = split_value_params(Value),
     case binary:split(mailio_ascii:lower(mailio_ascii:trim(Main)), <<"/">>) of
@@ -319,7 +341,8 @@ parse_content_type(Value) ->
 %% @doc Parse Content-Disposition into `{Disposition, Params}'.
 -spec parse_content_disposition(binary() | undefined) ->
     {binary() | undefined, map()}.
-parse_content_disposition(undefined) -> {undefined, #{}};
+parse_content_disposition(undefined) ->
+    {undefined, #{}};
 parse_content_disposition(Value) ->
     {Main, Params} = split_value_params(Value),
     {mailio_ascii:lower(mailio_ascii:trim(Main)), Params}.
@@ -335,7 +358,8 @@ parse_params(Bin) ->
 split_value_params(Value) ->
     Segments = split_semicolons(Value),
     case Segments of
-        [] -> {<<>>, #{}};
+        [] ->
+            {<<>>, #{}};
         [Main | ParamSegs] ->
             Raw = lists:foldl(fun parse_one_param/2, [], ParamSegs),
             {Main, reassemble_2231(Raw)}
@@ -343,7 +367,8 @@ split_value_params(Value) ->
 
 split_semicolons(Bin) ->
     split_semi(Bin, <<>>, [], false).
-split_semi(<<>>, Acc, Out, _Q) -> lists:reverse([Acc | Out]);
+split_semi(<<>>, Acc, Out, _Q) ->
+    lists:reverse([Acc | Out]);
 split_semi(<<$\\, C, Rest/binary>>, Acc, Out, Q) ->
     split_semi(Rest, <<Acc/binary, $\\, C>>, Out, Q);
 split_semi(<<$", Rest/binary>>, Acc, Out, Q) ->
@@ -360,7 +385,8 @@ parse_one_param(Seg, Acc) ->
             Name = mailio_ascii:lower(mailio_ascii:trim(NameRaw)),
             Val = strip_quotes(mailio_ascii:trim(ValRaw)),
             [{Name, Val} | Acc];
-        _ -> Acc
+        _ ->
+            Acc
     end.
 
 strip_quotes(Bin) ->
@@ -370,7 +396,8 @@ strip_quotes(Bin) ->
                 $" -> unescape(binary:part(Bin, 1, byte_size(Bin) - 2));
                 _ -> Bin
             end;
-        _ -> Bin
+        _ ->
+            Bin
     end.
 
 %% Reassemble RFC 2231 parameters: name*0, name*1*, and charset'lang'value.
@@ -380,7 +407,8 @@ reassemble_2231(RawParams) ->
     Grouped = group_2231(Ordered, #{}),
     maps:map(fun(_K, Parts) -> finalize_2231(Parts) end, Grouped).
 
-group_2231([], Acc) -> Acc;
+group_2231([], Acc) ->
+    Acc;
 group_2231([{Name, Val} | Rest], Acc) ->
     {Base, Index, Extended} = split_param_name(Name),
     Entry = maps:get(Base, Acc, []),
@@ -390,8 +418,10 @@ group_2231([{Name, Val} | Rest], Acc) ->
 %% name*3 -> {name, 3, false}; name*3* -> {name, 3, true}
 split_param_name(Name) ->
     case binary:split(Name, <<"*">>) of
-        [Base] -> {Base, 0, false};
-        [Base, <<>>] -> {Base, 0, true};
+        [Base] ->
+            {Base, 0, false};
+        [Base, <<>>] ->
+            {Base, 0, true};
         [Base, Rest] ->
             case binary:split(Rest, <<"*">>) of
                 [IdxBin, <<>>] -> {Base, to_int(IdxBin, 0), true};
@@ -400,8 +430,8 @@ split_param_name(Name) ->
     end.
 
 finalize_2231(Parts) ->
-    Sorted = lists:sort(fun({A,_,_}, {B,_,_}) -> A =< B end, Parts),
-    AnyExtended = lists:any(fun({_,Ext,_}) -> Ext end, Parts),
+    Sorted = lists:sort(fun({A, _, _}, {B, _, _}) -> A =< B end, Parts),
+    AnyExtended = lists:any(fun({_, Ext, _}) -> Ext end, Parts),
     Joined = iolist_to_binary([V || {_, _, V} <- Sorted]),
     case AnyExtended of
         false -> Joined;
@@ -422,12 +452,14 @@ nz(<<>>) -> undefined;
 nz(B) -> B.
 
 percent_decode(Bin) -> percent_decode(Bin, <<>>).
-percent_decode(<<>>, Acc) -> Acc;
+percent_decode(<<>>, Acc) ->
+    Acc;
 percent_decode(<<$%, H1, H2, Rest/binary>>, Acc) ->
     case {hexv(H1), hexv(H2)} of
         {V1, V2} when V1 =/= error, V2 =/= error ->
             percent_decode(Rest, <<Acc/binary, (V1 bsl 4 + V2)>>);
-        _ -> percent_decode(Rest, <<Acc/binary, $%, H1, H2>>)
+        _ ->
+            percent_decode(Rest, <<Acc/binary, $%, H1, H2>>)
     end;
 percent_decode(<<C, Rest/binary>>, Acc) ->
     percent_decode(Rest, <<Acc/binary, C>>).
@@ -439,28 +471,40 @@ percent_decode(<<C, Rest/binary>>, Acc) ->
 %% @doc Parse a Date header to Unix epoch seconds (UTC). Returns `error'
 %% if no date can be recovered.
 -spec parse_date(binary() | undefined) -> {ok, integer()} | error.
-parse_date(undefined) -> error;
+parse_date(undefined) ->
+    error;
 parse_date(Value) ->
     Clean = strip_comments(Value),
     %% Drop an optional leading "DoW,".
-    NoDow = case binary:split(Clean, <<",">>) of
-                [_Dow, Rest] -> Rest;
-                [Only] -> Only
-            end,
-    Tokens = [T || T <- binary:split(mailio_ascii:trim(NoDow), [<<" ">>, <<"\t">>], [global]),
-                   T =/= <<>>],
+    NoDow =
+        case binary:split(Clean, <<",">>) of
+            [_Dow, Rest] -> Rest;
+            [Only] -> Only
+        end,
+    Tokens = [
+        T
+     || T <- binary:split(mailio_ascii:trim(NoDow), [<<" ">>, <<"\t">>], [global]),
+        T =/= <<>>
+    ],
     parse_date_tokens(Tokens).
 
 parse_date_tokens([DayB, MonB, YearB, TimeB | ZoneRest]) ->
     case {to_int(DayB, error), month(MonB), to_int(YearB, error), parse_time(TimeB)} of
-        {Day, Mon, Year0, {H, Mi, S}}
-          when is_integer(Day), is_integer(Mon), is_integer(Year0) ->
+        {Day, Mon, Year0, {H, Mi, S}} when
+            is_integer(Day), is_integer(Mon), is_integer(Year0)
+        ->
             Year = normalize_year(Year0),
-            Zone = case ZoneRest of [Z | _] -> zone_offset(Z); [] -> 0 end,
+            Zone =
+                case ZoneRest of
+                    [Z | _] -> zone_offset(Z);
+                    [] -> 0
+                end,
             to_epoch(Year, Mon, Day, H, Mi, S, Zone);
-        _ -> error
+        _ ->
+            error
     end;
-parse_date_tokens(_) -> error.
+parse_date_tokens(_) ->
+    error.
 
 parse_time(Bin) ->
     case binary:split(Bin, <<":">>, [global]) of
@@ -472,10 +516,12 @@ parse_time(Bin) ->
 to_epoch(Year, Mon, Day, H, Mi, S, ZoneSecs) ->
     try
         Secs = calendar:datetime_to_gregorian_seconds(
-                 {{Year, Mon, Day}, {H, Mi, S}}),
+            {{Year, Mon, Day}, {H, Mi, S}}
+        ),
         Epoch = Secs - 62167219200 - ZoneSecs,
         {ok, Epoch}
-    catch _:_ -> error
+    catch
+        _:_ -> error
     end.
 
 normalize_year(Y) when Y >= 1000 -> Y;
@@ -486,25 +532,41 @@ zone_offset(<<Sign, H1, H2, M1, M2>>) when Sign =:= $+; Sign =:= $- ->
     H = to_int(<<H1, H2>>, 0),
     M = to_int(<<M1, M2>>, 0),
     Off = (H * 3600) + (M * 60),
-    case Sign of $- -> -Off; _ -> Off end;
+    case Sign of
+        $- -> -Off;
+        _ -> Off
+    end;
 zone_offset(Name) ->
     case mailio_ascii:upper(Name) of
-        <<"UT">> -> 0; <<"GMT">> -> 0; <<"UTC">> -> 0; <<"Z">> -> 0;
-        <<"EST">> -> -5*3600; <<"EDT">> -> -4*3600;
-        <<"CST">> -> -6*3600; <<"CDT">> -> -5*3600;
-        <<"MST">> -> -7*3600; <<"MDT">> -> -6*3600;
-        <<"PST">> -> -8*3600; <<"PDT">> -> -7*3600;
+        <<"UT">> -> 0;
+        <<"GMT">> -> 0;
+        <<"UTC">> -> 0;
+        <<"Z">> -> 0;
+        <<"EST">> -> -5 * 3600;
+        <<"EDT">> -> -4 * 3600;
+        <<"CST">> -> -6 * 3600;
+        <<"CDT">> -> -5 * 3600;
+        <<"MST">> -> -7 * 3600;
+        <<"MDT">> -> -6 * 3600;
+        <<"PST">> -> -8 * 3600;
+        <<"PDT">> -> -7 * 3600;
         _ -> 0
     end.
 
 month(Bin) ->
     case mailio_ascii:lower(Bin) of
-        <<"jan", _/binary>> -> 1; <<"feb", _/binary>> -> 2;
-        <<"mar", _/binary>> -> 3; <<"apr", _/binary>> -> 4;
-        <<"may", _/binary>> -> 5; <<"jun", _/binary>> -> 6;
-        <<"jul", _/binary>> -> 7; <<"aug", _/binary>> -> 8;
-        <<"sep", _/binary>> -> 9; <<"oct", _/binary>> -> 10;
-        <<"nov", _/binary>> -> 11; <<"dec", _/binary>> -> 12;
+        <<"jan", _/binary>> -> 1;
+        <<"feb", _/binary>> -> 2;
+        <<"mar", _/binary>> -> 3;
+        <<"apr", _/binary>> -> 4;
+        <<"may", _/binary>> -> 5;
+        <<"jun", _/binary>> -> 6;
+        <<"jul", _/binary>> -> 7;
+        <<"aug", _/binary>> -> 8;
+        <<"sep", _/binary>> -> 9;
+        <<"oct", _/binary>> -> 10;
+        <<"nov", _/binary>> -> 11;
+        <<"dec", _/binary>> -> 12;
         _ -> error
     end.
 

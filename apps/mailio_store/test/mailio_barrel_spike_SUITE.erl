@@ -16,22 +16,31 @@
 -include_lib("common_test/include/ct.hrl").
 -include_lib("stdlib/include/assert.hrl").
 
--export([all/0, init_per_suite/1, end_per_suite/1,
-         init_per_testcase/2, end_per_testcase/2]).
--export([batch_visibility_and_cursor/1,
-         batch_partial_failure/1,
-         explain_index_coverage/1,
-         changes_incremental/1,
-         attachment_streaming/1,
-         path_subscription_is_field_based/1]).
+-export([
+    all/0,
+    init_per_suite/1,
+    end_per_suite/1,
+    init_per_testcase/2,
+    end_per_testcase/2
+]).
+-export([
+    batch_visibility_and_cursor/1,
+    batch_partial_failure/1,
+    explain_index_coverage/1,
+    changes_incremental/1,
+    attachment_streaming/1,
+    path_subscription_is_field_based/1
+]).
 
 all() ->
-    [batch_visibility_and_cursor,
-     batch_partial_failure,
-     explain_index_coverage,
-     changes_incremental,
-     attachment_streaming,
-     path_subscription_is_field_based].
+    [
+        batch_visibility_and_cursor,
+        batch_partial_failure,
+        explain_index_coverage,
+        changes_incremental,
+        attachment_streaming,
+        path_subscription_is_field_based
+    ].
 
 init_per_suite(Config) ->
     PrivDir = ?config(priv_dir, Config),
@@ -51,7 +60,11 @@ init_per_testcase(TC, Config) ->
 
 end_per_testcase(_TC, Config) ->
     Db = ?config(db, Config),
-    try mailio_db:delete_db(Db) catch _:_ -> ok end,
+    try
+        mailio_db:delete_db(Db)
+    catch
+        _:_ -> ok
+    end,
     ok.
 
 %%====================================================================
@@ -64,8 +77,10 @@ batch_visibility_and_cursor(Config) ->
     ?assertEqual(20, length(Written)),
 
     %% All readable.
-    [?assertMatch({ok, #{<<"n">> := I}}, mailio_db:get(Db, id(I)))
-     || I <- lists:seq(1, 20)],
+    [
+        ?assertMatch({ok, #{<<"n">> := I}}, mailio_db:get(Db, id(I)))
+     || I <- lists:seq(1, 20)
+    ],
 
     %% Changes feed from the beginning sees all 20 ids.
     {ok, Changes, LastHlc} = mailio_db:changes(Db, first),
@@ -74,9 +89,12 @@ batch_visibility_and_cursor(Config) ->
     ?assertEqual(ExpectIds, SeenIds),
 
     %% Each change carries id, hlc, rev.
-    lists:foreach(fun(C) ->
-        ?assertMatch(#{id := _, hlc := _, rev := _}, C)
-    end, Changes),
+    lists:foreach(
+        fun(C) ->
+            ?assertMatch(#{id := _, hlc := _, rev := _}, C)
+        end,
+        Changes
+    ),
 
     %% Informative: do all docs in one batch share a single HLC point?
     HlcSet = lists:usort([maps:get(hlc, C) || C <- Changes]),
@@ -97,9 +115,11 @@ batch_partial_failure(Config) ->
     %% Seed an existing doc so we can force a conflict on it.
     {ok, _, _} = mailio_db:put(Db, #{<<"id">> => <<"exists">>, <<"v">> => 1}),
 
-    Batch = [#{<<"id">> => <<"fresh-a">>, <<"v">> => 1},
-             #{<<"id">> => <<"exists">>, <<"_rev">> => <<"1-bogus">>, <<"v">> => 2},
-             #{<<"id">> => <<"fresh-b">>, <<"v">> => 1}],
+    Batch = [
+        #{<<"id">> => <<"fresh-a">>, <<"v">> => 1},
+        #{<<"id">> => <<"exists">>, <<"_rev">> => <<"1-bogus">>, <<"v">> => 2},
+        #{<<"id">> => <<"fresh-b">>, <<"v">> => 1}
+    ],
     Results = mailio_db:put_batch(Db, Batch),
     ct:pal("partial batch results: ~p", [Results]),
     ?assertEqual(3, length(Results)),
@@ -145,12 +165,14 @@ explain_index_coverage(Config) ->
 changes_incremental(Config) ->
     Db = ?config(db, Config),
     {ok, _} = mailio_db:put_batch_strict(
-                Db, [#{<<"id">> => id(I)} || I <- lists:seq(1, 5)]),
+        Db, [#{<<"id">> => id(I)} || I <- lists:seq(1, 5)]
+    ),
     {ok, First, Hlc1} = mailio_db:changes(Db, first),
     ?assertEqual(5, length(First)),
 
     {ok, _} = mailio_db:put_batch_strict(
-                Db, [#{<<"id">> => id(I)} || I <- lists:seq(6, 8)]),
+        Db, [#{<<"id">> => id(I)} || I <- lists:seq(6, 8)]
+    ),
     {ok, Second, _Hlc2} = mailio_db:changes(Db, Hlc1),
     SecondIds = lists:usort([maps:get(id, C) || C <- Second]),
     ?assertEqual([id(6), id(7), id(8)], SecondIds),
@@ -187,13 +209,17 @@ path_subscription_is_field_based(Config) ->
     %% A subscription on an actual field path SHOULD fire.
     {ok, FieldSub} = mailio_db:subscribe_path(Db, <<"kind/#">>),
 
-    {ok, _, _} = mailio_db:put(Db, #{<<"id">> => <<"email/abc">>,
-                                     <<"kind">> => <<"email">>}),
+    {ok, _, _} = mailio_db:put(Db, #{
+        <<"id">> => <<"email/abc">>,
+        <<"kind">> => <<"email">>
+    }),
 
     FieldFired = wait_change(FieldSub, 2000),
     IdFired = wait_change(IdSub, 500),
-    ct:pal("field-path sub fired=~p  id-prefix sub fired=~p",
-           [FieldFired, IdFired]),
+    ct:pal(
+        "field-path sub fired=~p  id-prefix sub fired=~p",
+        [FieldFired, IdFired]
+    ),
 
     ?assert(FieldFired),
     ?assertNot(IdFired),
@@ -209,24 +235,39 @@ path_subscription_is_field_based(Config) ->
 id(I) -> iolist_to_binary(io_lib:format("doc-~4..0b", [I])).
 
 email_doc(I) ->
-    Mailbox = case I rem 2 of 0 -> <<"mbx-1">>; _ -> <<"mbx-2">> end,
-    #{<<"id">> => <<"email/", (integer_to_binary(I))/binary>>,
-      <<"mailboxIds">> => #{Mailbox => true},
-      <<"keywords">> => #{<<"$seen">> => true},
-      <<"_mailio">> => #{<<"received_ts">> => I,
-                         <<"from_norm">> => <<"alice@example.com">>}}.
+    Mailbox =
+        case I rem 2 of
+            0 -> <<"mbx-1">>;
+            _ -> <<"mbx-2">>
+        end,
+    #{
+        <<"id">> => <<"email/", (integer_to_binary(I))/binary>>,
+        <<"mailboxIds">> => #{Mailbox => true},
+        <<"keywords">> => #{<<"$seen">> => true},
+        <<"_mailio">> => #{
+            <<"received_ts">> => I,
+            <<"from_norm">> => <<"alice@example.com">>
+        }
+    }.
 
 assert_indexed(Db, Spec, Label) ->
     {ok, Plan} = mailio_db:explain(Db, Spec),
     Strategy = maps:get(strategy, Plan, undefined),
     ct:pal("explain ~s => strategy=~p plan=~p", [Label, Strategy, Plan]),
-    ?assert(lists:member(Strategy, [index_seek, index_scan, multi_index]),
-            lists:flatten(io_lib:format("~s expected indexed plan, got ~p",
-                                        [Label, Strategy]))).
+    ?assert(
+        lists:member(Strategy, [index_seek, index_scan, multi_index]),
+        lists:flatten(
+            io_lib:format(
+                "~s expected indexed plan, got ~p",
+                [Label, Strategy]
+            )
+        )
+    ).
 
 drain(Stream, Acc) ->
     case mailio_db:read_attachment_chunk(Stream) of
-        {ok, Chunk, Stream2} -> drain(Stream2, [Chunk | Acc]);
+        {ok, Chunk, Stream2} ->
+            drain(Stream2, [Chunk | Acc]);
         eof ->
             ok = mailio_db:close_attachment_stream(Stream),
             iolist_to_binary(lists:reverse(Acc))

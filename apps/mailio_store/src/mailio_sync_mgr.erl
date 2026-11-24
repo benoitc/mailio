@@ -15,20 +15,28 @@
 
 -include("mailio_store.hrl").
 
--export([start_link/1, sync_all/1, sync_mailbox/2, reconcile_mailbox/2,
-         mailboxes/1, watch_inbox/1]).
+-export([
+    start_link/1,
+    sync_all/1,
+    sync_mailbox/2,
+    reconcile_mailbox/2,
+    mailboxes/1,
+    watch_inbox/1
+]).
 -export([init/1, handle_call/3, handle_cast/2, handle_info/2, terminate/2]).
 
--record(state, {account_id :: binary(),
-                db :: binary(),
-                adapter :: module(),
-                adapter_config :: map(),
-                conn :: term() | undefined,
-                caps = #{} :: map(),
-                %% imap mailbox name -> local mailbox id
-                mailbox_map = #{} :: #{binary() => binary()},
-                watch :: term() | undefined,
-                watch_mailbox :: binary() | undefined}).
+-record(state, {
+    account_id :: binary(),
+    db :: binary(),
+    adapter :: module(),
+    adapter_config :: map(),
+    conn :: term() | undefined,
+    caps = #{} :: map(),
+    %% imap mailbox name -> local mailbox id
+    mailbox_map = #{} :: #{binary() => binary()},
+    watch :: term() | undefined,
+    watch_mailbox :: binary() | undefined
+}).
 
 %%====================================================================
 %% API
@@ -78,9 +86,13 @@ init(Args) ->
     Config = maps:get(adapter_config, Args, #{}),
     Db = mailio_account:db_name(AccountId),
     {ok, _} = mailio_db:ensure_db(Db),
-    State0 = #state{account_id = AccountId, db = Db, adapter = Adapter,
-                    adapter_config = Config,
-                    watch_mailbox = maps:get(watch_mailbox, Args, <<"INBOX">>)},
+    State0 = #state{
+        account_id = AccountId,
+        db = Db,
+        adapter = Adapter,
+        adapter_config = Config,
+        watch_mailbox = maps:get(watch_mailbox, Args, <<"INBOX">>)
+    },
     case connect(State0) of
         {ok, State1} -> {ok, State1};
         {error, Reason} -> {stop, Reason}
@@ -118,7 +130,11 @@ handle_info(_Info, State) ->
     {noreply, State}.
 
 terminate(_Reason, #state{adapter = Adapter, conn = Conn}) when Conn =/= undefined ->
-    try Adapter:close(Conn) catch _:_ -> ok end,
+    try
+        Adapter:close(Conn)
+    catch
+        _:_ -> ok
+    end,
     ok;
 terminate(_Reason, _State) ->
     ok.
@@ -144,7 +160,10 @@ discover_mailboxes(#state{adapter = Adapter, conn = Conn, db = Db} = State) ->
                 fun(Remote, Acc) ->
                     LocalId = ensure_mailbox_doc(Db, Remote),
                     maps:put(maps:get(id, Remote), LocalId, Acc)
-                end, #{}, Remotes),
+                end,
+                #{},
+                Remotes
+            ),
             State#state{mailbox_map = Map};
         {error, _} ->
             State
@@ -159,11 +178,15 @@ ensure_mailbox_doc(Db, Remote) ->
             LocalId;
         not_found ->
             LocalId = mailio_id:mailbox_id(),
-            Doc = mailio_mailbox:new(LocalId,
-                    #{name => maps:get(name, Remote),
-                      role => role_bin(maps:get(role, Remote, undefined)),
-                      imap_name => ImapName,
-                      imap_delimiter => maps:get(delimiter, Remote, <<"/">>)}),
+            Doc = mailio_mailbox:new(
+                LocalId,
+                #{
+                    name => maps:get(name, Remote),
+                    role => role_bin(maps:get(role, Remote, undefined)),
+                    imap_name => ImapName,
+                    imap_delimiter => maps:get(delimiter, Remote, <<"/">>)
+                }
+            ),
             {ok, _, _} = mailio_db:put(Db, Doc),
             LocalId
     end.
@@ -185,10 +208,14 @@ role_bin(Role) when is_atom(Role) -> atom_to_binary(Role, utf8).
 do_sync_all(State) ->
     ImapNames = maps:keys(State#state.mailbox_map),
     {Stats, State1} =
-        lists:foldl(fun(Name, {Acc, S}) ->
-                        {R, S1} = do_sync_mailbox(Name, S),
-                        {[{Name, R} | Acc], S1}
-                    end, {[], State}, ImapNames),
+        lists:foldl(
+            fun(Name, {Acc, S}) ->
+                {R, S1} = do_sync_mailbox(Name, S),
+                {[{Name, R} | Acc], S1}
+            end,
+            {[], State},
+            ImapNames
+        ),
     {{ok, #{mailboxes => Stats}}, State1}.
 
 do_sync_mailbox(ImapName, #state{mailbox_map = Map} = State) ->
@@ -199,8 +226,11 @@ do_sync_mailbox(ImapName, #state{mailbox_map = Map} = State) ->
             run_sync(ImapName, LocalId, State)
     end.
 
-run_sync(ImapName, LocalId,
-         #state{adapter = Adapter, conn = Conn, db = Db} = State) ->
+run_sync(
+    ImapName,
+    LocalId,
+    #state{adapter = Adapter, conn = Conn, db = Db} = State
+) ->
     RemoteState = load_cursor(Db, LocalId),
     case Adapter:fetch_changes_since(Conn, ImapName, RemoteState, #{}) of
         {ok, Changes, NewState, _More} ->
@@ -212,19 +242,25 @@ run_sync(ImapName, LocalId,
     end.
 
 apply_changes(State, ImapName, LocalId, Changes) ->
-    lists:foldl(fun(Change, Stats) ->
-                    apply_change(State, ImapName, LocalId, Change, Stats)
-                end, #{added => 0, updated => 0, removed => 0, reset => 0}, Changes).
+    lists:foldl(
+        fun(Change, Stats) ->
+            apply_change(State, ImapName, LocalId, Change, Stats)
+        end,
+        #{added => 0, updated => 0, removed => 0, reset => 0},
+        Changes
+    ).
 
 apply_change(State, ImapName, LocalId, {added, Info}, Stats) ->
     #state{adapter = Adapter, conn = Conn, account_id = AccountId} = State,
     Uid = maps:get(uid, Info),
     case fetch_raw(Adapter, Conn, ImapName, Uid) of
         {ok, Raw} ->
-            Opts = #{keywords => maps:get(keywords, Info, []),
-                     uid => Uid,
-                     uidvalidity => maps:get(uidvalidity, Info, 0),
-                     received_at => maps:get(internal_date, Info, undefined)},
+            Opts = #{
+                keywords => maps:get(keywords, Info, []),
+                uid => Uid,
+                uidvalidity => maps:get(uidvalidity, Info, 0),
+                received_at => maps:get(internal_date, Info, undefined)
+            },
             _ = mailio_account_writer:ingest(AccountId, LocalId, Raw, drop_undefined(Opts)),
             bump(Stats, added);
         {error, _} ->
@@ -235,8 +271,12 @@ apply_change(State, _ImapName, LocalId, {updated, Info}, Stats) ->
     Uid = maps:get(uid, Info),
     case mailio_account_writer:lookup_uid(AccountId, LocalId, Uid) of
         {ok, EmailId} ->
-            _ = mailio_account_writer:apply_flags(AccountId, LocalId, EmailId,
-                                                  maps:get(keywords, Info, [])),
+            _ = mailio_account_writer:apply_flags(
+                AccountId,
+                LocalId,
+                EmailId,
+                maps:get(keywords, Info, [])
+            ),
             bump(Stats, updated);
         {error, not_found} ->
             Stats
@@ -267,9 +307,16 @@ do_reconcile(ImapName, #state{mailbox_map = Map} = State) ->
             run_reconcile(ImapName, LocalId, State)
     end.
 
-run_reconcile(ImapName, LocalId,
-              #state{adapter = Adapter, conn = Conn, db = Db,
-                     account_id = AccountId} = State) ->
+run_reconcile(
+    ImapName,
+    LocalId,
+    #state{
+        adapter = Adapter,
+        conn = Conn,
+        db = Db,
+        account_id = AccountId
+    } = State
+) ->
     case erlang:function_exported(Adapter, list_uids, 2) of
         false ->
             {{error, not_supported}, State};
@@ -281,14 +328,19 @@ run_reconcile(ImapName, LocalId,
                     Removed = lists:foldl(
                         fun({Uid, EmailId, DocId}, N) ->
                             case sets:is_element(Uid, ServerSet) of
-                                true -> N;
+                                true ->
+                                    N;
                                 false ->
                                     _ = mailio_account_writer:remove_member(
-                                          AccountId, LocalId, EmailId),
+                                        AccountId, LocalId, EmailId
+                                    ),
                                     _ = mailio_db:delete(Db, DocId),
                                     N + 1
                             end
-                        end, 0, Local),
+                        end,
+                        0,
+                        Local
+                    ),
                     {{ok, #{removed => Removed}}, State};
                 {error, Reason} ->
                     {{error, Reason}, State}
@@ -301,8 +353,10 @@ local_uidmaps(Db, LocalId) ->
     Prefix = <<?ID_UIDMAP, LocalId/binary, "/">>,
     case mailio_db:by_id_prefix(Db, Prefix) of
         {ok, Docs} ->
-            [{maps:get(<<"uid">>, D), maps:get(<<"emailId">>, D), maps:get(<<"id">>, D)}
-             || D <- Docs, maps:is_key(<<"uid">>, D)];
+            [
+                {maps:get(<<"uid">>, D), maps:get(<<"emailId">>, D), maps:get(<<"id">>, D)}
+             || D <- Docs, maps:is_key(<<"uid">>, D)
+            ];
         _ ->
             []
     end.
@@ -310,10 +364,16 @@ local_uidmaps(Db, LocalId) ->
 fetch_raw(Adapter, Conn, ImapName, Uid) ->
     Self = self(),
     Ref = make_ref(),
-    Sink = fun(Bytes) -> Self ! {Ref, iolist_to_binary(Bytes)}, ok end,
+    Sink = fun(Bytes) ->
+        Self ! {Ref, iolist_to_binary(Bytes)},
+        ok
+    end,
     case Adapter:fetch_message(Conn, ImapName, Uid, Sink) of
         {ok, _} ->
-            receive {Ref, Raw} -> {ok, Raw} after 0 -> {error, no_data} end;
+            receive
+                {Ref, Raw} -> {ok, Raw}
+            after 0 -> {error, no_data}
+            end;
         {error, _} = Err ->
             Err
     end.
@@ -329,14 +389,17 @@ load_cursor(Db, LocalId) ->
     end.
 
 store_cursor(Db, LocalId, RemoteState) ->
-    Doc = #{<<"id">> => <<?ID_SYNC_IMAP, LocalId/binary>>,
-            <<"mailboxId">> => LocalId,
-            <<"remote_state">> => state_bin(RemoteState),
-            <<"lastSyncAt">> => erlang:system_time(second)},
-    Doc1 = case mailio_db:get(Db, <<?ID_SYNC_IMAP, LocalId/binary>>) of
-               {ok, #{<<"_rev">> := Rev}} -> Doc#{<<"_rev">> => Rev};
-               _ -> Doc
-           end,
+    Doc = #{
+        <<"id">> => <<?ID_SYNC_IMAP, LocalId/binary>>,
+        <<"mailboxId">> => LocalId,
+        <<"remote_state">> => state_bin(RemoteState),
+        <<"lastSyncAt">> => erlang:system_time(second)
+    },
+    Doc1 =
+        case mailio_db:get(Db, <<?ID_SYNC_IMAP, LocalId/binary>>) of
+            {ok, #{<<"_rev">> := Rev}} -> Doc#{<<"_rev">> => Rev};
+            _ -> Doc
+        end,
     {ok, _, _} = mailio_db:put(Db, Doc1),
     ok.
 
@@ -361,8 +424,14 @@ do_watch(#state{caps = Caps} = State) ->
             end
     end.
 
-start_watch(#state{adapter = Adapter, conn = Conn, watch = undefined,
-                   watch_mailbox = ImapName} = State) ->
+start_watch(
+    #state{
+        adapter = Adapter,
+        conn = Conn,
+        watch = undefined,
+        watch_mailbox = ImapName
+    } = State
+) ->
     case Adapter:watch(Conn, ImapName, self()) of
         {ok, Ref} -> State#state{watch = Ref};
         {error, _} -> State
@@ -370,8 +439,9 @@ start_watch(#state{adapter = Adapter, conn = Conn, watch = undefined,
 start_watch(State) ->
     State.
 
-stop_watch(#state{adapter = Adapter, conn = Conn, watch = Ref} = State)
-  when Ref =/= undefined ->
+stop_watch(#state{adapter = Adapter, conn = Conn, watch = Ref} = State) when
+    Ref =/= undefined
+->
     _ = Adapter:unwatch(Conn, Ref),
     State#state{watch = undefined};
 stop_watch(State) ->

@@ -25,31 +25,48 @@ text(Account, QueryString) ->
 text(Account, QueryString, Opts) ->
     Limit = maps:get(limit, Opts, 20),
     Filter0 = #{text => QueryString},
-    Filter = case maps:get(mailbox, Opts, undefined) of
-                 undefined -> Filter0;
-                 MbxId -> #{operator => 'AND',
-                            conditions => [Filter0, #{inMailbox => MbxId}]}
-             end,
+    Filter =
+        case maps:get(mailbox, Opts, undefined) of
+            undefined ->
+                Filter0;
+            MbxId ->
+                #{
+                    operator => 'AND',
+                    conditions => [Filter0, #{inMailbox => MbxId}]
+                }
+        end,
     {ok, #{<<"ids">> := Ids}} =
-        mailio_email:query(Account, #{filter => Filter,
-                                      sort => [#{<<"property">> => <<"receivedAt">>,
-                                                 <<"isAscending">> => false}],
-                                      limit => Limit}),
+        mailio_email:query(Account, #{
+            filter => Filter,
+            sort => [
+                #{
+                    <<"property">> => <<"receivedAt">>,
+                    <<"isAscending">> => false
+                }
+            ],
+            limit => Limit
+        }),
     Db = mailio_account:db_name(Account),
     Results = [result(Db, Id, QueryString) || Id <- Ids],
     {ok, Results}.
 
 result(Db, EmailId, Query) ->
     {ok, Email} = mailio_db:get(Db, mailio_email:doc_id(EmailId)),
-    #{<<"emailId">> => EmailId,
-      <<"threadId">> => mailio_email:thread_id(Email),
-      <<"subject">> => maps:get(<<"subject">>, Email, null),
-      <<"receivedAt">> => maps:get(<<"receivedAt">>, Email, null),
-      <<"snippet">> => snippet(Db, EmailId, Email, Query)}.
+    #{
+        <<"emailId">> => EmailId,
+        <<"threadId">> => mailio_email:thread_id(Email),
+        <<"subject">> => maps:get(<<"subject">>, Email, null),
+        <<"receivedAt">> => maps:get(<<"receivedAt">>, Email, null),
+        <<"snippet">> => snippet(Db, EmailId, Email, Query)
+    }.
 
 %% Build a snippet around the first query match in subject + body text.
 snippet(Db, EmailId, Email, Query) ->
-    Subject = case maps:get(<<"subject">>, Email, null) of null -> <<>>; S -> S end,
+    Subject =
+        case maps:get(<<"subject">>, Email, null) of
+            null -> <<>>;
+            S -> S
+        end,
     Body = body_text(Db, EmailId),
     Haystack = <<Subject/binary, " ", Body/binary>>,
     case binary:match(mailio_ascii:lower(Haystack), mailio_ascii:lower(Query)) of
@@ -70,13 +87,28 @@ window(Bin, Pos, Len) ->
     End = min(byte_size(Bin), Pos + Len + ?SNIPPET_RADIUS),
     Slice = binary:part(Bin, Start, End - Start),
     Collapsed = collapse_ws(Slice),
-    Prefix = case Start > 0 of true -> <<"…">>; false -> <<>> end,
-    Suffix = case End < byte_size(Bin) of true -> <<"…">>; false -> <<>> end,
+    Prefix =
+        case Start > 0 of
+            true -> <<"…">>;
+            false -> <<>>
+        end,
+    Suffix =
+        case End < byte_size(Bin) of
+            true -> <<"…">>;
+            false -> <<>>
+        end,
     <<Prefix/binary, Collapsed/binary, Suffix/binary>>.
 
 collapse_ws(Bin) ->
-    Parts = [P || P <- binary:split(Bin, [<<" ">>, <<"\t">>, <<"\r">>, <<"\n">>],
-                                    [global]), P =/= <<>>],
+    Parts = [
+        P
+     || P <- binary:split(
+            Bin,
+            [<<" ">>, <<"\t">>, <<"\r">>, <<"\n">>],
+            [global]
+        ),
+        P =/= <<>>
+    ],
     iolist_to_binary(lists:join(<<" ">>, Parts)).
 
 body_text(Db, EmailId) ->

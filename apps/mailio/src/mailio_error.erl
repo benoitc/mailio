@@ -13,11 +13,13 @@
 
 -export_type([error_map/0, t/0]).
 
--type error_map() :: #{code := atom(),
-                       message := binary(),
-                       retryable := boolean(),
-                       source := atom(),
-                       detail := map()}.
+-type error_map() :: #{
+    code := atom(),
+    message := binary(),
+    retryable := boolean(),
+    source := atom(),
+    detail := map()
+}.
 -type t() :: {error, error_map()}.
 
 %% @doc Build an error from a code alone; message/source/retryable are derived.
@@ -30,13 +32,16 @@ new(Code, Detail) when is_atom(Code), is_map(Detail) ->
     new(Code, default_message(Code), Detail).
 
 -spec new(atom(), binary(), map()) -> t().
-new(Code, Message, Detail)
-  when is_atom(Code), is_binary(Message), is_map(Detail) ->
-    {error, #{code => Code,
-              message => Message,
-              retryable => default_retryable(Code),
-              source => source_of(Code),
-              detail => Detail}}.
+new(Code, Message, Detail) when
+    is_atom(Code), is_binary(Message), is_map(Detail)
+->
+    {error, #{
+        code => Code,
+        message => Message,
+        retryable => default_retryable(Code),
+        source => source_of(Code),
+        detail => Detail
+    }}.
 
 -spec is_error(term()) -> boolean().
 is_error({error, #{code := _, message := _, source := _}}) -> true;
@@ -76,13 +81,22 @@ source_of(Code) ->
                 true -> binary_to_atom(Prefix, utf8);
                 false -> mailio
             end;
-        [_Single] -> mailio
+        [_Single] ->
+            mailio
     end.
 
 -spec known_prefixes() -> [binary()].
 known_prefixes() ->
-    [<<"imap">>, <<"smtp">>, <<"pop3">>, <<"jmap">>,
-     <<"store">>, <<"mime">>, <<"sync">>, <<"auth">>].
+    [
+        <<"imap">>,
+        <<"smtp">>,
+        <<"pop3">>,
+        <<"jmap">>,
+        <<"store">>,
+        <<"mime">>,
+        <<"sync">>,
+        <<"auth">>
+    ].
 
 -spec default_retryable(atom()) -> boolean().
 default_retryable(imap_disconnected) -> true;

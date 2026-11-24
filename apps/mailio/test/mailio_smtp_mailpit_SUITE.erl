@@ -45,8 +45,10 @@ init_per_suite(Config) ->
             {skip, "Mailpit is not running (see the header of this suite)"};
         true ->
             case find_ca(proplists:get_value(data_dir, Config)) of
-                undefined -> {skip, "run apps/mailio/test/mailpit/gen-certs.sh and restart Mailpit"};
-                CA -> [{ca, CA} | Config]
+                undefined ->
+                    {skip, "run apps/mailio/test/mailpit/gen-certs.sh and restart Mailpit"};
+                CA ->
+                    [{ca, CA} | Config]
             end
     end.
 
@@ -58,17 +60,24 @@ init_per_testcase(_, Config) ->
 
 reachable(Port) ->
     case gen_tcp:connect("127.0.0.1", Port, [binary], 500) of
-        {ok, S} -> gen_tcp:close(S), true;
-        _ -> false
+        {ok, S} ->
+            gen_tcp:close(S),
+            true;
+        _ ->
+            false
     end.
 
 find_ca(Dir) ->
     Rel = "apps/mailio/test/mailpit/certs/ca.pem",
     case filelib:is_file(filename:join(Dir, Rel)) of
-        true -> filename:join(Dir, Rel);
+        true ->
+            filename:join(Dir, Rel);
         false ->
             Up = filename:dirname(string:trim(Dir, trailing, "/")),
-            case Up =:= Dir of true -> undefined; false -> find_ca(Up) end
+            case Up =:= Dir of
+                true -> undefined;
+                false -> find_ca(Up)
+            end
     end.
 
 %%--------------------------------------------------------------------
@@ -76,12 +85,20 @@ find_ca(Dir) ->
 
 cfg(Extra) ->
     maps:merge(
-        #{host => <<"127.0.0.1">>, port => ?SMTP_PORT, tls => false, ehlo_name => <<"mailio.test">>,
-          credentials => {password, <<"testuser">>, <<"testpass">>}},
-        Extra).
+        #{
+            host => <<"127.0.0.1">>,
+            port => ?SMTP_PORT,
+            tls => false,
+            ehlo_name => <<"mailio.test">>,
+            credentials => {password, <<"testuser">>, <<"testpass">>}
+        },
+        Extra
+    ).
 
 http_json(Method, Path) ->
-    {ok, {{_, 200, _}, _, Body}} = httpc:request(Method, {?API ++ Path, []}, [], [{body_format, binary}]),
+    {ok, {{_, 200, _}, _, Body}} = httpc:request(Method, {?API ++ Path, []}, [], [
+        {body_format, binary}
+    ]),
     json:decode(Body).
 
 clear() ->
@@ -99,16 +116,26 @@ addrs(L) -> [maps:get(<<"Address">>, A) || A <- L].
 build(Spec) -> mailio_mime_render:build(Spec).
 
 simple(Spec) ->
-    build(maps:merge(#{from => [#{email => <<"me@example.test">>, name => <<"Me">>}],
-                       to => [#{email => <<"you@example.test">>}],
-                       subject => <<"hello">>, message_id => <<"m1@mailio.test">>,
-                       text => <<"Hi there.\r\n">>}, Spec)).
+    build(
+        maps:merge(
+            #{
+                from => [#{email => <<"me@example.test">>, name => <<"Me">>}],
+                to => [#{email => <<"you@example.test">>}],
+                subject => <<"hello">>,
+                message_id => <<"m1@mailio.test">>,
+                text => <<"Hi there.\r\n">>
+            },
+            Spec
+        )
+    ).
 
 %%--------------------------------------------------------------------
 %% Cases
 
 plain_with_login(_) ->
-    {ok, R} = mailio_smtp:submit(cfg(#{}), <<"me@example.test">>, [<<"you@example.test">>], simple(#{})),
+    {ok, R} = mailio_smtp:submit(
+        cfg(#{}), <<"me@example.test">>, [<<"you@example.test">>], simple(#{})
+    ),
     [<<"you@example.test">>] = maps:get(accepted, R),
     [] = maps:get(rejected, R),
     250 = maps:get(code, R),
@@ -118,16 +145,24 @@ plain_with_login(_) ->
 
 authentication_required(_) ->
     {error, #{code := Code}} =
-        mailio_smtp:submit(maps:remove(credentials, cfg(#{})), <<"me@example.test">>,
-                           [<<"you@example.test">>], simple(#{})),
+        mailio_smtp:submit(
+            maps:remove(credentials, cfg(#{})),
+            <<"me@example.test">>,
+            [<<"you@example.test">>],
+            simple(#{})
+        ),
     true = lists:member(Code, [smtp_rejected, smtp_transient]),
     #{<<"messages">> := []} = http_json(get, "/messages"),
     ok.
 
 wrong_password(_) ->
     {error, #{code := smtp_auth_failed}} =
-        mailio_smtp:submit(cfg(#{credentials => {password, <<"testuser">>, <<"nope">>}}),
-                           <<"me@example.test">>, [<<"you@example.test">>], simple(#{})),
+        mailio_smtp:submit(
+            cfg(#{credentials => {password, <<"testuser">>, <<"nope">>}}),
+            <<"me@example.test">>,
+            [<<"you@example.test">>],
+            simple(#{})
+        ),
     #{<<"messages">> := []} = http_json(get, "/messages"),
     ok.
 
@@ -135,8 +170,12 @@ content_arrives_intact(_) ->
     %% a line that starts with a dot must survive the SMTP dot-stuffing, and
     %% so must a line that is only a dot
     Text = <<"first\r\n.leading dot\r\n.\r\nlast line\r\n">>,
-    {ok, _} = mailio_smtp:submit(cfg(#{}), <<"me@example.test">>, [<<"you@example.test">>],
-                                 simple(#{text => Text})),
+    {ok, _} = mailio_smtp:submit(
+        cfg(#{}),
+        <<"me@example.test">>,
+        [<<"you@example.test">>],
+        simple(#{text => Text})
+    ),
     Msg = the_message(),
     Body = maps:get(<<"Text">>, Msg),
     Lines = [string:trim(L, trailing, "\r") || L <- binary:split(Body, <<"\n">>, [global])],
@@ -148,32 +187,63 @@ content_arrives_intact(_) ->
     ok.
 
 non_ascii_message(_) ->
-    {ok, _} = mailio_smtp:submit(cfg(#{}), <<"me@example.test">>, [<<"you@example.test">>],
-                                 simple(#{subject => <<"Caf\xc3\xa9 \xe2\x82\xac"/utf8>>,
-                                          text => <<"Cr\xc3\xa8me br\xc3\xbbl\xc3\xa9e\r\n"/utf8>>})),
+    {ok, _} = mailio_smtp:submit(
+        cfg(#{}),
+        <<"me@example.test">>,
+        [<<"you@example.test">>],
+        simple(#{
+            subject => <<"Caf\xc3\xa9 \xe2\x82\xac"/utf8>>,
+            text => <<"Cr\xc3\xa8me br\xc3\xbbl\xc3\xa9e\r\n"/utf8>>
+        })
+    ),
     Msg = the_message(),
     <<"Caf\xc3\xa9 \xe2\x82\xac"/utf8>> = maps:get(<<"Subject">>, Msg),
-    true = binary:match(maps:get(<<"Text">>, Msg), <<"Cr\xc3\xa8me br\xc3\xbbl\xc3\xa9e"/utf8>>) =/= nomatch,
+    true =
+        binary:match(maps:get(<<"Text">>, Msg), <<"Cr\xc3\xa8me br\xc3\xbbl\xc3\xa9e"/utf8>>) =/=
+            nomatch,
     ok.
 
 attachment_arrives_intact(_) ->
     Bytes = crypto:strong_rand_bytes(300000),
     Raw = mailio_mime_render:render(#{
-        type => <<"multipart">>, subtype => <<"mixed">>,
-        headers => [{<<"From">>, <<"me@example.test">>}, {<<"To">>, <<"you@example.test">>},
-                    {<<"Subject">>, <<"with file">>}, {<<"MIME-Version">>, <<"1.0">>}],
+        type => <<"multipart">>,
+        subtype => <<"mixed">>,
+        headers => [
+            {<<"From">>, <<"me@example.test">>},
+            {<<"To">>, <<"you@example.test">>},
+            {<<"Subject">>, <<"with file">>},
+            {<<"MIME-Version">>, <<"1.0">>}
+        ],
         parts => [
-            #{type => <<"text">>, subtype => <<"plain">>, charset => <<"utf-8">>, encoding => <<"7bit">>,
-              body => <<"see attached\r\n">>},
-            #{type => <<"application">>, subtype => <<"octet-stream">>, encoding => <<"base64">>,
-              disposition => <<"attachment">>, filename => <<"blob.bin">>, body => Bytes}]}),
+            #{
+                type => <<"text">>,
+                subtype => <<"plain">>,
+                charset => <<"utf-8">>,
+                encoding => <<"7bit">>,
+                body => <<"see attached\r\n">>
+            },
+            #{
+                type => <<"application">>,
+                subtype => <<"octet-stream">>,
+                encoding => <<"base64">>,
+                disposition => <<"attachment">>,
+                filename => <<"blob.bin">>,
+                body => Bytes
+            }
+        ]
+    }),
     {ok, _} = mailio_smtp:submit(cfg(#{}), <<"me@example.test">>, [<<"you@example.test">>], Raw),
     Msg = the_message(),
-    [#{<<"FileName">> := <<"blob.bin">>, <<"PartID">> := PartId}] = maps:get(<<"Attachments">>, Msg),
+    [#{<<"FileName">> := <<"blob.bin">>, <<"PartID">> := PartId}] = maps:get(
+        <<"Attachments">>, Msg
+    ),
     Id = maps:get(<<"ID">>, Msg),
     {ok, {{_, 200, _}, _, Got}} = httpc:request(
-        get, {?API ++ "/message/" ++ binary_to_list(Id) ++ "/part/" ++ binary_to_list(PartId), []},
-        [], [{body_format, binary}]),
+        get,
+        {?API ++ "/message/" ++ binary_to_list(Id) ++ "/part/" ++ binary_to_list(PartId), []},
+        [],
+        [{body_format, binary}]
+    ),
     Bytes = Got,
     ok.
 
@@ -183,8 +253,12 @@ bcc_is_not_in_the_headers(_) ->
     %% recipient it lists as Bcc was not in any header.
     Raw = simple(#{}),
     nomatch = binary:match(Raw, <<"hidden@example.test">>),
-    {ok, R} = mailio_smtp:submit(cfg(#{}), <<"me@example.test">>,
-                                 [<<"you@example.test">>, <<"hidden@example.test">>], Raw),
+    {ok, R} = mailio_smtp:submit(
+        cfg(#{}),
+        <<"me@example.test">>,
+        [<<"you@example.test">>, <<"hidden@example.test">>],
+        Raw
+    ),
     2 = length(maps:get(accepted, R)),
     Msg = the_message(),
     [<<"you@example.test">>] = addrs(maps:get(<<"To">>, Msg)),
@@ -193,16 +267,24 @@ bcc_is_not_in_the_headers(_) ->
 
 starttls_verified(Config) ->
     CA = ?config(ca, Config),
-    {ok, _} = mailio_smtp:submit(cfg(#{host => <<"localhost">>, tls => starttls, cacertfile => CA}),
-                                 <<"me@example.test">>, [<<"you@example.test">>], simple(#{})),
+    {ok, _} = mailio_smtp:submit(
+        cfg(#{host => <<"localhost">>, tls => starttls, cacertfile => CA}),
+        <<"me@example.test">>,
+        [<<"you@example.test">>],
+        simple(#{})
+    ),
     <<"hello">> = maps:get(<<"Subject">>, the_message()),
     ok.
 
 starttls_untrusted_refused(_) ->
     %% the certificate is not in the default trust store
     {error, #{code := smtp_tls_failed}} =
-        mailio_smtp:submit(cfg(#{host => <<"localhost">>, tls => starttls}),
-                           <<"me@example.test">>, [<<"you@example.test">>], simple(#{})),
+        mailio_smtp:submit(
+            cfg(#{host => <<"localhost">>, tls => starttls}),
+            <<"me@example.test">>,
+            [<<"you@example.test">>],
+            simple(#{})
+        ),
     #{<<"messages">> := []} = http_json(get, "/messages"),
     ok.
 
@@ -210,7 +292,11 @@ starttls_wrong_host_refused(Config) ->
     CA = ?config(ca, Config),
     %% the certificate is for "localhost", not for 127.0.0.1
     {error, #{code := smtp_tls_failed}} =
-        mailio_smtp:submit(cfg(#{host => <<"127.0.0.1">>, tls => starttls, cacertfile => CA}),
-                           <<"me@example.test">>, [<<"you@example.test">>], simple(#{})),
+        mailio_smtp:submit(
+            cfg(#{host => <<"127.0.0.1">>, tls => starttls, cacertfile => CA}),
+            <<"me@example.test">>,
+            [<<"you@example.test">>],
+            simple(#{})
+        ),
     #{<<"messages">> := []} = http_json(get, "/messages"),
     ok.

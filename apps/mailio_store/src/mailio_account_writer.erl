@@ -26,9 +26,11 @@
 -export([uidmap_id/3, lookup_uid/3]).
 -export([init/1, handle_call/3, handle_cast/2, handle_info/2, terminate/2]).
 
--record(state, {account_id :: binary(),
-                db :: binary(),
-                emit_cursor :: barrel_hlc:timestamp() | first}).
+-record(state, {
+    account_id :: binary(),
+    db :: binary(),
+    emit_cursor :: barrel_hlc:timestamp() | first
+}).
 
 -define(PARSE_VERSION, 1).
 
@@ -194,8 +196,11 @@ do_apply_flags(Db, _MailboxId, EmailId, ServerKeywords) ->
         {ok, Email} ->
             WasSeen = mailio_email:is_seen(Email),
             Existing = mailio_email:keywords(Email),
-            LocalOnly = [K || K <- Existing,
-                              not mailio_imap_map:is_representable_keyword(K)],
+            LocalOnly = [
+                K
+             || K <- Existing,
+                not mailio_imap_map:is_representable_keyword(K)
+            ],
             New = lists:usort(ServerKeywords ++ LocalOnly),
             Email1 = Email#{<<"keywords">> => keywords_map(New)},
             {ok, _, _} = mailio_db:put(Db, Email1),
@@ -249,14 +254,18 @@ do_patch(Db, EmailId, Patch) ->
         {ok, Email} ->
             OldSeen = mailio_email:is_seen(Email),
             OldMbx = mailio_email:mailbox_ids(Email),
-            NewKw = apply_set(mailio_email:keywords(Email),
-                              maps:get(set_keywords, Patch, undefined),
-                              maps:get(add_keywords, Patch, []),
-                              maps:get(remove_keywords, Patch, [])),
-            NewMbx = apply_set(OldMbx,
-                               maps:get(set_mailboxes, Patch, undefined),
-                               maps:get(add_mailboxes, Patch, []),
-                               maps:get(remove_mailboxes, Patch, [])),
+            NewKw = apply_set(
+                mailio_email:keywords(Email),
+                maps:get(set_keywords, Patch, undefined),
+                maps:get(add_keywords, Patch, []),
+                maps:get(remove_keywords, Patch, [])
+            ),
+            NewMbx = apply_set(
+                OldMbx,
+                maps:get(set_mailboxes, Patch, undefined),
+                maps:get(add_mailboxes, Patch, []),
+                maps:get(remove_mailboxes, Patch, [])
+            ),
             NewSeen = lists:member(?KW_SEEN, NewKw),
             case NewMbx of
                 [] ->
@@ -264,8 +273,10 @@ do_patch(Db, EmailId, Patch) ->
                     [bump_mailbox(Db, M, -1, seen_delta(OldSeen, true) * -1) || M <- OldMbx],
                     destroy_email(Db, Email);
                 _ ->
-                    Email1 = Email#{<<"keywords">> => to_map(NewKw),
-                                    <<"mailboxIds">> => to_map(NewMbx)},
+                    Email1 = Email#{
+                        <<"keywords">> => to_map(NewKw),
+                        <<"mailboxIds">> => to_map(NewMbx)
+                    },
                     {ok, _, _} = mailio_db:put(Db, Email1),
                     update_patch_counters(Db, OldMbx, NewMbx, OldSeen, NewSeen)
             end,
@@ -292,7 +303,11 @@ unread_of(false) -> 1.
 
 %% Apply set/add/remove to a list, returning a sorted unique list.
 apply_set(Current, SetVal, Add, Remove) ->
-    Base = case SetVal of undefined -> Current; L when is_list(L) -> L end,
+    Base =
+        case SetVal of
+            undefined -> Current;
+            L when is_list(L) -> L
+        end,
     lists:usort((Base ++ Add) -- Remove).
 
 to_map(List) -> maps:from_list([{K, true} || K <- List]).
@@ -308,21 +323,30 @@ do_set_counters(Db, MailboxId, Total, Unread) ->
             {error, not_found}
     end.
 
-adjust_unread(_Db, _Mailboxes, Seen, Seen) -> ok;       %% no change
-adjust_unread(Db, Mailboxes, true, false) ->            %% became unread
-    [bump_mailbox(Db, M, 0, +1) || M <- Mailboxes], ok;
-adjust_unread(Db, Mailboxes, false, true) ->            %% became read
-    [bump_mailbox(Db, M, 0, -1) || M <- Mailboxes], ok.
+%% no change
+adjust_unread(_Db, _Mailboxes, Seen, Seen) ->
+    ok;
+%% became unread
+adjust_unread(Db, Mailboxes, true, false) ->
+    [bump_mailbox(Db, M, 0, +1) || M <- Mailboxes],
+    ok;
+%% became read
+adjust_unread(Db, Mailboxes, false, true) ->
+    [bump_mailbox(Db, M, 0, -1) || M <- Mailboxes],
+    ok.
 
 maybe_write_uidmap(Db, MailboxId, Opts, EmailId) ->
     case maps:get(uid, Opts, undefined) of
-        undefined -> ok;
+        undefined ->
+            ok;
         Uid ->
             %% Enumerated by the `uidmap/<mailbox>/' id prefix, so no
             %% separate mailboxId field is needed for lookup.
-            Doc = #{<<"id">> => <<?ID_UIDMAP, MailboxId/binary, "/", (to_bin(Uid))/binary>>,
-                    <<"uid">> => Uid,
-                    <<"emailId">> => EmailId},
+            Doc = #{
+                <<"id">> => <<?ID_UIDMAP, MailboxId/binary, "/", (to_bin(Uid))/binary>>,
+                <<"uid">> => Uid,
+                <<"emailId">> => EmailId
+            },
             {ok, _, _} = mailio_db:put(Db, Doc),
             ok
     end.
@@ -333,7 +357,8 @@ full_ingest(Db, EmailId, DocId, MailboxId, Raw, Opts) ->
     {ok, BlobId} = mailio_blob:put(Db, Raw, DocId),
 
     Subject = mailio_rfc5322:decode_unstructured(
-                mailio_rfc5322:header(<<"subject">>, Headers)),
+        mailio_rfc5322:header(<<"subject">>, Headers)
+    ),
     From = addresses(<<"from">>, Headers),
     To = addresses(<<"to">>, Headers),
     Cc = addresses(<<"cc">>, Headers),
@@ -341,11 +366,14 @@ full_ingest(Db, EmailId, DocId, MailboxId, Raw, Opts) ->
     ReplyTo = addresses(<<"reply-to">>, Headers),
     Sender = addresses(<<"sender">>, Headers),
     MessageId = mailio_rfc5322:parse_message_id(
-                  mailio_rfc5322:header(<<"message-id">>, Headers)),
+        mailio_rfc5322:header(<<"message-id">>, Headers)
+    ),
     References = mailio_rfc5322:parse_message_ids(
-                   mailio_rfc5322:header(<<"references">>, Headers)),
+        mailio_rfc5322:header(<<"references">>, Headers)
+    ),
     InReplyTo = mailio_rfc5322:parse_message_ids(
-                  mailio_rfc5322:header(<<"in-reply-to">>, Headers)),
+        mailio_rfc5322:header(<<"in-reply-to">>, Headers)
+    ),
     ReceivedTs = received_ts(Opts, Headers),
     SentTs = sent_ts(Headers),
     SubjectNorm = mailio_threading:normalize_subject(Subject),
@@ -357,47 +385,55 @@ full_ingest(Db, EmailId, DocId, MailboxId, Raw, Opts) ->
 
     Participants = participant_addrs(From ++ To ++ Cc),
     {ThreadId, ThreadDoc, MsgidDocs} =
-        mailio_threading:assign(Db, #{email_id => EmailId,
-                                      message_id => MessageId,
-                                      in_reply_to => InReplyTo,
-                                      references => References,
-                                      subject_norm => SubjectNorm,
-                                      received_ts => ReceivedTs,
-                                      participants => Participants}),
+        mailio_threading:assign(Db, #{
+            email_id => EmailId,
+            message_id => MessageId,
+            in_reply_to => InReplyTo,
+            references => References,
+            subject_norm => SubjectNorm,
+            received_ts => ReceivedTs,
+            participants => Participants
+        }),
 
-    TextDoc = #{<<"id">> => <<?ID_TEXT, EmailId/binary>>,
-                <<"emailId">> => EmailId,
-                <<"body_text">> => BodyText,
-                <<"attachment_text">> => <<>>,
-                <<"tokens_version">> => ?PARSE_VERSION},
+    TextDoc = #{
+        <<"id">> => <<?ID_TEXT, EmailId/binary>>,
+        <<"emailId">> => EmailId,
+        <<"body_text">> => BodyText,
+        <<"attachment_text">> => <<>>,
+        <<"tokens_version">> => ?PARSE_VERSION
+    },
 
-    EmailDoc = #{<<"id">> => DocId,
-                 <<"blobId">> => BlobId,
-                 <<"threadId">> => ThreadId,
-                 <<"mailboxIds">> => #{MailboxId => true},
-                 <<"keywords">> => Keywords,
-                 <<"size">> => byte_size(Raw),
-                 <<"receivedAt">> => rfc3339(ReceivedTs),
-                 <<"messageId">> => null_or_list(maybe_list(MessageId)),
-                 <<"inReplyTo">> => null_or_list(InReplyTo),
-                 <<"references">> => null_or_list(References),
-                 <<"from">> => null_or_list(From),
-                 <<"sender">> => null_or_list(Sender),
-                 <<"to">> => null_or_list(To),
-                 <<"cc">> => null_or_list(Cc),
-                 <<"bcc">> => null_or_list(Bcc),
-                 <<"replyTo">> => null_or_list(ReplyTo),
-                 <<"subject">> => null_or(Subject),
-                 <<"sentAt">> => sent_at(SentTs),
-                 <<"hasAttachment">> => HasAttachment,
-                 <<"preview">> => Preview,
-                 <<"attachments">> => Attachments,
-                 ?MAILIO_NS => #{<<"imap">> => imap_map(MailboxId, Opts),
-                                 <<"parse_version">> => ?PARSE_VERSION,
-                                 <<"from_norm">> => norm_addrs(From),
-                                 <<"to_norm">> => norm_addrs(To ++ Cc ++ Bcc),
-                                 <<"subject_norm">> => SubjectNorm,
-                                 <<"received_ts">> => ReceivedTs}},
+    EmailDoc = #{
+        <<"id">> => DocId,
+        <<"blobId">> => BlobId,
+        <<"threadId">> => ThreadId,
+        <<"mailboxIds">> => #{MailboxId => true},
+        <<"keywords">> => Keywords,
+        <<"size">> => byte_size(Raw),
+        <<"receivedAt">> => rfc3339(ReceivedTs),
+        <<"messageId">> => null_or_list(maybe_list(MessageId)),
+        <<"inReplyTo">> => null_or_list(InReplyTo),
+        <<"references">> => null_or_list(References),
+        <<"from">> => null_or_list(From),
+        <<"sender">> => null_or_list(Sender),
+        <<"to">> => null_or_list(To),
+        <<"cc">> => null_or_list(Cc),
+        <<"bcc">> => null_or_list(Bcc),
+        <<"replyTo">> => null_or_list(ReplyTo),
+        <<"subject">> => null_or(Subject),
+        <<"sentAt">> => sent_at(SentTs),
+        <<"hasAttachment">> => HasAttachment,
+        <<"preview">> => Preview,
+        <<"attachments">> => Attachments,
+        ?MAILIO_NS => #{
+            <<"imap">> => imap_map(MailboxId, Opts),
+            <<"parse_version">> => ?PARSE_VERSION,
+            <<"from_norm">> => norm_addrs(From),
+            <<"to_norm">> => norm_addrs(To ++ Cc ++ Bcc),
+            <<"subject_norm">> => SubjectNorm,
+            <<"received_ts">> => ReceivedTs
+        }
+    },
 
     %% Write supporting docs first, the email doc LAST (see module note).
     Supporting = [ThreadDoc | MsgidDocs] ++ [TextDoc],
@@ -437,9 +473,11 @@ text_utf8(Leaf) ->
 
 attachment_summary(Leaf) ->
     Body = mailio_mime:body(Leaf),
-    #{<<"type">> => mailio_mime:content_type(Leaf),
-      <<"name">> => null_or(mailio_mime:filename(Leaf)),
-      <<"size">> => byte_size(Body)}.
+    #{
+        <<"type">> => mailio_mime:content_type(Leaf),
+        <<"name">> => null_or(mailio_mime:filename(Leaf)),
+        <<"size">> => byte_size(Body)
+    }.
 
 preview(BodyText) ->
     Collapsed = collapse_ws(BodyText),
@@ -449,8 +487,15 @@ preview(BodyText) ->
     end.
 
 collapse_ws(Bin) ->
-    Parts = [P || P <- binary:split(Bin, [<<" ">>, <<"\t">>, <<"\r">>, <<"\n">>],
-                                    [global]), P =/= <<>>],
+    Parts = [
+        P
+     || P <- binary:split(
+            Bin,
+            [<<" ">>, <<"\t">>, <<"\r">>, <<"\n">>],
+            [global]
+        ),
+        P =/= <<>>
+    ],
     iolist_to_binary(lists:join(<<" ">>, Parts)).
 
 %%====================================================================
@@ -462,7 +507,8 @@ collapse_ws(Bin) ->
 ensure_mailbox(Db, MailboxId) ->
     DocId = <<?ID_MAILBOX, MailboxId/binary>>,
     case mailio_db:get(Db, DocId) of
-        {ok, _} -> ok;
+        {ok, _} ->
+            ok;
         {error, not_found} ->
             Doc = mailio_mailbox:new(MailboxId, #{name => MailboxId}),
             {ok, _, _} = mailio_db:put(Db, Doc),
@@ -475,8 +521,10 @@ bump_mailbox(Db, MailboxId, TotalDelta, UnreadDelta) ->
         {ok, Doc} ->
             Total = maps:get(<<"totalEmails">>, Doc, 0) + TotalDelta,
             Unread = maps:get(<<"unreadEmails">>, Doc, 0) + UnreadDelta,
-            Doc1 = Doc#{<<"totalEmails">> => max(0, Total),
-                        <<"unreadEmails">> => max(0, Unread)},
+            Doc1 = Doc#{
+                <<"totalEmails">> => max(0, Total),
+                <<"unreadEmails">> => max(0, Unread)
+            },
             {ok, _, _} = mailio_db:put(Db, Doc1),
             ok;
         {error, not_found} ->
@@ -496,26 +544,35 @@ keywords_map(List) ->
     maps:from_list([{K, true} || K <- List]).
 
 apply_keywords(Email, []) -> Email;
-apply_keywords(Email, [K | Rest]) ->
-    apply_keywords(mailio_email:add_keyword(Email, K), Rest).
+apply_keywords(Email, [K | Rest]) -> apply_keywords(mailio_email:add_keyword(Email, K), Rest).
 
 add_imap_entry(Email, MailboxId, Opts) ->
     case maps:get(uid, Opts, undefined) of
-        undefined -> Email;
+        undefined ->
+            Email;
         Uid ->
-            Entry = #{<<"uid">> => Uid,
-                      <<"uidvalidity">> => maps:get(uidvalidity, Opts, 0),
-                      <<"modseq">> => maps:get(modseq, Opts, 0)},
+            Entry = #{
+                <<"uid">> => Uid,
+                <<"uidvalidity">> => maps:get(uidvalidity, Opts, 0),
+                <<"modseq">> => maps:get(modseq, Opts, 0)
+            },
             mailio_email:add_imap_entry(Email, MailboxId, Entry)
     end.
 
 imap_map(MailboxId, Opts) ->
     case maps:get(uid, Opts, undefined) of
-        undefined -> #{};
+        undefined ->
+            #{};
         Uid ->
-            #{MailboxId => [#{<<"uid">> => Uid,
-                              <<"uidvalidity">> => maps:get(uidvalidity, Opts, 0),
-                              <<"modseq">> => maps:get(modseq, Opts, 0)}]}
+            #{
+                MailboxId => [
+                    #{
+                        <<"uid">> => Uid,
+                        <<"uidvalidity">> => maps:get(uidvalidity, Opts, 0),
+                        <<"modseq">> => maps:get(modseq, Opts, 0)
+                    }
+                ]
+            }
     end.
 
 %%====================================================================

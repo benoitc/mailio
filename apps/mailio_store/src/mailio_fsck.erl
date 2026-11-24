@@ -15,9 +15,11 @@
 
 -export_type([drift/0]).
 
--type drift() :: #{mailbox_id := binary(),
-                   total := {Stored :: integer(), Actual :: integer()},
-                   unread := {Stored :: integer(), Actual :: integer()}}.
+-type drift() :: #{
+    mailbox_id := binary(),
+    total := {Stored :: integer(), Actual :: integer()},
+    unread := {Stored :: integer(), Actual :: integer()}
+}.
 
 %%====================================================================
 %% API
@@ -35,12 +37,18 @@ check_counters(AccountId) ->
             ST = maps:get(<<"totalEmails">>, Mbx, 0),
             SU = maps:get(<<"unreadEmails">>, Mbx, 0),
             case {ST, SU} =:= {AT, AU} of
-                true -> false;
+                true ->
+                    false;
                 false ->
-                    {true, #{mailbox_id => MailboxId,
-                             total => {ST, AT}, unread => {SU, AU}}}
+                    {true, #{
+                        mailbox_id => MailboxId,
+                        total => {ST, AT},
+                        unread => {SU, AU}
+                    }}
             end
-        end, all_mailboxes(Db)),
+        end,
+        all_mailboxes(Db)
+    ),
     {ok, Drifts}.
 
 %% @doc Recompute and persist correct counters for every mailbox.
@@ -52,7 +60,9 @@ repair_counters(AccountId) ->
         fun(#{mailbox_id := MailboxId}) ->
             {T, U} = maps:get(MailboxId, Actual, {0, 0}),
             ok = mailio_account_writer:set_counters(AccountId, MailboxId, T, U)
-        end, Drifts),
+        end,
+        Drifts
+    ),
     {ok, length(Drifts)}.
 
 %% @doc Recompute `#{MailboxId => {Total, Unread}}' from the email docs.
@@ -83,9 +93,16 @@ tally_email(Email, Acc) ->
     lists:foldl(
         fun(MailboxId, A) ->
             {T, U} = maps:get(MailboxId, A, {0, 0}),
-            U1 = case Seen of true -> U; false -> U + 1 end,
+            U1 =
+                case Seen of
+                    true -> U;
+                    false -> U + 1
+                end,
             A#{MailboxId => {T + 1, U1}}
-        end, Acc, Mailboxes).
+        end,
+        Acc,
+        Mailboxes
+    ).
 
 %% Enumerate mailbox docs by their id namespace.
 all_mailboxes(Db) ->

@@ -3,10 +3,12 @@
 -include("mailio_store.hrl").
 
 base() ->
-    #{<<"id">> => <<"email/abc">>,
-      <<"blobId">> => <<"sha256-deadbeef">>,
-      <<"mailboxIds">> => #{<<"mbx-1">> => true},
-      <<"keywords">> => #{}}.
+    #{
+        <<"id">> => <<"email/abc">>,
+        <<"blobId">> => <<"sha256-deadbeef">>,
+        <<"mailboxIds">> => #{<<"mbx-1">> => true},
+        <<"keywords">> => #{}
+    }.
 
 doc_id_roundtrip_test() ->
     ?assertEqual(<<"email/abc">>, mailio_email:doc_id(<<"abc">>)),
@@ -43,8 +45,14 @@ imap_entries_duplicate_delivery_test() ->
     %% Two different UIDs in the same mailbox (duplicate delivery) are
     %% both retained under one email.
     E = base(),
-    E2 = mailio_email:add_imap_entry(E, <<"mbx-1">>,
-            #{<<"uid">> => 10, <<"uidvalidity">> => 1}),
-    E3 = mailio_email:add_imap_entry(E2, <<"mbx-1">>,
-            #{<<"uid">> => 11, <<"uidvalidity">> => 1}),
+    E2 = mailio_email:add_imap_entry(
+        E,
+        <<"mbx-1">>,
+        #{<<"uid">> => 10, <<"uidvalidity">> => 1}
+    ),
+    E3 = mailio_email:add_imap_entry(
+        E2,
+        <<"mbx-1">>,
+        #{<<"uid">> => 11, <<"uidvalidity">> => 1}
+    ),
     ?assertEqual(2, length(mailio_email:imap_entries(E3, <<"mbx-1">>))).

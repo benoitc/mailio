@@ -26,10 +26,12 @@
 -define(TIMEOUT, 30000).
 
 -type config() :: map().
--type result() :: #{accepted := [binary()],
-                    rejected := [#{recipient := binary(), code := integer(), reply := binary()}],
-                    code := integer(),
-                    reply := binary()}.
+-type result() :: #{
+    accepted := [binary()],
+    rejected := [#{recipient := binary(), code := integer(), reply := binary()}],
+    code := integer(),
+    reply := binary()
+}.
 
 -record(c, {mod :: gen_tcp | ssl, sock :: term(), config :: map()}).
 
@@ -43,7 +45,8 @@ submit(Config, From, Rcpts, Data) ->
         C2 = auth(C1, Config, Caps),
         session(C2, From, Rcpts, Data)
     catch
-        throw:{mailio_smtp, Error} -> Error;
+        throw:{mailio_smtp, Error} ->
+            Error;
         error:{badmatch, {Code, Text}} when is_integer(Code) ->
             transient(unexpected_reply, #{code => Code, reply => bin(Text)})
     end.
@@ -63,11 +66,17 @@ connect(#{host := Host} = Config) ->
             end;
         _ ->
             case gen_tcp:connect(HostStr, Port, sock_opts(), ?TIMEOUT) of
-                {ok, S} -> #c{mod = gen_tcp, sock = S, config = Config};
+                {ok, S} ->
+                    #c{mod = gen_tcp, sock = S, config = Config};
                 {error, R} ->
-                    throw({mailio_smtp, mailio_error:new(smtp_connect_failed,
-                                                         <<"cannot connect to the SMTP server">>,
-                                                         #{reason => R})})
+                    throw(
+                        {mailio_smtp,
+                            mailio_error:new(
+                                smtp_connect_failed,
+                                <<"cannot connect to the SMTP server">>,
+                                #{reason => R}
+                            )}
+                    )
             end
     end.
 
@@ -82,20 +91,27 @@ ssl_opts(#{host := Host} = Config) ->
         verify_none ->
             [{verify, verify_none} | Base];
         verify_peer ->
-            CA = case {maps:find(cacerts, Config), maps:find(cacertfile, Config)} of
-                     {{ok, Certs}, _} -> [{cacerts, Certs}];
-                     {_, {ok, F}} -> [{cacertfile, F}];
-                     _ -> [{cacerts, public_key:cacerts_get()}]
-                 end,
-            [{verify, verify_peer},
-             {customize_hostname_check,
-              [{match_fun, public_key:pkix_verify_hostname_match_fun(https)}]}
-             | CA ++ Base]
+            CA =
+                case {maps:find(cacerts, Config), maps:find(cacertfile, Config)} of
+                    {{ok, Certs}, _} -> [{cacerts, Certs}];
+                    {_, {ok, F}} -> [{cacertfile, F}];
+                    _ -> [{cacerts, public_key:cacerts_get()}]
+                end,
+            [
+                {verify, verify_peer},
+                {customize_hostname_check, [
+                    {match_fun, public_key:pkix_verify_hostname_match_fun(https)}
+                ]}
+                | CA ++ Base
+            ]
     end.
 
 tls_error(R) ->
-    mailio_error:new(smtp_tls_failed, <<"TLS handshake with the SMTP server failed">>,
-                     #{reason => R, retryable => false}).
+    mailio_error:new(
+        smtp_tls_failed,
+        <<"TLS handshake with the SMTP server failed">>,
+        #{reason => R, retryable => false}
+    ).
 
 ehlo(#c{config = Config} = C, Config) ->
     Name = maps:get(ehlo_name, Config, <<"localhost">>),
@@ -105,10 +121,16 @@ ehlo(#c{config = Config} = C, Config) ->
         {gen_tcp, starttls} ->
             case has(Caps, <<"STARTTLS">>) of
                 false ->
-                    throw({mailio_smtp,
-                           mailio_error:new(smtp_tls_failed,
-                                            <<"the server does not offer STARTTLS">>, #{})});
-                true -> ok
+                    throw(
+                        {mailio_smtp,
+                            mailio_error:new(
+                                smtp_tls_failed,
+                                <<"the server does not offer STARTTLS">>,
+                                #{}
+                            )}
+                    );
+                true ->
+                    ok
             end,
             {220, _} = cmd(C, [<<"STARTTLS">>]),
             ok = inet:setopts(C#c.sock, [{packet, raw}]),
@@ -139,12 +161,20 @@ auth(C, Config, Caps) ->
 
 force({token_fun, F}) ->
     case F() of
-        {ok, Cred} -> force(Cred);
+        {ok, Cred} ->
+            force(Cred);
         {error, R} ->
-            throw({mailio_smtp, mailio_error:new(smtp_auth_failed,
-                                                 <<"credentials unavailable">>, #{reason => R})})
+            throw(
+                {mailio_smtp,
+                    mailio_error:new(
+                        smtp_auth_failed,
+                        <<"credentials unavailable">>,
+                        #{reason => R}
+                    )}
+            )
     end;
-force(Cred) -> Cred.
+force(Cred) ->
+    Cred.
 
 auth_with(C, {oauth2, User, Token}, _Caps) ->
     Init = base64:encode(<<"user=", User/binary, 1, "auth=Bearer ", Token/binary, 1, 1>>),
@@ -152,23 +182,35 @@ auth_with(C, {oauth2, User, Token}, _Caps) ->
 auth_with(C, {password, User, Pass}, Caps) ->
     case has(Caps, <<"PLAIN">>) of
         true ->
-            expect_auth(C, cmd(C, [<<"AUTH PLAIN ">>,
-                                   base64:encode(<<0, User/binary, 0, Pass/binary>>)]));
+            expect_auth(
+                C,
+                cmd(C, [
+                    <<"AUTH PLAIN ">>,
+                    base64:encode(<<0, User/binary, 0, Pass/binary>>)
+                ])
+            );
         false ->
             {334, _} = cmd(C, [<<"AUTH LOGIN">>]),
             {334, _} = cmd(C, [base64:encode(User)]),
             expect_auth(C, cmd(C, [base64:encode(Pass)]))
     end.
 
-expect_auth(C, {235, _}) -> C;
+expect_auth(C, {235, _}) ->
+    C;
 expect_auth(_C, {334, _}) ->
     %% XOAUTH2 error challenge: the server wants an empty line, then fails.
     throw({mailio_smtp, mailio_error:new(smtp_auth_failed, <<"authentication failed">>, #{})});
 expect_auth(_C, {Code, Text}) when Code >= 400, Code < 500 ->
     transient(auth_temporary, #{code => Code, reply => bin(Text)});
 expect_auth(_C, {Code, Text}) ->
-    throw({mailio_smtp, mailio_error:new(smtp_auth_failed, <<"authentication failed">>,
-                                         #{code => Code, reply => bin(Text)})}).
+    throw(
+        {mailio_smtp,
+            mailio_error:new(
+                smtp_auth_failed,
+                <<"authentication failed">>,
+                #{code => Code, reply => bin(Text)}
+            )}
+    ).
 
 %%====================================================================
 %% Envelope and message
@@ -181,14 +223,23 @@ session(C, From, Rcpts, Data) ->
     end,
     Results = [{R, cmd(C, [<<"RCPT TO:<">>, R, <<">">>])} || R <- Rcpts],
     Accepted = [R || {R, {Cd, _}} <- Results, Cd =:= 250 orelse Cd =:= 251],
-    Rejected = [#{recipient => R, code => Cd, reply => bin(T)}
-                || {R, {Cd, T}} <- Results, Cd =/= 250, Cd =/= 251],
+    Rejected = [
+        #{recipient => R, code => Cd, reply => bin(T)}
+     || {R, {Cd, T}} <- Results, Cd =/= 250, Cd =/= 251
+    ],
     case Accepted of
         [] ->
             _ = cmd_quiet(C, [<<"QUIT">>]),
-            throw({mailio_smtp, mailio_error:new(smtp_rejected, <<"every recipient was refused">>,
-                                                 #{stage => rcpt_to, rejected => Rejected})});
-        _ -> ok
+            throw(
+                {mailio_smtp,
+                    mailio_error:new(
+                        smtp_rejected,
+                        <<"every recipient was refused">>,
+                        #{stage => rcpt_to, rejected => Rejected}
+                    )}
+            );
+        _ ->
+            ok
     end,
     case cmd(C, [<<"DATA">>]) of
         {354, _} -> ok;
@@ -206,43 +257,90 @@ session(C, From, Rcpts, Data) ->
             {ok, #{accepted => Accepted, rejected => Rejected, code => Code, reply => bin(Text)}};
         {ok, {Code, Text}} when Code >= 400, Code < 500 ->
             %% A 4xx after the dot means the server did not take the message.
-            throw({mailio_smtp, mailio_error:new(smtp_transient,
-                                                 <<"the server deferred the message">>,
-                                                 #{stage => data_end, code => Code, reply => bin(Text)})});
+            throw(
+                {mailio_smtp,
+                    mailio_error:new(
+                        smtp_transient,
+                        <<"the server deferred the message">>,
+                        #{stage => data_end, code => Code, reply => bin(Text)}
+                    )}
+            );
         {ok, {Code, Text}} ->
-            throw({mailio_smtp, mailio_error:new(smtp_rejected, <<"the server refused the message">>,
-                                                 #{stage => data_end, code => Code, reply => bin(Text),
-                                                   rejected => Rejected})});
+            throw(
+                {mailio_smtp,
+                    mailio_error:new(
+                        smtp_rejected,
+                        <<"the server refused the message">>,
+                        #{
+                            stage => data_end,
+                            code => Code,
+                            reply => bin(Text),
+                            rejected => Rejected
+                        }
+                    )}
+            );
         {error, R2} ->
             throw({mailio_smtp, unknown(#{reason => {no_final_reply, R2}})})
     end.
 
 -spec rejected_or_transient(#c{}, atom(), integer(), binary(), list()) -> no_return().
 rejected_or_transient(_C, Stage, Code, Text, Rejected) when Code >= 400, Code < 500 ->
-    throw({mailio_smtp, mailio_error:new(smtp_transient, <<"the server deferred the request">>,
-                                         #{stage => Stage, code => Code, reply => bin(Text),
-                                           rejected => Rejected})});
+    throw(
+        {mailio_smtp,
+            mailio_error:new(
+                smtp_transient,
+                <<"the server deferred the request">>,
+                #{
+                    stage => Stage,
+                    code => Code,
+                    reply => bin(Text),
+                    rejected => Rejected
+                }
+            )}
+    );
 rejected_or_transient(_C, Stage, Code, Text, Rejected) ->
-    throw({mailio_smtp, mailio_error:new(smtp_rejected, <<"the server refused the request">>,
-                                         #{stage => Stage, code => Code, reply => bin(Text),
-                                           rejected => Rejected})}).
+    throw(
+        {mailio_smtp,
+            mailio_error:new(
+                smtp_rejected,
+                <<"the server refused the request">>,
+                #{
+                    stage => Stage,
+                    code => Code,
+                    reply => bin(Text),
+                    rejected => Rejected
+                }
+            )}
+    ).
 
 unknown(Detail) ->
-    mailio_error:new(smtp_outcome_unknown,
-                     <<"the connection ended after the message was sent and no final reply arrived; "
-                       "it may have been accepted">>, Detail).
+    mailio_error:new(
+        smtp_outcome_unknown,
+        <<
+            "the connection ended after the message was sent and no final reply arrived; "
+            "it may have been accepted"
+        >>,
+        Detail
+    ).
 
 -spec transient(atom(), map()) -> no_return().
 transient(Stage, Detail) ->
-    throw({mailio_smtp, mailio_error:new(smtp_transient, <<"the request failed before the message was sent">>,
-                                         Detail#{stage => Stage})}).
+    throw(
+        {mailio_smtp,
+            mailio_error:new(
+                smtp_transient,
+                <<"the request failed before the message was sent">>,
+                Detail#{stage => Stage}
+            )}
+    ).
 
 %% Normalize line endings and dot-stuff (RFC 5321 4.5.2).
 stuff(Bin) ->
     Crlf = re:replace(Bin, <<"\r?\n">>, <<"\r\n">>, [global, {return, binary}]),
     Dots = re:replace(Crlf, <<"(?m)^\\.">>, <<"..">>, [global, {return, binary}]),
     case Dots of
-        <<>> -> <<>>;
+        <<>> ->
+            <<>>;
         _ ->
             case binary:longest_common_suffix([Dots, <<"\r\n">>]) of
                 2 -> Dots;
@@ -257,8 +355,7 @@ stuff(Bin) ->
 cmd(C, Parts) ->
     case send(C, [Parts, <<"\r\n">>]) of
         ok -> ok;
-        {error, R} ->
-            transient(send, #{reason => R})
+        {error, R} -> transient(send, #{reason => R})
     end,
     read_reply(C).
 
@@ -282,14 +379,23 @@ read_reply(#c{mod = M, sock = S} = C, Acc) ->
         {ok, Line} ->
             L = chomp(Line),
             case L of
-                <<_:3/binary, $-, Rest/binary>> -> read_reply(C, [Rest | Acc]);
+                <<_:3/binary, $-, Rest/binary>> ->
+                    read_reply(C, [Rest | Acc]);
                 <<Code:3/binary, Rest/binary>> ->
                     try binary_to_integer(Code) of
-                        N -> {ok, {N, iolist_to_binary(lists:join(<<"\n">>, lists:reverse([string:trim(Rest) | Acc])))}}
+                        N ->
+                            {ok,
+                                {N,
+                                    iolist_to_binary(
+                                        lists:join(
+                                            <<"\n">>, lists:reverse([string:trim(Rest) | Acc])
+                                        )
+                                    )}}
                     catch
                         error:badarg -> {error, bad_reply}
                     end;
-                _ -> {error, bad_reply}
+                _ ->
+                    {error, bad_reply}
             end;
         {error, R} ->
             {error, R}

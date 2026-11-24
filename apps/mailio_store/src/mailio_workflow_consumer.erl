@@ -18,13 +18,15 @@
 -export([start_link/1, run/1, run/2, name/1]).
 -export([init/1, handle_call/3, handle_cast/2, handle_info/2, terminate/2]).
 
--record(state, {account_id :: binary(),
-                db :: binary(),
-                name :: binary(),
-                types :: [atom()],
-                verbs :: [atom()] | all,
-                handler :: fun((binary(), map()) -> ok),
-                cursor :: barrel_hlc:timestamp() | first}).
+-record(state, {
+    account_id :: binary(),
+    db :: binary(),
+    name :: binary(),
+    types :: [atom()],
+    verbs :: [atom()] | all,
+    handler :: fun((binary(), map()) -> ok),
+    cursor :: barrel_hlc:timestamp() | first
+}).
 
 %%====================================================================
 %% API
@@ -58,11 +60,15 @@ via(Account, Name) ->
 init(#{account_id := Account, name := Name} = Args) ->
     Db = mailio_account:db_name(Account),
     Cursor = load_cursor(Db, Name),
-    State = #state{account_id = Account, db = Db, name = Name,
-                   types = maps:get(types, Args, [email]),
-                   verbs = maps:get(verbs, Args, all),
-                   handler = maps:get(handler, Args),
-                   cursor = Cursor},
+    State = #state{
+        account_id = Account,
+        db = Db,
+        name = Name,
+        types = maps:get(types, Args, [email]),
+        verbs = maps:get(verbs, Args, all),
+        handler = maps:get(handler, Args),
+        cursor = Cursor
+    },
     case maps:get(subscribe, Args, false) of
         true -> _ = mailio_events:subscribe(#{account => Account, types => State#state.types});
         false -> ok
@@ -108,8 +114,11 @@ drain(#state{account_id = Account, types = Types, cursor = Cursor} = State, N) -
 process_once(#state{db = Db, name = Name, account_id = Account, handler = Handler}, Env) ->
     EventId = maps:get(id, Env),
     JobId = <<?ID_JOB, Name/binary, "/", EventId/binary>>,
-    Job = #{<<"id">> => JobId, <<"event">> => EventId,
-            <<"at">> => erlang:system_time(second)},
+    Job = #{
+        <<"id">> => JobId,
+        <<"event">> => EventId,
+        <<"at">> => erlang:system_time(second)
+    },
     case mailio_db:put(Db, Job) of
         {ok, _, _} ->
             run_handler(Handler, Account, Env),
@@ -122,11 +131,17 @@ verb_wanted(all, _Verb) -> true;
 verb_wanted(Verbs, Verb) -> lists:member(Verb, Verbs).
 
 run_handler(Handler, Account, Env) ->
-    try Handler(Account, Env)
-    catch Class:Reason:St ->
-        ?LOG_WARNING(#{what => workflow_handler_failed,
-                       class => Class, reason => Reason, stack => St}),
-        ok
+    try
+        Handler(Account, Env)
+    catch
+        Class:Reason:St ->
+            ?LOG_WARNING(#{
+                what => workflow_handler_failed,
+                class => Class,
+                reason => Reason,
+                stack => St
+            }),
+            ok
     end.
 
 %%====================================================================
@@ -146,12 +161,16 @@ load_cursor(Db, Name) ->
 
 persist_cursor(#state{db = Db, name = Name, cursor = Cursor}) ->
     Id = cursor_id(Name),
-    Doc0 = #{<<"id">> => Id, <<"cursor">> => mailio_cursor:encode(Cursor),
-             <<"at">> => erlang:system_time(second)},
-    Doc = case mailio_db:get(Db, Id) of
-              {ok, #{<<"_rev">> := Rev}} -> Doc0#{<<"_rev">> => Rev};
-              _ -> Doc0
-          end,
+    Doc0 = #{
+        <<"id">> => Id,
+        <<"cursor">> => mailio_cursor:encode(Cursor),
+        <<"at">> => erlang:system_time(second)
+    },
+    Doc =
+        case mailio_db:get(Db, Id) of
+            {ok, #{<<"_rev">> := Rev}} -> Doc0#{<<"_rev">> => Rev};
+            _ -> Doc0
+        end,
     {ok, _, _} = mailio_db:put(Db, Doc),
     ok.
 

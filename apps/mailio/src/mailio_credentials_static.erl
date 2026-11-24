@@ -13,7 +13,8 @@
     {ok, mailio_credentials:cred()} | {error, term()}.
 fetch(AccountId, Service, Map) when is_map(Map) ->
     case maps:find({AccountId, Service}, Map) of
-        {ok, Cred} -> {ok, Cred};
+        {ok, Cred} ->
+            {ok, Cred};
         error ->
             case maps:find(AccountId, Map) of
                 {ok, Cred} -> {ok, Cred};

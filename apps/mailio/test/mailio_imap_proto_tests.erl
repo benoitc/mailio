@@ -6,16 +6,23 @@
 %%==== command encoders ====
 
 login_quotes_test() ->
-    ?assertEqual(<<"a1 LOGIN \"user\" \"p@ss\"\r\n">>,
-                 iolist_to_binary(?P:login(<<"a1">>, <<"user">>, <<"p@ss">>))).
+    ?assertEqual(
+        <<"a1 LOGIN \"user\" \"p@ss\"\r\n">>,
+        iolist_to_binary(?P:login(<<"a1">>, <<"user">>, <<"p@ss">>))
+    ).
 
 login_escapes_quotes_test() ->
     Out = iolist_to_binary(?P:login(<<"a1">>, <<"a\"b">>, <<"c\\d">>)),
     ?assertEqual(<<"a1 LOGIN \"a\\\"b\" \"c\\\\d\"\r\n">>, Out).
 
 uid_fetch_test() ->
-    Out = iolist_to_binary(?P:uid_fetch(<<"a2">>, {range, 100, '*'},
-                                        [<<"FLAGS">>, <<"UID">>, <<"BODY.PEEK[]">>])),
+    Out = iolist_to_binary(
+        ?P:uid_fetch(
+            <<"a2">>,
+            {range, 100, '*'},
+            [<<"FLAGS">>, <<"UID">>, <<"BODY.PEEK[]">>]
+        )
+    ),
     ?assertEqual(<<"a2 UID FETCH 100:* (FLAGS UID BODY.PEEK[])\r\n">>, Out).
 
 uid_store_test() ->
@@ -23,16 +30,22 @@ uid_store_test() ->
     ?assertEqual(<<"a3 UID STORE 42 +FLAGS.SILENT (\\Seen)\r\n">>, Out).
 
 seqset_list_test() ->
-    ?assertEqual(<<"1,3:5,9">>,
-                 iolist_to_binary(?P:format_seqset([1, {range, 3, 5}, 9]))).
+    ?assertEqual(
+        <<"1,3:5,9">>,
+        iolist_to_binary(?P:format_seqset([1, {range, 3, 5}, 9]))
+    ).
 
 enable_test() ->
-    ?assertEqual(<<"a1 ENABLE QRESYNC CONDSTORE\r\n">>,
-                 iolist_to_binary(?P:enable(<<"a1">>, [<<"QRESYNC">>, <<"CONDSTORE">>]))).
+    ?assertEqual(
+        <<"a1 ENABLE QRESYNC CONDSTORE\r\n">>,
+        iolist_to_binary(?P:enable(<<"a1">>, [<<"QRESYNC">>, <<"CONDSTORE">>]))
+    ).
 
 select_qresync_test() ->
-    ?assertEqual(<<"a2 SELECT \"INBOX\" (QRESYNC (1 6))\r\n">>,
-                 iolist_to_binary(?P:select_qresync(<<"a2">>, <<"INBOX">>, 1, 6))).
+    ?assertEqual(
+        <<"a2 SELECT \"INBOX\" (QRESYNC (1 6))\r\n">>,
+        iolist_to_binary(?P:select_qresync(<<"a2">>, <<"INBOX">>, 1, 6))
+    ).
 
 append_prefix_test() ->
     {Prefix, Data} = ?P:append(<<"a4">>, <<"Sent">>, [<<"\\Seen">>], <<"hello">>),
@@ -150,7 +163,8 @@ fetch_flags_uid_test() ->
 fetch_internaldate_modseq_test() ->
     {untagged, {fetch, 1, Items}} =
         ?P:parse_response(
-            <<"* 1 FETCH (UID 9 INTERNALDATE \"17-Jul-2020 02:44:25 +0000\" MODSEQ (74))">>),
+            <<"* 1 FETCH (UID 9 INTERNALDATE \"17-Jul-2020 02:44:25 +0000\" MODSEQ (74))">>
+        ),
     ?assertEqual(9, proplists:get_value(uid, Items)),
     ?assertEqual(<<"17-Jul-2020 02:44:25 +0000">>, proplists:get_value(internaldate, Items)),
     ?assertEqual(74, proplists:get_value(modseq, Items)).
@@ -172,8 +186,10 @@ vanished_test() ->
     ?assertEqual([41, 43, 44, 45], Uids).
 
 continuation_test() ->
-    ?assertEqual({continuation, <<"go ahead">>},
-                 ?P:parse_response(<<"+ go ahead">>)).
+    ?assertEqual(
+        {continuation, <<"go ahead">>},
+        ?P:parse_response(<<"+ go ahead">>)
+    ).
 
 uid_set_parse_test() ->
     ?assertEqual([1, 3, 4, 5, 9], ?P:parse_uid_set(<<"1,3:5,9">>)).
@@ -184,8 +200,18 @@ fetch_header_fields_key_test() ->
     H = <<"From: a@b\r\nTo: c\r\n\r\n">>,
     T = <<"hello">>,
     Raw = iolist_to_binary(
-        ["* 4 FETCH (UID 9 BODY[HEADER.FIELDS (FROM TO)] {", integer_to_list(byte_size(H)), "}\r\n", H,
-         " BODY[1]<0> {", integer_to_list(byte_size(T)), "}\r\n", T, " FLAGS (\\Seen))\r\n"]),
+        [
+            "* 4 FETCH (UID 9 BODY[HEADER.FIELDS (FROM TO)] {",
+            integer_to_list(byte_size(H)),
+            "}\r\n",
+            H,
+            " BODY[1]<0> {",
+            integer_to_list(byte_size(T)),
+            "}\r\n",
+            T,
+            " FLAGS (\\Seen))\r\n"
+        ]
+    ),
     {ok, Line, <<>>} = mailio_imap_proto:read_response(Raw),
     {untagged, {fetch, 4, Items}} = mailio_imap_proto:parse_response(Line),
     ?assertEqual(9, proplists:get_value(uid, Items)),
@@ -197,7 +223,14 @@ fetch_header_fields_key_test() ->
 fetch_header_fields_with_origin_test() ->
     H = <<"Subject: x\r\n\r\n">>,
     Raw = iolist_to_binary(
-        ["* 1 FETCH (BODY[HEADER.FIELDS (SUBJECT)]<0> {", integer_to_list(byte_size(H)), "}\r\n", H, ")\r\n"]),
+        [
+            "* 1 FETCH (BODY[HEADER.FIELDS (SUBJECT)]<0> {",
+            integer_to_list(byte_size(H)),
+            "}\r\n",
+            H,
+            ")\r\n"
+        ]
+    ),
     {ok, Line, <<>>} = mailio_imap_proto:read_response(Raw),
     {untagged, {fetch, 1, Items}} = mailio_imap_proto:parse_response(Line),
     ?assertEqual(H, proplists:get_value(<<"BODY[HEADER.FIELDS (SUBJECT)]<0>">>, Items)).

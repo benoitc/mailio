@@ -5,20 +5,29 @@
 -include_lib("stdlib/include/assert.hrl").
 -include("mailio.hrl").
 
--export([all/0, init_per_suite/1, end_per_suite/1,
-         init_per_testcase/2, end_per_testcase/2]).
--export([connect_and_capabilities/1,
-         list_mailboxes/1,
-         fetch_changes_initial/1,
-         fetch_message/1,
-         set_keywords/1]).
+-export([
+    all/0,
+    init_per_suite/1,
+    end_per_suite/1,
+    init_per_testcase/2,
+    end_per_testcase/2
+]).
+-export([
+    connect_and_capabilities/1,
+    list_mailboxes/1,
+    fetch_changes_initial/1,
+    fetch_message/1,
+    set_keywords/1
+]).
 
 all() ->
-    [connect_and_capabilities,
-     list_mailboxes,
-     fetch_changes_initial,
-     fetch_message,
-     set_keywords].
+    [
+        connect_and_capabilities,
+        list_mailboxes,
+        fetch_changes_initial,
+        fetch_message,
+        set_keywords
+    ].
 
 init_per_suite(Config) ->
     {ok, _} = application:ensure_all_started(ssl),
@@ -29,14 +38,27 @@ end_per_suite(_Config) ->
 
 init_per_testcase(_TC, Config) ->
     Srv = mailio_fake_imap:start(),
-    Cfg = #{host => <<"127.0.0.1">>, port => mailio_fake_imap:port(Srv),
-            tls => false, username => <<"u">>, password => <<"p">>},
+    Cfg = #{
+        host => <<"127.0.0.1">>,
+        port => mailio_fake_imap:port(Srv),
+        tls => false,
+        username => <<"u">>,
+        password => <<"p">>
+    },
     {ok, Conn} = mailio_imap:connect(Cfg),
     [{srv, Srv}, {conn, Conn} | Config].
 
 end_per_testcase(_TC, Config) ->
-    try mailio_imap:close(?config(conn, Config)) catch _:_ -> ok end,
-    try mailio_fake_imap:stop(?config(srv, Config)) catch _:_ -> ok end,
+    try
+        mailio_imap:close(?config(conn, Config))
+    catch
+        _:_ -> ok
+    end,
+    try
+        mailio_fake_imap:stop(?config(srv, Config))
+    catch
+        _:_ -> ok
+    end,
     ok.
 
 %%====================================================================
@@ -78,9 +100,16 @@ fetch_changes_initial(Config) ->
 fetch_message(Config) ->
     Conn = ?config(conn, Config),
     Self = self(),
-    Sink = fun(Bytes) -> Self ! {body, iolist_to_binary(Bytes)}, ok end,
+    Sink = fun(Bytes) ->
+        Self ! {body, iolist_to_binary(Bytes)},
+        ok
+    end,
     {ok, #{size := Size}} = mailio_imap:fetch_message(Conn, <<"INBOX">>, 100, Sink),
-    Body = receive {body, B} -> B after 2000 -> error(no_body) end,
+    Body =
+        receive
+            {body, B} -> B
+        after 2000 -> error(no_body)
+        end,
     ?assertEqual(Size, byte_size(Body)),
     ?assert(binary:match(Body, <<"First message">>) =/= nomatch),
     %% Round-trips through the MIME parser.

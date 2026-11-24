@@ -9,8 +9,19 @@
 -module(mailio_mime).
 
 -export([parse/1]).
--export([type/1, subtype/1, content_type/1, is_multipart/1, is_attachment/1,
-         filename/1, charset/1, body/1, parts/1, defects/1, header/2]).
+-export([
+    type/1,
+    subtype/1,
+    content_type/1,
+    is_multipart/1,
+    is_attachment/1,
+    filename/1,
+    charset/1,
+    body/1,
+    parts/1,
+    defects/1,
+    header/2
+]).
 -export([walk/2, leaves/1]).
 
 -export_type([part/0]).
@@ -45,21 +56,25 @@ parse(Raw) when is_binary(Raw) ->
 parse_part(Raw, Depth) ->
     {Headers, Body} = mailio_rfc5322:split(Raw),
     {Type, Sub, CtParams} = mailio_rfc5322:parse_content_type(
-                              mailio_rfc5322:header(<<"content-type">>, Headers)),
+        mailio_rfc5322:header(<<"content-type">>, Headers)
+    ),
     Cte = normalize_cte(mailio_rfc5322:header(<<"content-transfer-encoding">>, Headers)),
     {Disp, DispParams} = mailio_rfc5322:parse_content_disposition(
-                           mailio_rfc5322:header(<<"content-disposition">>, Headers)),
-    Base = #{type => Type,
-             subtype => Sub,
-             params => CtParams,
-             encoding => Cte,
-             disposition => Disp,
-             disposition_params => DispParams,
-             charset => maps:get(<<"charset">>, CtParams, undefined),
-             filename => extract_filename(CtParams, DispParams),
-             content_id => extract_content_id(Headers),
-             headers => Headers,
-             defects => []},
+        mailio_rfc5322:header(<<"content-disposition">>, Headers)
+    ),
+    Base = #{
+        type => Type,
+        subtype => Sub,
+        params => CtParams,
+        encoding => Cte,
+        disposition => Disp,
+        disposition_params => DispParams,
+        charset => maps:get(<<"charset">>, CtParams, undefined),
+        filename => extract_filename(CtParams, DispParams),
+        content_id => extract_content_id(Headers),
+        headers => Headers,
+        defects => []
+    },
     classify(Base, Type, Sub, CtParams, Body, Depth).
 
 %% Multipart: split on the boundary, parse each sub-part.
@@ -76,16 +91,18 @@ classify(Base, <<"multipart">>, _Sub, CtParams, Body, Depth) ->
                     leaf(add_defect(Base, empty_multipart), Body);
                 {PartBins, Closed} ->
                     Children = [parse_part(P, Depth + 1) || P <- PartBins],
-                    B1 = case Closed of
-                             true -> Base;
-                             false -> add_defect(Base, no_closing_boundary)
-                         end,
+                    B1 =
+                        case Closed of
+                            true -> Base;
+                            false -> add_defect(Base, no_closing_boundary)
+                        end,
                     B1#{parts => Children}
             end
     end;
 %% message/rfc822 (and partial/external are treated as opaque leaves).
-classify(Base, <<"message">>, <<"rfc822">>, _CtParams, Body, Depth)
-  when Depth < ?MAX_DEPTH ->
+classify(Base, <<"message">>, <<"rfc822">>, _CtParams, Body, Depth) when
+    Depth < ?MAX_DEPTH
+->
     Decoded = mailio_mime_decode:decode_transfer(Body, maps:get(encoding, Base)),
     Nested = parse_part(Decoded, Depth + 1),
     Base#{parts => [Nested]};
@@ -112,7 +129,8 @@ split_parts(Body, Boundary) ->
     %% resulting empty preamble is discarded.
     Segments = binary:split(<<"\n", Body/binary>>, Delim, [global]),
     case Segments of
-        [_Preamble] -> {[], false};      %% no delimiter found at all
+        %% no delimiter found at all
+        [_Preamble] -> {[], false};
         [_Preamble | Rest] -> collect_segments(Rest, [])
     end.
 
@@ -132,10 +150,11 @@ collect_segments([Seg | Rest], Acc) ->
 %% and the preceding CRLF are owned by the delimiters). Strip the leading
 %% boundary-line remainder up to the first LF, and one trailing CR.
 clean_part(Seg) ->
-    Body = case binary:split(Seg, <<"\n">>) of
-               [_BoundaryTail, Rest] -> Rest;
-               [Whole] -> Whole
-           end,
+    Body =
+        case binary:split(Seg, <<"\n">>) of
+            [_BoundaryTail, Rest] -> Rest;
+            [Whole] -> Whole
+        end,
     strip_trailing_cr(Body).
 
 strip_trailing_cr(Bin) ->
@@ -228,7 +247,8 @@ decode_param(Bin) -> mailio_mime_decode:decode_words(Bin).
 
 extract_content_id(Headers) ->
     case mailio_rfc5322:header(<<"content-id">>, Headers) of
-        undefined -> undefined;
+        undefined ->
+            undefined;
         Value ->
             case mailio_rfc5322:parse_message_id(Value) of
                 undefined -> undefined;

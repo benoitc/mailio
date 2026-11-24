@@ -10,26 +10,35 @@
 -include_lib("stdlib/include/assert.hrl").
 -include("mailio_store.hrl").
 
--export([all/0, init_per_suite/1, end_per_suite/1,
-         init_per_testcase/2, end_per_testcase/2]).
--export([ingest_creates_documents/1,
-         ingest_emits_events/1,
-         idempotent_reingest/1,
-         copy_to_second_mailbox/1,
-         threads_reply_together/1,
-         threads_by_subject_fallback/1,
-         unrelated_message_new_thread/1,
-         state_token_advances/1]).
+-export([
+    all/0,
+    init_per_suite/1,
+    end_per_suite/1,
+    init_per_testcase/2,
+    end_per_testcase/2
+]).
+-export([
+    ingest_creates_documents/1,
+    ingest_emits_events/1,
+    idempotent_reingest/1,
+    copy_to_second_mailbox/1,
+    threads_reply_together/1,
+    threads_by_subject_fallback/1,
+    unrelated_message_new_thread/1,
+    state_token_advances/1
+]).
 
 all() ->
-    [ingest_creates_documents,
-     ingest_emits_events,
-     idempotent_reingest,
-     copy_to_second_mailbox,
-     threads_reply_together,
-     threads_by_subject_fallback,
-     unrelated_message_new_thread,
-     state_token_advances].
+    [
+        ingest_creates_documents,
+        ingest_emits_events,
+        idempotent_reingest,
+        copy_to_second_mailbox,
+        threads_reply_together,
+        threads_by_subject_fallback,
+        unrelated_message_new_thread,
+        state_token_advances
+    ].
 
 init_per_suite(Config) ->
     Priv = ?config(priv_dir, Config),
@@ -52,7 +61,11 @@ init_per_testcase(_TC, Config) ->
 end_per_testcase(_TC, Config) ->
     Account = ?config(account, Config),
     ok = mailio_accounts_sup:stop_account(Account),
-    try mailio_db:delete_db(mailio_account:db_name(Account)) catch _:_ -> ok end,
+    try
+        mailio_db:delete_db(mailio_account:db_name(Account))
+    catch
+        _:_ -> ok
+    end,
     ok.
 
 %%====================================================================
@@ -66,8 +79,10 @@ ingest_creates_documents(Config) ->
 
     {ok, Email} = mailio_db:get(Db, <<?ID_EMAIL, EmailId/binary>>),
     ?assertEqual(<<"Project kickoff">>, maps:get(<<"subject">>, Email)),
-    ?assertEqual([<<"alice@example.com">>],
-                 [E || #{<<"email">> := E} <- maps:get(<<"from">>, Email)]),
+    ?assertEqual(
+        [<<"alice@example.com">>],
+        [E || #{<<"email">> := E} <- maps:get(<<"from">>, Email)]
+    ),
     ?assert(maps:is_key(<<"inbox">>, maps:get(<<"mailboxIds">>, Email))),
     ?assertMatch(<<"sha256-", _/binary>>, maps:get(<<"blobId">>, Email)),
     ThreadId = maps:get(<<"threadId">>, Email),
@@ -79,8 +94,10 @@ ingest_creates_documents(Config) ->
 
     %% Text doc carries the extracted body.
     {ok, Text} = mailio_db:get(Db, <<?ID_TEXT, EmailId/binary>>),
-    ?assert(binary:match(maps:get(<<"body_text">>, Text), <<"start the project">>)
-            =/= nomatch),
+    ?assert(
+        binary:match(maps:get(<<"body_text">>, Text), <<"start the project">>) =/=
+            nomatch
+    ),
 
     %% Raw blob is retrievable and matches the input.
     {ok, Raw} = mailio_blob:get(Db, maps:get(<<"blobId">>, Email)),
@@ -93,16 +110,20 @@ ingest_creates_documents(Config) ->
 
 ingest_emits_events(Config) ->
     Account = ?config(account, Config),
-    {ok, _Ref} = mailio_events:subscribe(#{account => Account,
-                                           types => [email, thread, mailbox]}),
+    {ok, _Ref} = mailio_events:subscribe(#{
+        account => Account,
+        types => [email, thread, mailbox]
+    }),
     {ok, EmailId} = mailio_account:ingest_raw(Account, <<"inbox">>, msg1()),
 
     Events = drain_events(300),
     Types = [{maps:get(type, E), maps:get(verb, E)} || E <- Events],
     ?assert(lists:member({email, created}, Types)),
     ?assert(lists:member({thread, created}, Types)),
-    ?assert(lists:member({mailbox, created}, Types) orelse
-            lists:member({mailbox, updated}, Types)),
+    ?assert(
+        lists:member({mailbox, created}, Types) orelse
+            lists:member({mailbox, updated}, Types)
+    ),
 
     EmailEv = hd([E || E <- Events, maps:get(type, E) =:= email]),
     ?assertEqual(EmailId, maps:get(object_id, EmailEv)),
@@ -120,8 +141,16 @@ idempotent_reingest(Config) ->
     {ok, [_]} = mailio_db:by_id_prefix(Db, <<"email/">>),
     {ok, Mbx} = mailio_db:get(Db, <<?ID_MAILBOX, "inbox">>),
     ?assertEqual(1, maps:get(<<"totalEmails">>, Mbx)),
-    ?assertEqual(1, mailio_blob:ref_count(Db, maps:get(<<"blobId">>,
-                       element(2, mailio_db:get(Db, <<?ID_EMAIL, Id1/binary>>))))).
+    ?assertEqual(
+        1,
+        mailio_blob:ref_count(
+            Db,
+            maps:get(
+                <<"blobId">>,
+                element(2, mailio_db:get(Db, <<?ID_EMAIL, Id1/binary>>))
+            )
+        )
+    ).
 
 copy_to_second_mailbox(Config) ->
     Account = ?config(account, Config),
@@ -159,18 +188,14 @@ threads_reply_together(Config) ->
 threads_by_subject_fallback(Config) ->
     Account = ?config(account, Config),
     Db = mailio_account:db_name(Account),
-    A = <<"From: Alice <alice@example.com>\r\n",
-          "To: Bob <bob@example.com>\r\n",
-          "Subject: Quarterly report\r\n",
-          "Message-ID: <s1@example.com>\r\n",
-          "Date: Mon, 2 Jun 2025 09:00:00 +0000\r\n\r\n",
-          "First.\r\n">>,
-    B = <<"From: Bob <bob@example.com>\r\n",
-          "To: Alice <alice@example.com>\r\n",
-          "Subject: RE: Quarterly report\r\n",
-          "Message-ID: <s2@example.com>\r\n",
-          "Date: Mon, 2 Jun 2025 09:30:00 +0000\r\n\r\n",
-          "Second.\r\n">>,
+    A =
+        <<"From: Alice <alice@example.com>\r\n", "To: Bob <bob@example.com>\r\n",
+            "Subject: Quarterly report\r\n", "Message-ID: <s1@example.com>\r\n",
+            "Date: Mon, 2 Jun 2025 09:00:00 +0000\r\n\r\n", "First.\r\n">>,
+    B =
+        <<"From: Bob <bob@example.com>\r\n", "To: Alice <alice@example.com>\r\n",
+            "Subject: RE: Quarterly report\r\n", "Message-ID: <s2@example.com>\r\n",
+            "Date: Mon, 2 Jun 2025 09:30:00 +0000\r\n\r\n", "Second.\r\n">>,
     {ok, Id1} = mailio_account:ingest_raw(Account, <<"inbox">>, A),
     {ok, Id2} = mailio_account:ingest_raw(Account, <<"inbox">>, B),
     {ok, E1} = mailio_db:get(Db, <<?ID_EMAIL, Id1/binary>>),
@@ -206,33 +231,20 @@ drain_events(Timeout) ->
     end.
 
 msg1() ->
-    <<"From: Alice <alice@example.com>\r\n",
-      "To: Bob <bob@example.com>\r\n",
-      "Subject: Project kickoff\r\n",
-      "Message-ID: <m1@example.com>\r\n",
-      "Date: Mon, 2 Jun 2025 09:00:00 +0000\r\n",
-      "Content-Type: text/plain; charset=utf-8\r\n",
-      "\r\n",
-      "Let's start the project this week.\r\n">>.
+    <<"From: Alice <alice@example.com>\r\n", "To: Bob <bob@example.com>\r\n",
+        "Subject: Project kickoff\r\n", "Message-ID: <m1@example.com>\r\n",
+        "Date: Mon, 2 Jun 2025 09:00:00 +0000\r\n", "Content-Type: text/plain; charset=utf-8\r\n",
+        "\r\n", "Let's start the project this week.\r\n">>.
 
 reply_to_msg1() ->
-    <<"From: Bob <bob@example.com>\r\n",
-      "To: Alice <alice@example.com>\r\n",
-      "Subject: Re: Project kickoff\r\n",
-      "Message-ID: <m2@example.com>\r\n",
-      "In-Reply-To: <m1@example.com>\r\n",
-      "References: <m1@example.com>\r\n",
-      "Date: Mon, 2 Jun 2025 10:00:00 +0000\r\n",
-      "Content-Type: text/plain; charset=utf-8\r\n",
-      "\r\n",
-      "Sounds good, let's go.\r\n">>.
+    <<"From: Bob <bob@example.com>\r\n", "To: Alice <alice@example.com>\r\n",
+        "Subject: Re: Project kickoff\r\n", "Message-ID: <m2@example.com>\r\n",
+        "In-Reply-To: <m1@example.com>\r\n", "References: <m1@example.com>\r\n",
+        "Date: Mon, 2 Jun 2025 10:00:00 +0000\r\n", "Content-Type: text/plain; charset=utf-8\r\n",
+        "\r\n", "Sounds good, let's go.\r\n">>.
 
 unrelated_msg() ->
-    <<"From: Carol <carol@example.com>\r\n",
-      "To: Bob <bob@example.com>\r\n",
-      "Subject: Lunch tomorrow?\r\n",
-      "Message-ID: <u1@example.com>\r\n",
-      "Date: Mon, 2 Jun 2025 11:00:00 +0000\r\n",
-      "Content-Type: text/plain; charset=utf-8\r\n",
-      "\r\n",
-      "Want to grab lunch?\r\n">>.
+    <<"From: Carol <carol@example.com>\r\n", "To: Bob <bob@example.com>\r\n",
+        "Subject: Lunch tomorrow?\r\n", "Message-ID: <u1@example.com>\r\n",
+        "Date: Mon, 2 Jun 2025 11:00:00 +0000\r\n", "Content-Type: text/plain; charset=utf-8\r\n",
+        "\r\n", "Want to grab lunch?\r\n">>.

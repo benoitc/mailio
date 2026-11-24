@@ -17,27 +17,35 @@ start_link() ->
 
 -spec init([]) -> {ok, {supervisor:sup_flags(), [supervisor:child_spec()]}}.
 init([]) ->
-    SupFlags = #{strategy => one_for_one,
-                 intensity => 3,
-                 period => 30},
+    SupFlags = #{
+        strategy => one_for_one,
+        intensity => 3,
+        period => 30
+    },
     Children = [
-        #{id => mailio_registry,
-          start => {mailio_registry, start_link, []},
-          restart => permanent,
-          shutdown => 5000,
-          type => worker,
-          modules => [mailio_registry]},
-        #{id => mailio_events,
-          start => {mailio_events, start_link, []},
-          restart => permanent,
-          shutdown => 5000,
-          type => worker,
-          modules => [mailio_events]},
-        #{id => mailio_accounts_sup,
-          start => {mailio_accounts_sup, start_link, []},
-          restart => permanent,
-          shutdown => infinity,
-          type => supervisor,
-          modules => [mailio_accounts_sup]}
+        #{
+            id => mailio_registry,
+            start => {mailio_registry, start_link, []},
+            restart => permanent,
+            shutdown => 5000,
+            type => worker,
+            modules => [mailio_registry]
+        },
+        #{
+            id => mailio_events,
+            start => {mailio_events, start_link, []},
+            restart => permanent,
+            shutdown => 5000,
+            type => worker,
+            modules => [mailio_events]
+        },
+        #{
+            id => mailio_accounts_sup,
+            start => {mailio_accounts_sup, start_link, []},
+            restart => permanent,
+            shutdown => infinity,
+            type => supervisor,
+            modules => [mailio_accounts_sup]
+        }
     ],
     {ok, {SupFlags, Children}}.

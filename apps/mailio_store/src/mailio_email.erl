@@ -18,8 +18,14 @@
 -export([doc_id/1, id_of/1]).
 -export([blob_id/1, thread_id/1, subject/1, received_at/1, size/1]).
 -export([mailbox_ids/1, in_mailbox/2, add_mailbox/2, remove_mailbox/2]).
--export([keywords/1, has_keyword/2, add_keyword/2, remove_keyword/2,
-         set_keyword/3, is_seen/1]).
+-export([
+    keywords/1,
+    has_keyword/2,
+    add_keyword/2,
+    remove_keyword/2,
+    set_keyword/3,
+    is_seen/1
+]).
 -export([imap_entries/2, add_imap_entry/3]).
 
 %% JMAP Email facade
@@ -28,7 +34,8 @@
 -export_type([email/0, address/0]).
 
 -type email() :: map().
--type address() :: #{binary() => binary()}.   %% #{<<"name">> => _, <<"email">> => _}
+%% #{<<"name">> => _, <<"email">> => _}
+-type address() :: #{binary() => binary()}.
 
 %%====================================================================
 %% Ids
@@ -131,8 +138,11 @@ add_imap_entry(Email, MailboxId, Entry) ->
     Imap = maps:get(<<"imap">>, Ns, #{}),
     Existing = maps:get(MailboxId, Imap, []),
     Key = {maps:get(<<"uid">>, Entry), maps:get(<<"uidvalidity">>, Entry)},
-    Pruned = [E || E <- Existing,
-                   {maps:get(<<"uid">>, E), maps:get(<<"uidvalidity">>, E)} =/= Key],
+    Pruned = [
+        E
+     || E <- Existing,
+        {maps:get(<<"uid">>, E), maps:get(<<"uidvalidity">>, E)} =/= Key
+    ],
     Imap2 = Imap#{MailboxId => [Entry | Pruned]},
     Email#{?MAILIO_NS => Ns#{<<"imap">> => Imap2}}.
 
@@ -152,11 +162,16 @@ get(Account, Ids, Properties) ->
                 {ok, Doc} -> {[project(Db, Doc, Properties) | Acc], NF};
                 {error, not_found} -> {Acc, [Id | NF]}
             end
-        end, {[], []}, Ids),
-    {ok, #{<<"accountId">> => Account,
-           <<"state">> => mailio_account:state_token(Account),
-           <<"list">> => Found,
-           <<"notFound">> => NotFound}}.
+        end,
+        {[], []},
+        Ids
+    ),
+    {ok, #{
+        <<"accountId">> => Account,
+        <<"state">> => mailio_account:state_token(Account),
+        <<"list">> => Found,
+        <<"notFound">> => NotFound
+    }}.
 
 %% Strip internal fields, expose the bare JMAP id, and project to the
 %% requested properties.
@@ -165,7 +180,8 @@ project(Db, Doc, Properties) ->
     Clean = Clean0#{<<"id">> => id_of(Doc)},
     WithBody = maybe_body_values(Db, Doc, Clean, Properties),
     case Properties of
-        all -> WithBody;
+        all ->
+            WithBody;
         Props ->
             Keep = [<<"id">> | Props],
             maps:with(lists:usort(Keep ++ extra_props(Props)), WithBody)
@@ -180,12 +196,17 @@ extra_props(Props) ->
 maybe_body_values(Db, Doc, Clean, Properties) ->
     Want = Properties =:= all orelse lists:member(<<"bodyValues">>, Properties),
     case Want of
-        false -> Clean;
+        false ->
+            Clean;
         true ->
             EmailId = id_of(Doc),
             Text = body_text(Db, EmailId),
-            Clean#{<<"bodyValues">> => #{<<"text">> =>
-                       #{<<"value">> => Text, <<"isTruncated">> => false}}}
+            Clean#{
+                <<"bodyValues">> => #{
+                    <<"text">> =>
+                        #{<<"value">> => Text, <<"isTruncated">> => false}
+                }
+            }
     end.
 
 %%====================================================================
@@ -203,33 +224,50 @@ query(Account, Request) ->
     Sort = maps:get(sort, Request, maps:get(<<"sort">>, Request, default_sort())),
     Position = maps:get(position, Request, maps:get(<<"position">>, Request, 0)),
     Limit = maps:get(limit, Request, maps:get(<<"limit">>, Request, undefined)),
-    Collapse = maps:get(collapseThreads, Request,
-                        maps:get(<<"collapseThreads">>, Request, false)),
+    Collapse = maps:get(
+        collapseThreads,
+        Request,
+        maps:get(<<"collapseThreads">>, Request, false)
+    ),
 
     Candidates = candidates(Db, Filter),
     NeedBody = mailio_filter:needs_body(Filter),
-    Matched = [E || E <- Candidates,
-                    mailio_filter:matches(E, body_getter(Db, E, NeedBody), Filter)],
+    Matched = [
+        E
+     || E <- Candidates,
+        mailio_filter:matches(E, body_getter(Db, E, NeedBody), Filter)
+    ],
     Sorted = sort_emails(Matched, Sort),
-    Collapsed = case Collapse of true -> collapse_threads(Sorted); false -> Sorted end,
+    Collapsed =
+        case Collapse of
+            true -> collapse_threads(Sorted);
+            false -> Sorted
+        end,
     Total = length(Collapsed),
     Page = paginate(Collapsed, Position, Limit),
     Ids = [id_of(E) || E <- Page],
-    {ok, #{<<"accountId">> => Account,
-           <<"queryState">> => mailio_account:state_token(Account),
-           <<"canCalculateChanges">> => false,
-           <<"position">> => Position,
-           <<"total">> => Total,
-           <<"ids">> => Ids,
-           <<"collapseThreads">> => Collapse}}.
+    {ok, #{
+        <<"accountId">> => Account,
+        <<"queryState">> => mailio_account:state_token(Account),
+        <<"canCalculateChanges">> => false,
+        <<"position">> => Position,
+        <<"total">> => Total,
+        <<"ids">> => Ids,
+        <<"collapseThreads">> => Collapse
+    }}.
 
 candidates(Db, Filter) ->
     case mailio_filter:index_query(Filter) of
         all ->
             all_emails(Db);
         {where, Wheres} ->
-            case mailio_db:find(Db, #{where => Wheres},
-                                #{include_docs => true, limit => 1000000}) of
+            case
+                mailio_db:find(
+                    Db,
+                    #{where => Wheres},
+                    #{include_docs => true, limit => 1000000}
+                )
+            of
                 {ok, Docs, _} -> Docs;
                 {error, _} -> []
             end
@@ -263,7 +301,8 @@ default_sort() ->
 sort_emails(Emails, Comparators) ->
     lists:sort(fun(A, B) -> compare_chain(A, B, Comparators) =< 0 end, Emails).
 
-compare_chain(_A, _B, []) -> 0;
+compare_chain(_A, _B, []) ->
+    0;
 compare_chain(A, B, [Comp | Rest]) ->
     {Prop, Asc} = comparator(Comp),
     case cmp(sort_key(A, Prop), sort_key(B, Prop)) of
@@ -302,7 +341,10 @@ collapse_threads(Emails) ->
                 true -> {Acc, Seen};
                 false -> {[E | Acc], sets:add_element(Tid, Seen)}
             end
-        end, {[], sets:new()}, Emails),
+        end,
+        {[], sets:new()},
+        Emails
+    ),
     lists:reverse(Out).
 
 paginate(Emails, Position, Limit) ->
@@ -325,13 +367,15 @@ changes(Account, SinceState, Opts) ->
             {ok, Envs, NewCursor, More} =
                 mailio_changes:since(Account, Cursor, #{types => [email], limit => MaxChanges}),
             {Created, Updated, Destroyed} = group_changes(Envs),
-            {ok, #{<<"accountId">> => Account,
-                   <<"oldState">> => SinceState,
-                   <<"newState">> => mailio_cursor:encode(NewCursor),
-                   <<"hasMoreChanges">> => More =:= more,
-                   <<"created">> => Created,
-                   <<"updated">> => Updated,
-                   <<"destroyed">> => Destroyed}};
+            {ok, #{
+                <<"accountId">> => Account,
+                <<"oldState">> => SinceState,
+                <<"newState">> => mailio_cursor:encode(NewCursor),
+                <<"hasMoreChanges">> => More =:= more,
+                <<"created">> => Created,
+                <<"updated">> => Updated,
+                <<"destroyed">> => Destroyed
+            }};
         {error, invalid_state} ->
             {error, cannot_calculate_changes}
     end.
@@ -344,7 +388,10 @@ group_changes(Envs) ->
                 updated -> {C, [Id | U], D};
                 destroyed -> {C, U, [Id | D]}
             end
-        end, {[], [], []}, Envs).
+        end,
+        {[], [], []},
+        Envs
+    ).
 
 %%====================================================================
 %% JMAP Email/set
@@ -362,20 +409,27 @@ set(Account, Request, _Opts) ->
 
     {Updated, NotUpdated} = apply_updates(Account, Updates),
     {Destroyed, NotDestroyed} = apply_destroys(Account, Destroys),
-    NotCreated = maps:map(fun(_, _) ->
-                              #{<<"type">> => <<"forbidden">>,
-                                <<"description">> => <<"Email/set create unsupported">>}
-                          end, Creates),
+    NotCreated = maps:map(
+        fun(_, _) ->
+            #{
+                <<"type">> => <<"forbidden">>,
+                <<"description">> => <<"Email/set create unsupported">>
+            }
+        end,
+        Creates
+    ),
 
-    {ok, #{<<"accountId">> => Account,
-           <<"oldState">> => OldState,
-           <<"newState">> => mailio_account:state_token(Account),
-           <<"created">> => #{},
-           <<"updated">> => Updated,
-           <<"destroyed">> => Destroyed,
-           <<"notCreated">> => NotCreated,
-           <<"notUpdated">> => NotUpdated,
-           <<"notDestroyed">> => NotDestroyed}}.
+    {ok, #{
+        <<"accountId">> => Account,
+        <<"oldState">> => OldState,
+        <<"newState">> => mailio_account:state_token(Account),
+        <<"created">> => #{},
+        <<"updated">> => Updated,
+        <<"destroyed">> => Destroyed,
+        <<"notCreated">> => NotCreated,
+        <<"notUpdated">> => NotUpdated,
+        <<"notDestroyed">> => NotDestroyed
+    }}.
 
 apply_updates(Account, Updates) ->
     maps:fold(
@@ -385,7 +439,10 @@ apply_updates(Account, Updates) ->
                 {error, not_found} -> {U, NU#{EmailId => set_error(<<"notFound">>)}};
                 {error, _} -> {U, NU#{EmailId => set_error(<<"serverFail">>)}}
             end
-        end, {#{}, #{}}, Updates).
+        end,
+        {#{}, #{}},
+        Updates
+    ).
 
 apply_destroys(Account, Destroys) ->
     lists:foldr(
@@ -395,7 +452,10 @@ apply_destroys(Account, Destroys) ->
                 {error, not_found} -> {D, ND#{EmailId => set_error(<<"notFound">>)}};
                 {error, _} -> {D, ND#{EmailId => set_error(<<"serverFail">>)}}
             end
-        end, {[], #{}}, Destroys).
+        end,
+        {[], #{}},
+        Destroys
+    ).
 
 set_error(Type) -> #{<<"type">> => Type}.
 

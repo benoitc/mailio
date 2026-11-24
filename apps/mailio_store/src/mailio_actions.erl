@@ -26,6 +26,7 @@
 
 -type action() :: term().
 -type ctx() :: map().
+-export_type([action/0, ctx/0]).
 
 -spec apply(binary(), binary(), [action()]) -> ok.
 apply(Account, EmailId, Actions) ->
@@ -35,11 +36,16 @@ apply(Account, EmailId, Actions) ->
 apply(Account, EmailId, Actions, Ctx) ->
     {Patch, Effects} = lists:foldl(fun classify/2, {#{}, []}, Actions),
     case map_size(Patch) of
-        0 -> ok;
-        _ -> _ = mailio_account_writer:patch(Account, EmailId, Patch), ok
+        0 ->
+            ok;
+        _ ->
+            _ = mailio_account_writer:patch(Account, EmailId, Patch),
+            ok
     end,
-    lists:foreach(fun(E) -> run_effect(Account, EmailId, E, Ctx) end,
-                  lists:reverse(Effects)),
+    lists:foreach(
+        fun(E) -> run_effect(Account, EmailId, E, Ctx) end,
+        lists:reverse(Effects)
+    ),
     ok.
 
 %%====================================================================
@@ -84,18 +90,30 @@ run_effect(Account, EmailId, {notify, Pid}, _Ctx) when is_pid(Pid) ->
     Pid ! {mailio_action, notify, #{account => Account, email_id => EmailId}},
     ok;
 run_effect(Account, EmailId, {notify, {topic, Topic}}, _Ctx) ->
-    mailio_events:dispatch(#{v => 1, account_id => Account, type => notify,
-                            verb => updated, object_id => EmailId,
-                            data => #{topic => Topic}}),
+    mailio_events:dispatch(#{
+        v => 1,
+        account_id => Account,
+        type => notify,
+        verb => updated,
+        object_id => EmailId,
+        data => #{topic => Topic}
+    }),
     ok;
 run_effect(Account, EmailId, {call, {Module, Fun}}, _Ctx) ->
     case is_allowed(Module) of
         true ->
-            try Module:Fun(Account, EmailId)
-            catch Class:Reason ->
-                ?LOG_WARNING(#{what => action_call_failed, module => Module,
-                               fun_ => Fun, class => Class, reason => Reason}),
-                ok
+            try
+                Module:Fun(Account, EmailId)
+            catch
+                Class:Reason ->
+                    ?LOG_WARNING(#{
+                        what => action_call_failed,
+                        module => Module,
+                        fun_ => Fun,
+                        class => Class,
+                        reason => Reason
+                    }),
+                    ok
             end;
         false ->
             ?LOG_WARNING(#{what => action_call_blocked, module => Module}),
@@ -120,10 +138,15 @@ run_agent_task(Handler, Account, EmailId, Kind, Opts, Ctx) ->
             apply(Account, EmailId, Safe, Ctx);
         _ ->
             ok
-    catch Class:Reason ->
-        ?LOG_WARNING(#{what => agent_task_failed, kind => Kind,
-                       class => Class, reason => Reason}),
-        ok
+    catch
+        Class:Reason ->
+            ?LOG_WARNING(#{
+                what => agent_task_failed,
+                kind => Kind,
+                class => Class,
+                reason => Reason
+            }),
+            ok
     end.
 
 is_agent_task({agent_task, _, _}) -> true;

@@ -109,10 +109,12 @@ list(Root, Scope) ->
             Base = scope_dir(Root, Scope),
             case file:list_dir(Base) of
                 {ok, Subs} ->
-                    lists:sort(lists:append([
-                        shard_files(filename:join(Base, Sub), Sub)
-                     || Sub <- Subs, byte_size(unicode:characters_to_binary(Sub)) =:= 2
-                    ]));
+                    lists:sort(
+                        lists:append([
+                            shard_files(filename:join(Base, Sub), Sub)
+                         || Sub <- Subs, byte_size(unicode:characters_to_binary(Sub)) =:= 2
+                        ])
+                    );
                 {error, _} ->
                     []
             end;
@@ -191,8 +193,11 @@ write(Root, Scope, Hex, Content) ->
         false ->
             Tmp = tmp_path(Root, Scope),
             case write_tmp(Tmp, Content) of
-                ok -> install(Tmp, Final);
-                {error, _} = E -> _ = file:delete(Tmp), E
+                ok ->
+                    install(Tmp, Final);
+                {error, _} = E ->
+                    _ = file:delete(Tmp),
+                    E
             end
     end.
 
@@ -219,8 +224,11 @@ install(Tmp, Final) ->
     case filelib:ensure_dir(Final) of
         ok ->
             case file:rename(Tmp, Final) of
-                ok -> ok;
-                {error, _} = E -> _ = file:delete(Tmp), E
+                ok ->
+                    ok;
+                {error, _} = E ->
+                    _ = file:delete(Tmp),
+                    E
             end;
         {error, _} = E ->
             _ = file:delete(Tmp),
@@ -254,7 +262,9 @@ shard_files(Dir, Shard) ->
 scope_dir(Root, Scope) -> filename:join(Root, binary_to_list(Scope)).
 
 path_of(Root, Scope, Hex) ->
-    filename:join([scope_dir(Root, Scope), binary_to_list(binary:part(Hex, 0, 2)), binary_to_list(Hex)]).
+    filename:join([
+        scope_dir(Root, Scope), binary_to_list(binary:part(Hex, 0, 2)), binary_to_list(Hex)
+    ]).
 
 %% Names reach the file system, so they are checked, not trusted.
 valid(Scope, Hex) ->

@@ -24,22 +24,26 @@ new(Fields) ->
 -spec new(binary(), map()) -> mailbox().
 new(Id, Fields) when is_binary(Id), is_map(Fields) ->
     Name = maps:get(name, Fields),
-    Internal = #{<<"imap_name">> => maps:get(imap_name, Fields, Name),
-                 <<"imap_delimiter">> => maps:get(imap_delimiter, Fields, <<"/">>),
-                 <<"uidvalidity">> => maps:get(uidvalidity, Fields, 0),
-                 <<"special_use">> => maps:get(special_use, Fields, [])},
-    #{<<"id">> => <<?ID_MAILBOX, Id/binary>>,
-      <<"name">> => Name,
-      <<"parentId">> => maps:get(parent_id, Fields, null),
-      <<"role">> => maps:get(role, Fields, null),
-      <<"sortOrder">> => maps:get(sort_order, Fields, 0),
-      <<"totalEmails">> => 0,
-      <<"unreadEmails">> => 0,
-      <<"totalThreads">> => 0,
-      <<"unreadThreads">> => 0,
-      <<"isSubscribed">> => maps:get(is_subscribed, Fields, true),
-      <<"myRights">> => default_rights(),
-      ?MAILIO_NS => Internal}.
+    Internal = #{
+        <<"imap_name">> => maps:get(imap_name, Fields, Name),
+        <<"imap_delimiter">> => maps:get(imap_delimiter, Fields, <<"/">>),
+        <<"uidvalidity">> => maps:get(uidvalidity, Fields, 0),
+        <<"special_use">> => maps:get(special_use, Fields, [])
+    },
+    #{
+        <<"id">> => <<?ID_MAILBOX, Id/binary>>,
+        <<"name">> => Name,
+        <<"parentId">> => maps:get(parent_id, Fields, null),
+        <<"role">> => maps:get(role, Fields, null),
+        <<"sortOrder">> => maps:get(sort_order, Fields, 0),
+        <<"totalEmails">> => 0,
+        <<"unreadEmails">> => 0,
+        <<"totalThreads">> => 0,
+        <<"unreadThreads">> => 0,
+        <<"isSubscribed">> => maps:get(is_subscribed, Fields, true),
+        <<"myRights">> => default_rights(),
+        ?MAILIO_NS => Internal
+    }.
 
 -spec doc_id(binary()) -> binary().
 doc_id(Id) when is_binary(Id) ->
@@ -68,14 +72,27 @@ uidvalidity(#{?MAILIO_NS := #{<<"uidvalidity">> := U}}) -> U.
 -spec with_counters(mailbox(), #{atom() => non_neg_integer()}) -> mailbox().
 with_counters(Mailbox, Counters) ->
     Mailbox#{
-        <<"totalEmails">> => maps:get(total_emails, Counters,
-                                      maps:get(<<"totalEmails">>, Mailbox)),
-        <<"unreadEmails">> => maps:get(unread_emails, Counters,
-                                       maps:get(<<"unreadEmails">>, Mailbox)),
-        <<"totalThreads">> => maps:get(total_threads, Counters,
-                                       maps:get(<<"totalThreads">>, Mailbox)),
-        <<"unreadThreads">> => maps:get(unread_threads, Counters,
-                                        maps:get(<<"unreadThreads">>, Mailbox))}.
+        <<"totalEmails">> => maps:get(
+            total_emails,
+            Counters,
+            maps:get(<<"totalEmails">>, Mailbox)
+        ),
+        <<"unreadEmails">> => maps:get(
+            unread_emails,
+            Counters,
+            maps:get(<<"unreadEmails">>, Mailbox)
+        ),
+        <<"totalThreads">> => maps:get(
+            total_threads,
+            Counters,
+            maps:get(<<"totalThreads">>, Mailbox)
+        ),
+        <<"unreadThreads">> => maps:get(
+            unread_threads,
+            Counters,
+            maps:get(<<"unreadThreads">>, Mailbox)
+        )
+    }.
 
 %%====================================================================
 %% JMAP Mailbox facade
@@ -86,10 +103,12 @@ with_counters(Mailbox, Counters) ->
 get(Account, all) ->
     Db = mailio_account:db_name(Account),
     {ok, Docs} = mailio_db:by_id_prefix(Db, <<?ID_MAILBOX>>),
-    {ok, #{<<"accountId">> => Account,
-           <<"state">> => mailio_account:state_token(Account),
-           <<"list">> => [project(D) || D <- Docs],
-           <<"notFound">> => []}};
+    {ok, #{
+        <<"accountId">> => Account,
+        <<"state">> => mailio_account:state_token(Account),
+        <<"list">> => [project(D) || D <- Docs],
+        <<"notFound">> => []
+    }};
 get(Account, Ids) when is_list(Ids) ->
     Db = mailio_account:db_name(Account),
     {Found, NotFound} = lists:foldr(
@@ -98,11 +117,16 @@ get(Account, Ids) when is_list(Ids) ->
                 {ok, Doc} -> {[project(Doc) | Acc], NF};
                 {error, not_found} -> {Acc, [Id | NF]}
             end
-        end, {[], []}, Ids),
-    {ok, #{<<"accountId">> => Account,
-           <<"state">> => mailio_account:state_token(Account),
-           <<"list">> => Found,
-           <<"notFound">> => NotFound}}.
+        end,
+        {[], []},
+        Ids
+    ),
+    {ok, #{
+        <<"accountId">> => Account,
+        <<"state">> => mailio_account:state_token(Account),
+        <<"list">> => Found,
+        <<"notFound">> => NotFound
+    }}.
 
 %% @doc List all mailbox ids for an account.
 -spec list(binary()) -> {ok, [binary()]}.
@@ -115,12 +139,14 @@ project(Doc) ->
 
 -spec default_rights() -> map().
 default_rights() ->
-    #{<<"mayReadItems">> => true,
-      <<"mayAddItems">> => true,
-      <<"mayRemoveItems">> => true,
-      <<"maySetSeen">> => true,
-      <<"maySetKeywords">> => true,
-      <<"mayCreateChild">> => true,
-      <<"mayRename">> => true,
-      <<"mayDelete">> => true,
-      <<"maySubmit">> => true}.
+    #{
+        <<"mayReadItems">> => true,
+        <<"mayAddItems">> => true,
+        <<"mayRemoveItems">> => true,
+        <<"maySetSeen">> => true,
+        <<"maySetKeywords">> => true,
+        <<"mayCreateChild">> => true,
+        <<"mayRename">> => true,
+        <<"mayDelete">> => true,
+        <<"maySubmit">> => true
+    }.

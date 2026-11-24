@@ -25,16 +25,22 @@
     received_ts := integer(),
     participants => [binary()]
 }.
+-export_type([input/0]).
 
 %% @doc Decide the thread for an email. Returns
 %% `{ThreadId, ThreadDoc, MsgidDocs}' where ThreadDoc and MsgidDocs are
 %% documents the caller must write.
 -spec assign(binary(), input()) -> {binary(), map(), [map()]}.
 assign(Db, Input) ->
-    #{email_id := EmailId, subject_norm := SubjectNorm,
-      received_ts := ReceivedTs} = Input,
-    RefIds = lists:usort(maps:get(references, Input, [])
-                         ++ maps:get(in_reply_to, Input, [])),
+    #{
+        email_id := EmailId,
+        subject_norm := SubjectNorm,
+        received_ts := ReceivedTs
+    } = Input,
+    RefIds = lists:usort(
+        maps:get(references, Input, []) ++
+            maps:get(in_reply_to, Input, [])
+    ),
     ThreadId =
         case resolve_by_refs(Db, RefIds) of
             {ok, Tid} -> Tid;
@@ -48,12 +54,14 @@ assign(Db, Input) ->
 %% Reference-based resolution
 %%====================================================================
 
-resolve_by_refs(_Db, []) -> none;
+resolve_by_refs(_Db, []) ->
+    none;
 resolve_by_refs(Db, RefIds) ->
     DocIds = [msgid_doc_id(R) || R <- RefIds],
     Results = mailio_db:get_many(Db, DocIds),
     ThreadIds = lists:usort(
-        [Tid || {ok, #{<<"threadId">> := Tid}} <- Results]),
+        [Tid || {ok, #{<<"threadId">> := Tid}} <- Results]
+    ),
     case ThreadIds of
         [] -> none;
         _ -> {ok, lists:min(ThreadIds)}
@@ -66,8 +74,10 @@ resolve_by_refs(Db, RefIds) ->
 resolve_by_subject(_Db, <<>>) ->
     mailio_id:thread_id();
 resolve_by_subject(Db, SubjectNorm) ->
-    Query = #{where => [{path, [?MAILIO_NS, <<"subject">>], SubjectNorm}],
-              limit => 1},
+    Query = #{
+        where => [{path, [?MAILIO_NS, <<"subject">>], SubjectNorm}],
+        limit => 1
+    },
     case mailio_db:find(Db, Query, #{include_docs => true}) of
         {ok, [#{<<"id">> := <<?ID_THREAD, Tid/binary>>} | _], _} -> Tid;
         _ -> mailio_id:thread_id()
@@ -86,15 +96,21 @@ upsert_thread(Db, ThreadId, EmailId, SubjectNorm, ReceivedTs, Input) ->
             Ns0 = maps:get(?MAILIO_NS, Existing, #{}),
             LastTs = max(ReceivedTs, maps:get(<<"lastReceivedAt">>, Ns0, 0)),
             Parts = lists:usort(maps:get(<<"participants">>, Ns0, []) ++ Participants),
-            Ns = Ns0#{<<"lastReceivedAt">> => LastTs,
-                      <<"participants">> => Parts},
+            Ns = Ns0#{
+                <<"lastReceivedAt">> => LastTs,
+                <<"participants">> => Parts
+            },
             Existing#{<<"emailIds">> => EmailIds, ?MAILIO_NS => Ns};
         {error, not_found} ->
-            #{<<"id">> => DocId,
-              <<"emailIds">> => [EmailId],
-              ?MAILIO_NS => #{<<"subject">> => SubjectNorm,
-                              <<"participants">> => lists:usort(Participants),
-                              <<"lastReceivedAt">> => ReceivedTs}}
+            #{
+                <<"id">> => DocId,
+                <<"emailIds">> => [EmailId],
+                ?MAILIO_NS => #{
+                    <<"subject">> => SubjectNorm,
+                    <<"participants">> => lists:usort(Participants),
+                    <<"lastReceivedAt">> => ReceivedTs
+                }
+            }
     end.
 
 add_unique(List, Item) ->
@@ -110,9 +126,13 @@ add_unique(List, Item) ->
 msgid_docs(#{message_id := undefined}, _ThreadId) ->
     [];
 msgid_docs(#{message_id := MsgId, email_id := EmailId}, ThreadId) ->
-    [#{<<"id">> => msgid_doc_id(MsgId),
-       <<"emailId">> => EmailId,
-       <<"threadId">> => ThreadId}].
+    [
+        #{
+            <<"id">> => msgid_doc_id(MsgId),
+            <<"emailId">> => EmailId,
+            <<"threadId">> => ThreadId
+        }
+    ].
 
 msgid_doc_id(MsgId) ->
     <<?ID_MSGID, (mailio_id:msgid_hash(MsgId))/binary>>.
@@ -124,8 +144,10 @@ msgid_doc_id(MsgId) ->
 %% @doc Normalize a subject for thread matching: strip reply/forward
 %% prefixes, lowercase, collapse whitespace.
 -spec normalize_subject(binary() | null | undefined) -> binary().
-normalize_subject(null) -> <<>>;
-normalize_subject(undefined) -> <<>>;
+normalize_subject(null) ->
+    <<>>;
+normalize_subject(undefined) ->
+    <<>>;
 normalize_subject(Subject) ->
     Lower = mailio_ascii:lower(mailio_ascii:trim(Subject)),
     Stripped = strip_prefixes(Lower),
@@ -152,6 +174,13 @@ skip_count(<<"]:", Rest/binary>>) -> {ok, Rest};
 skip_count(_) -> none.
 
 collapse_ws(Bin) ->
-    Parts = [P || P <- binary:split(Bin, [<<" ">>, <<"\t">>, <<"\r">>, <<"\n">>],
-                                    [global]), P =/= <<>>],
+    Parts = [
+        P
+     || P <- binary:split(
+            Bin,
+            [<<" ">>, <<"\t">>, <<"\r">>, <<"\n">>],
+            [global]
+        ),
+        P =/= <<>>
+    ],
     iolist_to_binary(lists:join(<<" ">>, Parts)).

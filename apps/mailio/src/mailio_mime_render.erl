@@ -21,7 +21,7 @@ render(Part0) ->
     %% Fix the boundary once so the header and body delimiters agree.
     Part = ensure_boundary(Part0),
     HeaderLines = content_headers(Part) ++ extra_headers(Part),
-    Block = [ [N, <<": ">>, V, <<"\r\n">>] || {N, V} <- HeaderLines ],
+    Block = [[N, <<": ">>, V, <<"\r\n">>] || {N, V} <- HeaderLines],
     Body = render_body(Part),
     iolist_to_binary([Block, <<"\r\n">>, Body]).
 
@@ -36,8 +36,10 @@ ensure_boundary(Part) ->
 
 render_body(#{parts := Children} = Part) ->
     Boundary = boundary_of(Part),
-    Rendered = [ [<<"--">>, Boundary, <<"\r\n">>, render(C), <<"\r\n">>]
-                 || C <- Children ],
+    Rendered = [
+        [<<"--">>, Boundary, <<"\r\n">>, render(C), <<"\r\n">>]
+     || C <- Children
+    ],
     iolist_to_binary([Rendered, <<"--">>, Boundary, <<"--\r\n">>]);
 render_body(#{body := Body} = Part) ->
     encode_body(Body, maps:get(encoding, Part, <<"7bit">>));
@@ -49,17 +51,17 @@ content_headers(Part) ->
     Type = maps:get(type, Part, <<"text">>),
     Sub = maps:get(subtype, Part, <<"plain">>),
     Params0 = maps:get(params, Part, #{}),
-    Params = case maps:is_key(parts, Part) of
-                 true -> Params0#{<<"boundary">> => boundary_of(Part)};
-                 false -> maybe_charset(Params0, Part)
-             end,
-    Ct = {<<"Content-Type">>,
-          iolist_to_binary([Type, <<"/">>, Sub, render_params(Params)])},
-    CteLines = case maps:is_key(parts, Part) of
-                   true -> [];
-                   false -> [{<<"Content-Transfer-Encoding">>,
-                              maps:get(encoding, Part, <<"7bit">>)}]
-               end,
+    Params =
+        case maps:is_key(parts, Part) of
+            true -> Params0#{<<"boundary">> => boundary_of(Part)};
+            false -> maybe_charset(Params0, Part)
+        end,
+    Ct = {<<"Content-Type">>, iolist_to_binary([Type, <<"/">>, Sub, render_params(Params)])},
+    CteLines =
+        case maps:is_key(parts, Part) of
+            true -> [];
+            false -> [{<<"Content-Transfer-Encoding">>, maps:get(encoding, Part, <<"7bit">>)}]
+        end,
     DispLines = disposition_header(Part),
     [Ct | CteLines] ++ DispLines.
 
@@ -69,10 +71,11 @@ maybe_charset(Params, _) ->
     Params.
 
 disposition_header(#{disposition := D} = Part) when is_binary(D) ->
-    Params = case maps:get(filename, Part, undefined) of
-                 undefined -> #{};
-                 F -> #{<<"filename">> => F}
-             end,
+    Params =
+        case maps:get(filename, Part, undefined) of
+            undefined -> #{};
+            F -> #{<<"filename">> => F}
+        end,
     [{<<"Content-Disposition">>, iolist_to_binary([D, render_params(Params)])}];
 disposition_header(_) ->
     [].
@@ -85,13 +88,20 @@ extra_headers(Part) ->
 
 is_content_header(N) ->
     L = string:lowercase(N),
-    lists:member(L, [<<"content-type">>, <<"content-transfer-encoding">>,
-                     <<"content-disposition">>]).
+    lists:member(L, [
+        <<"content-type">>,
+        <<"content-transfer-encoding">>,
+        <<"content-disposition">>
+    ]).
 
 render_params(Params) ->
-    maps:fold(fun(K, V, Acc) ->
-                  [Acc, <<"; ">>, K, <<"=">>, quote_param(V)]
-              end, [], Params).
+    maps:fold(
+        fun(K, V, Acc) ->
+            [Acc, <<"; ">>, K, <<"=">>, quote_param(V)]
+        end,
+        [],
+        Params
+    ).
 
 quote_param(V) ->
     case needs_quoting(V) of
@@ -100,9 +110,23 @@ quote_param(V) ->
     end.
 
 needs_quoting(V) ->
-    case binary:match(V, [<<" ">>, <<"\t">>, <<";">>, <<"\"">>, <<"/">>,
-                          <<"(">>, <<")">>, <<"<">>, <<">">>, <<"@">>,
-                          <<",">>, <<":">>, <<"=">>]) of
+    case
+        binary:match(V, [
+            <<" ">>,
+            <<"\t">>,
+            <<";">>,
+            <<"\"">>,
+            <<"/">>,
+            <<"(">>,
+            <<")">>,
+            <<"<">>,
+            <<">">>,
+            <<"@">>,
+            <<",">>,
+            <<":">>,
+            <<"=">>
+        ])
+    of
         nomatch -> V =:= <<>>;
         _ -> true
     end.
@@ -140,7 +164,8 @@ chunk64(B64, Acc) ->
 
 %% Minimal quoted-printable encoder (escapes non-printable and '=').
 encode_qp(Body) -> encode_qp(Body, <<>>).
-encode_qp(<<>>, Acc) -> Acc;
+encode_qp(<<>>, Acc) ->
+    Acc;
 encode_qp(<<$\r, $\n, Rest/binary>>, Acc) ->
     encode_qp(Rest, <<Acc/binary, "\r\n">>);
 encode_qp(<<C, Rest/binary>>, Acc) ->
@@ -171,20 +196,25 @@ build(Spec) ->
     render(Part).
 
 build_headers(Spec) ->
-    Base = [{<<"From">>, format_addresses(maps:get(from, Spec, []))},
-            {<<"To">>, format_addresses(maps:get(to, Spec, []))}],
-    Cc = case maps:get(cc, Spec, []) of
-             [] -> [];
-             L -> [{<<"Cc">>, format_addresses(L)}]
-         end,
-    Subj = case maps:get(subject, Spec, undefined) of
-               undefined -> [];
-               S -> [{<<"Subject">>, encode_unstructured(S)}]
-           end,
-    MsgId = case maps:get(message_id, Spec, undefined) of
-                undefined -> [];
-                M -> [{<<"Message-ID">>, <<"<", M/binary, ">">>}]
-            end,
+    Base = [
+        {<<"From">>, format_addresses(maps:get(from, Spec, []))},
+        {<<"To">>, format_addresses(maps:get(to, Spec, []))}
+    ],
+    Cc =
+        case maps:get(cc, Spec, []) of
+            [] -> [];
+            L -> [{<<"Cc">>, format_addresses(L)}]
+        end,
+    Subj =
+        case maps:get(subject, Spec, undefined) of
+            undefined -> [];
+            S -> [{<<"Subject">>, encode_unstructured(S)}]
+        end,
+    MsgId =
+        case maps:get(message_id, Spec, undefined) of
+            undefined -> [];
+            M -> [{<<"Message-ID">>, <<"<", M/binary, ">">>}]
+        end,
     Mime = [{<<"MIME-Version">>, <<"1.0">>}],
     Extra = maps:get(headers, Spec, []),
     Base ++ Cc ++ Subj ++ MsgId ++ Mime ++ Extra.
@@ -193,18 +223,36 @@ build_content(Spec, Headers) ->
     Text = maps:get(text, Spec, <<>>),
     case maps:get(html, Spec, undefined) of
         undefined ->
-            #{type => <<"text">>, subtype => <<"plain">>,
-              charset => <<"utf-8">>, encoding => encoding_for(Text),
-              headers => Headers, body => Text};
+            #{
+                type => <<"text">>,
+                subtype => <<"plain">>,
+                charset => <<"utf-8">>,
+                encoding => encoding_for(Text),
+                headers => Headers,
+                body => Text
+            };
         Html ->
-            #{type => <<"multipart">>, subtype => <<"alternative">>,
-              headers => Headers,
-              parts => [#{type => <<"text">>, subtype => <<"plain">>,
-                          charset => <<"utf-8">>, encoding => encoding_for(Text),
-                          body => Text},
-                        #{type => <<"text">>, subtype => <<"html">>,
-                          charset => <<"utf-8">>, encoding => encoding_for(Html),
-                          body => Html}]}
+            #{
+                type => <<"multipart">>,
+                subtype => <<"alternative">>,
+                headers => Headers,
+                parts => [
+                    #{
+                        type => <<"text">>,
+                        subtype => <<"plain">>,
+                        charset => <<"utf-8">>,
+                        encoding => encoding_for(Text),
+                        body => Text
+                    },
+                    #{
+                        type => <<"text">>,
+                        subtype => <<"html">>,
+                        charset => <<"utf-8">>,
+                        encoding => encoding_for(Html),
+                        body => Html
+                    }
+                ]
+            }
     end.
 
 encoding_for(Bin) ->
@@ -232,7 +280,8 @@ encode_unstructured(Value) ->
 -spec format_address(mailio_rfc5322:address()) -> binary().
 format_address(#{email := Email} = Addr) ->
     case maps:get(name, Addr, undefined) of
-        undefined -> Email;
+        undefined ->
+            Email;
         Name ->
             EncName = encode_display_name(Name),
             <<EncName/binary, " <", Email/binary, ">">>
@@ -261,5 +310,4 @@ header_case(Name) ->
     iolist_to_binary(lists:join(<<"-">>, Cased)).
 
 capitalize(<<>>) -> <<>>;
-capitalize(<<C, Rest/binary>>) ->
-    <<(string:uppercase(<<C>>))/binary, Rest/binary>>.
+capitalize(<<C, Rest/binary>>) -> <<(string:uppercase(<<C>>))/binary, Rest/binary>>.

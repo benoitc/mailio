@@ -22,36 +22,48 @@ start_link(AccountId, Opts) ->
 -spec init({binary(), map()}) ->
     {ok, {supervisor:sup_flags(), [supervisor:child_spec()]}}.
 init({AccountId, Opts}) ->
-    SupFlags = #{strategy => one_for_one,
-                 intensity => 5,
-                 period => 60},
+    SupFlags = #{
+        strategy => one_for_one,
+        intensity => 5,
+        period => 60
+    },
     Base = [
-        #{id => account,
-          start => {mailio_account, start_link, [AccountId]},
-          restart => permanent,
-          shutdown => 5000,
-          type => worker,
-          modules => [mailio_account]},
-        #{id => writer,
-          start => {mailio_account_writer, start_link, [AccountId]},
-          restart => permanent,
-          shutdown => 5000,
-          type => worker,
-          modules => [mailio_account_writer]}
+        #{
+            id => account,
+            start => {mailio_account, start_link, [AccountId]},
+            restart => permanent,
+            shutdown => 5000,
+            type => worker,
+            modules => [mailio_account]
+        },
+        #{
+            id => writer,
+            start => {mailio_account_writer, start_link, [AccountId]},
+            restart => permanent,
+            shutdown => 5000,
+            type => worker,
+            modules => [mailio_account_writer]
+        }
     ],
     Children = Base ++ sync_child(AccountId, Opts),
     {ok, {SupFlags, Children}}.
 
 sync_child(AccountId, #{imap := AdapterConfig} = Opts) ->
-    Args = #{account_id => AccountId,
-             adapter => maps:get(adapter, Opts, mailio_imap),
-             adapter_config => AdapterConfig,
-             watch_mailbox => maps:get(watch_mailbox, Opts, <<"INBOX">>)},
-    [#{id => sync,
-       start => {mailio_sync_mgr, start_link, [Args]},
-       restart => transient,
-       shutdown => 5000,
-       type => worker,
-       modules => [mailio_sync_mgr]}];
+    Args = #{
+        account_id => AccountId,
+        adapter => maps:get(adapter, Opts, mailio_imap),
+        adapter_config => AdapterConfig,
+        watch_mailbox => maps:get(watch_mailbox, Opts, <<"INBOX">>)
+    },
+    [
+        #{
+            id => sync,
+            start => {mailio_sync_mgr, start_link, [Args]},
+            restart => transient,
+            shutdown => 5000,
+            type => worker,
+            modules => [mailio_sync_mgr]
+        }
+    ];
 sync_child(_AccountId, _Opts) ->
     [].

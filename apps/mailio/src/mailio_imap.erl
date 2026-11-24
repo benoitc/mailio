@@ -8,12 +8,25 @@
 -module(mailio_imap).
 -behaviour(mailio_adapter).
 
--export([connect/1, close/1, capabilities/1, list_mailboxes/1,
-         fetch_changes_since/4, fetch_message/4, set_keywords/5,
-         move/4, append/4, expunge/3, watch/3, unwatch/2, list_uids/2]).
+-export([
+    connect/1,
+    close/1,
+    capabilities/1,
+    list_mailboxes/1,
+    fetch_changes_since/4,
+    fetch_message/4,
+    set_keywords/5,
+    move/4,
+    append/4,
+    expunge/3,
+    watch/3,
+    unwatch/2,
+    list_uids/2
+]).
 
 %% A connection handle: the FSM pid plus cached capabilities.
 -type conn() :: #{pid := pid(), caps := #{atom() => boolean()}}.
+-export_type([conn/0]).
 
 %%====================================================================
 %% Lifecycle
@@ -42,8 +55,11 @@ connect(Config) ->
 
 -spec close(conn()) -> ok.
 close(#{pid := Pid}) ->
-    try run(Pid, fun(T) -> {mailio_imap_proto:logout(T), undefined} end)
-    catch _:_ -> ok end,
+    try
+        run(Pid, fun(T) -> {mailio_imap_proto:logout(T), undefined} end)
+    catch
+        _:_ -> ok
+    end,
     mailio_imap_conn:close(Pid).
 
 -spec capabilities(conn()) -> #{atom() => boolean()}.
@@ -72,13 +88,19 @@ list_mailboxes(#{pid := Pid}) ->
     end.
 
 to_mailbox({list, Attrs, Delim, Name}) ->
-    DelimBin = case Delim of nil -> <<"/">>; D -> D end,
-    #{id => Name,
-      name => Name,
-      role => mailio_imap_map:role_of(Attrs, Name),
-      parent_id => null,
-      delimiter => DelimBin,
-      attrs => Attrs}.
+    DelimBin =
+        case Delim of
+            nil -> <<"/">>;
+            D -> D
+        end,
+    #{
+        id => Name,
+        name => Name,
+        role => mailio_imap_map:role_of(Attrs, Name),
+        parent_id => null,
+        delimiter => DelimBin,
+        attrs => Attrs
+    }.
 
 %%====================================================================
 %% Changes
@@ -86,7 +108,7 @@ to_mailbox({list, Attrs, Delim, Name}) ->
 
 -spec fetch_changes_since(conn(), binary(), mailio_adapter:remote_state(), map()) ->
     {ok, [mailio_adapter:change()], mailio_adapter:remote_state(), more | done}
-  | {error, term()}.
+    | {error, term()}.
 fetch_changes_since(#{pid := Pid, caps := Caps}, MailboxId, State, _Opts) ->
     Prev = mailio_imap_map:decode_state(State),
     case use_qresync(Caps, Prev) of
@@ -95,9 +117,9 @@ fetch_changes_since(#{pid := Pid, caps := Caps}, MailboxId, State, _Opts) ->
     end.
 
 use_qresync(Caps, Prev) ->
-    maps:get(qresync, Caps, false)
-        andalso maps:get(uidvalidity, Prev) =/= undefined
-        andalso maps:get(highestmodseq, Prev) =/= undefined.
+    maps:get(qresync, Caps, false) andalso
+        maps:get(uidvalidity, Prev) =/= undefined andalso
+        maps:get(highestmodseq, Prev) =/= undefined.
 
 %% Plain / CONDSTORE path: SELECT, then UID-FETCH for new and (if CONDSTORE)
 %% CHANGEDSINCE for flag updates. Removals are not detected here.
@@ -147,10 +169,14 @@ do_select_qresync(Pid, MailboxId, UidValidity, ModSeq) ->
         {ok, Untagged, {ok, _, _}} ->
             SelInfo = parse_select(Untagged),
             Vanished = lists:append([Uids || {vanished, _Earlier, Uids} <- Untagged]),
-            Updated = [{updated, #{uid => proplists:get_value(uid, I),
-                                   keywords => keywords_of(I)}}
-                       || {fetch, _Seq, I} <- Untagged,
-                          proplists:is_defined(uid, I)],
+            Updated = [
+                {updated, #{
+                    uid => proplists:get_value(uid, I),
+                    keywords => keywords_of(I)
+                }}
+             || {fetch, _Seq, I} <- Untagged,
+                proplists:is_defined(uid, I)
+            ],
             {ok, SelInfo, Vanished, Updated};
         Other ->
             Other
@@ -166,35 +192,53 @@ fetch_range(Pid, SeqSet) ->
     Items = [<<"UID">>, <<"FLAGS">>, <<"INTERNALDATE">>, <<"RFC822.SIZE">>],
     case run(Pid, fun(T) -> {mailio_imap_proto:uid_fetch(T, SeqSet, Items), undefined} end) of
         {ok, Untagged, {ok, _, _}} ->
-            [added_change(Items0) || {fetch, _Seq, Items0} <- Untagged,
-                                     proplists:is_defined(uid, Items0)];
+            [
+                added_change(Items0)
+             || {fetch, _Seq, Items0} <- Untagged,
+                proplists:is_defined(uid, Items0)
+            ];
         _ ->
             []
     end.
 
 added_change(Items) ->
-    {added, #{uid => proplists:get_value(uid, Items),
-              keywords => keywords_of(Items),
-              internal_date => internaldate_epoch(Items),
-              size => proplists:get_value(size, Items, 0)}}.
+    {added, #{
+        uid => proplists:get_value(uid, Items),
+        keywords => keywords_of(Items),
+        internal_date => internaldate_epoch(Items),
+        size => proplists:get_value(size, Items, 0)
+    }}.
 
 %% Updated flags via CONDSTORE CHANGEDSINCE, when available.
-fetch_updated(_Pid, _Caps, undefined) -> [];
+fetch_updated(_Pid, _Caps, undefined) ->
+    [];
 fetch_updated(Pid, Caps, PrevModSeq) ->
     case maps:get(condstore, Caps, false) orelse maps:get(qresync, Caps, false) of
-        false -> [];
+        false ->
+            [];
         true ->
             %% CHANGEDSINCE is a FETCH modifier appended after the item list.
             Cmd = fun(T) ->
-                {[T, <<" UID FETCH 1:* (UID FLAGS) (CHANGEDSINCE ">>,
-                  integer_to_binary(PrevModSeq), <<")\r\n">>], undefined}
+                {
+                    [
+                        T,
+                        <<" UID FETCH 1:* (UID FLAGS) (CHANGEDSINCE ">>,
+                        integer_to_binary(PrevModSeq),
+                        <<")\r\n">>
+                    ],
+                    undefined
+                }
             end,
             case run(Pid, Cmd) of
                 {ok, Untagged, {ok, _, _}} ->
-                    [{updated, #{uid => proplists:get_value(uid, I),
-                                 keywords => keywords_of(I)}}
+                    [
+                        {updated, #{
+                            uid => proplists:get_value(uid, I),
+                            keywords => keywords_of(I)
+                        }}
                      || {fetch, _Seq, I} <- Untagged,
-                        proplists:is_defined(uid, I)];
+                        proplists:is_defined(uid, I)
+                    ];
                 _ ->
                     []
             end
@@ -227,17 +271,22 @@ fetch_message(#{pid := Pid}, MailboxId, Uid, Sink) ->
     end.
 
 body_from(Untagged, Uid) ->
-    Matches = [proplists:get_value(body, I)
-               || {fetch, _Seq, I} <- Untagged,
-                  proplists:get_value(uid, I) =:= Uid,
-                  proplists:get_value(body, I) =/= undefined],
+    Matches = [
+        proplists:get_value(body, I)
+     || {fetch, _Seq, I} <- Untagged,
+        proplists:get_value(uid, I) =:= Uid,
+        proplists:get_value(body, I) =/= undefined
+    ],
     case Matches of
         [Body | _] when is_binary(Body) -> {ok, Body};
         _ ->
             %% Fall back to the first body returned (single-uid fetch).
-            AnyBody = [B || {fetch, _S, I} <- Untagged,
-                            B <- [proplists:get_value(body, I)],
-                            is_binary(B)],
+            AnyBody = [
+                B
+             || {fetch, _S, I} <- Untagged,
+                B <- [proplists:get_value(body, I)],
+                is_binary(B)
+            ],
             case AnyBody of
                 [Body | _] -> {ok, Body};
                 _ -> not_found
@@ -263,11 +312,14 @@ set_keywords(#{pid := Pid}, MailboxId, Uid, Add, Remove) ->
             command_error(Other)
     end.
 
-store(_Pid, _Uid, _Action, []) -> ok;
+store(_Pid, _Uid, _Action, []) ->
+    ok;
 store(Pid, Uid, Action, Flags) ->
-    case run(Pid, fun(T) ->
-              {mailio_imap_proto:uid_store(T, Uid, {Action, true}, Flags), undefined}
-          end) of
+    case
+        run(Pid, fun(T) ->
+            {mailio_imap_proto:uid_store(T, Uid, {Action, true}, Flags), undefined}
+        end)
+    of
         {ok, _, {ok, _, _}} -> ok;
         Other -> command_error(Other)
     end.
@@ -279,7 +331,11 @@ move(#{pid := Pid, caps := Caps}, FromMailbox, Uid, ToMailbox) ->
         {ok, _} ->
             case maps:get(move, Caps, false) of
                 true ->
-                    case run(Pid, fun(T) -> {mailio_imap_proto:uid_move(T, Uid, ToMailbox), undefined} end) of
+                    case
+                        run(Pid, fun(T) ->
+                            {mailio_imap_proto:uid_move(T, Uid, ToMailbox), undefined}
+                        end)
+                    of
                         {ok, _, {ok, _, _}} -> {ok, undefined};
                         Other -> command_error(Other)
                     end;
@@ -291,11 +347,14 @@ move(#{pid := Pid, caps := Caps}, FromMailbox, Uid, ToMailbox) ->
     end.
 
 move_by_copy(Pid, Uid, ToMailbox) ->
-    ok_chain([
-        fun() -> copy(Pid, Uid, ToMailbox) end,
-        fun() -> store(Pid, Uid, add, [<<"\\Deleted">>]) end,
-        fun() -> do_uid_expunge(Pid, Uid) end
-    ], {ok, undefined}).
+    ok_chain(
+        [
+            fun() -> copy(Pid, Uid, ToMailbox) end,
+            fun() -> store(Pid, Uid, add, [<<"\\Deleted">>]) end,
+            fun() -> do_uid_expunge(Pid, Uid) end
+        ],
+        {ok, undefined}
+    ).
 
 copy(Pid, Uid, Dest) ->
     case run(Pid, fun(T) -> {mailio_imap_proto:uid_copy(T, Uid, Dest), undefined} end) of
@@ -351,7 +410,8 @@ do_uid_expunge(Pid, Uid) ->
 -spec watch(conn(), binary(), pid()) -> {ok, term()} | {error, not_supported | term()}.
 watch(#{pid := Pid, caps := Caps}, MailboxId, NotifyPid) ->
     case maps:get(idle, Caps, false) of
-        false -> {error, not_supported};
+        false ->
+            {error, not_supported};
         true ->
             case do_select(Pid, MailboxId) of
                 {ok, _} ->
@@ -399,27 +459,40 @@ do_select(Pid, MailboxId) ->
     end.
 
 parse_select(Untagged) ->
-    lists:foldl(fun select_field/2,
-                #{uidvalidity => undefined, uidnext => undefined,
-                  highestmodseq => undefined, exists => 0, flags => []},
-                Untagged).
+    lists:foldl(
+        fun select_field/2,
+        #{
+            uidvalidity => undefined,
+            uidnext => undefined,
+            highestmodseq => undefined,
+            exists => 0,
+            flags => []
+        },
+        Untagged
+    ).
 
-select_field({exists, N}, Acc) -> Acc#{exists => N};
-select_field({flags, F}, Acc) -> Acc#{flags => F};
+select_field({exists, N}, Acc) ->
+    Acc#{exists => N};
+select_field({flags, F}, Acc) ->
+    Acc#{flags => F};
 select_field({status_resp, ok, {<<"UIDVALIDITY">>, [{number, V}]}, _}, Acc) ->
     Acc#{uidvalidity => V};
 select_field({status_resp, ok, {<<"UIDNEXT">>, [{number, V}]}, _}, Acc) ->
     Acc#{uidnext => V};
 select_field({status_resp, ok, {<<"HIGHESTMODSEQ">>, [{number, V}]}, _}, Acc) ->
     Acc#{highestmodseq => V};
-select_field(_, Acc) -> Acc.
+select_field(_, Acc) ->
+    Acc.
 
 sel_to_state(#{uidvalidity := UV, uidnext := UN, highestmodseq := MS}) ->
     #{uidvalidity => UV, uidnext => UN, highestmodseq => MS}.
 
 encode(#{uidvalidity := UV, uidnext := UN, highestmodseq := MS}) ->
-    mailio_imap_map:encode_state(#{uidvalidity => UV, uidnext => UN,
-                                   highestmodseq => MS}).
+    mailio_imap_map:encode_state(#{
+        uidvalidity => UV,
+        uidnext => UN,
+        highestmodseq => MS
+    }).
 
 uidvalidity_changed(#{uidvalidity := undefined}, _New) -> false;
 uidvalidity_changed(#{uidvalidity := Prev}, #{uidvalidity := New}) -> Prev =/= New.
@@ -460,12 +533,14 @@ collect_caps(Untagged, Pid) ->
 
 caps_map(CapList) ->
     Has = fun(Name) -> lists:any(fun(C) -> mailio_ascii:upper(C) =:= Name end, CapList) end,
-    #{idle => Has(<<"IDLE">>),
-      condstore => Has(<<"CONDSTORE">>),
-      qresync => Has(<<"QRESYNC">>),
-      move => Has(<<"MOVE">>),
-      uidplus => Has(<<"UIDPLUS">>),
-      'special-use' => Has(<<"SPECIAL-USE">>)}.
+    #{
+        idle => Has(<<"IDLE">>),
+        condstore => Has(<<"CONDSTORE">>),
+        qresync => Has(<<"QRESYNC">>),
+        move => Has(<<"MOVE">>),
+        uidplus => Has(<<"UIDPLUS">>),
+        'special-use' => Has(<<"SPECIAL-USE">>)
+    }.
 
 %%====================================================================
 %% Result helpers
@@ -474,7 +549,8 @@ caps_map(CapList) ->
 run(Pid, Builder) -> mailio_imap_conn:run(Pid, Builder).
 
 ok_chain(Funs) -> ok_chain(Funs, ok).
-ok_chain([], Result) -> Result;
+ok_chain([], Result) ->
+    Result;
 ok_chain([F | Rest], Result) ->
     case F() of
         ok -> ok_chain(Rest, Result);

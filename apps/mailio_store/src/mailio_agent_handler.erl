@@ -10,6 +10,10 @@
 %%% the consumer, with the caller responsible for timeouts.
 -module(mailio_agent_handler).
 
--callback handle_task(Kind :: binary(), Account :: binary(),
-                      EmailId :: binary(), Opts :: map()) ->
+-callback handle_task(
+    Kind :: binary(),
+    Account :: binary(),
+    EmailId :: binary(),
+    Opts :: map()
+) ->
     {ok, [term()]} | {error, term()}.

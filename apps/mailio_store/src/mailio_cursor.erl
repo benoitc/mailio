@@ -30,8 +30,9 @@ decode(Token) when is_binary(Token) ->
         Bin = base64url_decode(Token),
         #{v := 1, c := Cursor} = binary_to_term(Bin, [safe]),
         {ok, Cursor}
-    catch _:_ ->
-        {error, invalid_state}
+    catch
+        _:_ ->
+            {error, invalid_state}
     end;
 decode(_) ->
     {error, invalid_state}.
@@ -49,10 +50,11 @@ base64url_encode(Bin) ->
 base64url_decode(Bin) ->
     Std0 = binary:replace(Bin, <<"-">>, <<"+">>, [global]),
     Std = binary:replace(Std0, <<"_">>, <<"/">>, [global]),
-    Padded = case byte_size(Std) rem 4 of
-                 0 -> Std;
-                 2 -> <<Std/binary, "==">>;
-                 3 -> <<Std/binary, "=">>;
-                 _ -> Std
-             end,
+    Padded =
+        case byte_size(Std) rem 4 of
+            0 -> Std;
+            2 -> <<Std/binary, "==">>;
+            3 -> <<Std/binary, "=">>;
+            _ -> Std
+        end,
     base64:decode(Padded).

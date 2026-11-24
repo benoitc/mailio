@@ -29,13 +29,15 @@
 add(Account, Spec) ->
     Db = mailio_account:db_name(Account),
     RuleId = mailio_id:rule_id(),
-    Doc = #{<<"id">> => <<?ID_RULE, RuleId/binary>>,
-            <<"name">> => maps:get(name, Spec, <<>>),
-            <<"enabled">> => maps:get(enabled, Spec, true),
-            <<"priority">> => maps:get(priority, Spec, 0),
-            <<"when">> => jsonify(maps:get('when', Spec, #{})),
-            <<"actions">> => jsonify(maps:get(actions, Spec, [])),
-            <<"stopProcessing">> => maps:get(stop_processing, Spec, false)},
+    Doc = #{
+        <<"id">> => <<?ID_RULE, RuleId/binary>>,
+        <<"name">> => maps:get(name, Spec, <<>>),
+        <<"enabled">> => maps:get(enabled, Spec, true),
+        <<"priority">> => maps:get(priority, Spec, 0),
+        <<"when">> => jsonify(maps:get('when', Spec, #{})),
+        <<"actions">> => jsonify(maps:get(actions, Spec, [])),
+        <<"stopProcessing">> => maps:get(stop_processing, Spec, false)
+    },
     {ok, _, _} = mailio_db:put(Db, Doc),
     {ok, RuleId}.
 
@@ -77,20 +79,23 @@ start_consumer(Account) ->
 
 -spec start_consumer(binary(), map()) -> {ok, pid()} | {error, term()}.
 start_consumer(Account, Opts) ->
-    mailio_workflow_consumer:start_link(#{account_id => Account,
-                                          name => ?CONSUMER_NAME,
-                                          types => [email],
-                                          verbs => [created],
-                                          handler => handler(),
-                                          subscribe => maps:get(subscribe, Opts, false)}).
+    mailio_workflow_consumer:start_link(#{
+        account_id => Account,
+        name => ?CONSUMER_NAME,
+        types => [email],
+        verbs => [created],
+        handler => handler(),
+        subscribe => maps:get(subscribe, Opts, false)
+    }).
 
 %% @doc The consumer handler: apply rules to newly created emails.
 -spec handler() -> fun((binary(), map()) -> ok).
 handler() ->
-    fun(Account, #{verb := created, object_id := EmailId}) ->
+    fun
+        (Account, #{verb := created, object_id := EmailId}) ->
             _ = apply_to_email(Account, EmailId),
             ok;
-       (_Account, _Env) ->
+        (_Account, _Env) ->
             ok
     end.
 
@@ -117,9 +122,12 @@ enabled_sorted(Db) ->
     {ok, Docs} = mailio_db:by_id_prefix(Db, <<?ID_RULE>>),
     Enabled = [D || D <- Docs, maps:get(<<"enabled">>, D, true) =:= true],
     %% Higher priority first; stable within equal priority.
-    lists:sort(fun(A, B) ->
-                   maps:get(<<"priority">>, A, 0) >= maps:get(<<"priority">>, B, 0)
-               end, Enabled).
+    lists:sort(
+        fun(A, B) ->
+            maps:get(<<"priority">>, A, 0) >= maps:get(<<"priority">>, B, 0)
+        end,
+        Enabled
+    ).
 
 run_rules(_Account, _EmailId, _Email, _Body, [], Applied) ->
     Applied;
@@ -173,7 +181,11 @@ to_action(_) ->
     false.
 
 binary_to_existing_atom_safe(B) when is_binary(B) ->
-    try binary_to_existing_atom(B, utf8) catch _:_ -> '$undefined' end;
+    try
+        binary_to_existing_atom(B, utf8)
+    catch
+        _:_ -> '$undefined'
+    end;
 binary_to_existing_atom_safe(A) when is_atom(A) ->
     A.
 

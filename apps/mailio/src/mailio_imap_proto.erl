@@ -13,11 +13,32 @@
 -module(mailio_imap_proto).
 
 %% Command encoders
--export([capability/1, login/3, starttls/1, logout/1, enable/2, select_qresync/4,
-         select/2, examine/2, list/3, status/3,
-         uid_fetch/3, uid_store/4, uid_search/2,
-         uid_copy/3, uid_move/3, append/4, expunge/1, uid_expunge/2,
-         idle/1, idle_done/0, noop/1, authenticate_plain/3, authenticate_xoauth2/1, xoauth2_response/2]).
+-export([
+    capability/1,
+    login/3,
+    starttls/1,
+    logout/1,
+    enable/2,
+    select_qresync/4,
+    select/2,
+    examine/2,
+    list/3,
+    status/3,
+    uid_fetch/3,
+    uid_store/4,
+    uid_search/2,
+    uid_copy/3,
+    uid_move/3,
+    append/4,
+    expunge/1,
+    uid_expunge/2,
+    idle/1,
+    idle_done/0,
+    noop/1,
+    authenticate_plain/3,
+    authenticate_xoauth2/1,
+    xoauth2_response/2
+]).
 
 %% Response decoding
 -export([read_response/1, parse_response/1]).
@@ -27,16 +48,17 @@
 
 -export_type([response/0, token/0]).
 
--type token() :: {atom, binary()}
-               | {number, integer()}
-               | {string, binary()}
-               | {list, [token()]}
-               | nil.
+-type token() ::
+    {atom, binary()}
+    | {number, integer()}
+    | {string, binary()}
+    | {list, [token()]}
+    | nil.
 
 -type response() ::
     {continuation, binary()}
-  | {tagged, Tag :: binary(), Status :: atom(), #{code => term(), text => binary()}}
-  | {untagged, term()}.
+    | {tagged, Tag :: binary(), Status :: atom(), #{code => term(), text => binary()}}
+    | {untagged, term()}.
 
 %%====================================================================
 %% Command encoders
@@ -85,8 +107,16 @@ select(Tag, Mailbox) -> [Tag, " SELECT ", quote(Mailbox), "\r\n"].
 %% the given mod-sequence.
 -spec select_qresync(binary(), binary(), non_neg_integer(), non_neg_integer()) -> iodata().
 select_qresync(Tag, Mailbox, UidValidity, ModSeq) ->
-    [Tag, " SELECT ", quote(Mailbox), " (QRESYNC (",
-     integer_to_binary(UidValidity), " ", integer_to_binary(ModSeq), "))\r\n"].
+    [
+        Tag,
+        " SELECT ",
+        quote(Mailbox),
+        " (QRESYNC (",
+        integer_to_binary(UidValidity),
+        " ",
+        integer_to_binary(ModSeq),
+        "))\r\n"
+    ].
 
 -spec examine(binary(), binary()) -> iodata().
 examine(Tag, Mailbox) -> [Tag, " EXAMINE ", quote(Mailbox), "\r\n"].
@@ -107,10 +137,28 @@ uid_fetch(Tag, SeqSet, Items) ->
 %% UID STORE <set> (+|-)FLAGS(.SILENT) (<flags>)
 -spec uid_store(binary(), term(), {add | remove | set, boolean()}, [binary()]) -> iodata().
 uid_store(Tag, SeqSet, {Action, Silent}, Flags) ->
-    Op = case Action of add -> "+FLAGS"; remove -> "-FLAGS"; set -> "FLAGS" end,
-    Suffix = case Silent of true -> ".SILENT"; false -> "" end,
-    [Tag, " UID STORE ", format_seqset(SeqSet), " ", Op, Suffix,
-     " (", lists:join(" ", Flags), ")\r\n"].
+    Op =
+        case Action of
+            add -> "+FLAGS";
+            remove -> "-FLAGS";
+            set -> "FLAGS"
+        end,
+    Suffix =
+        case Silent of
+            true -> ".SILENT";
+            false -> ""
+        end,
+    [
+        Tag,
+        " UID STORE ",
+        format_seqset(SeqSet),
+        " ",
+        Op,
+        Suffix,
+        " (",
+        lists:join(" ", Flags),
+        ")\r\n"
+    ].
 
 -spec uid_search(binary(), iodata()) -> iodata().
 uid_search(Tag, Criteria) ->
@@ -128,12 +176,20 @@ uid_move(Tag, SeqSet, Dest) ->
 %% sends the returned prefix, waits for the `+' continuation, then the data.
 -spec append(binary(), binary(), [binary()], binary()) -> {iodata(), binary()}.
 append(Tag, Mailbox, Flags, Raw) ->
-    FlagPart = case Flags of
-                   [] -> "";
-                   _ -> [" (", lists:join(" ", Flags), ")"]
-               end,
-    Prefix = [Tag, " APPEND ", quote(Mailbox), FlagPart,
-              " {", integer_to_binary(byte_size(Raw)), "}\r\n"],
+    FlagPart =
+        case Flags of
+            [] -> "";
+            _ -> [" (", lists:join(" ", Flags), ")"]
+        end,
+    Prefix = [
+        Tag,
+        " APPEND ",
+        quote(Mailbox),
+        FlagPart,
+        " {",
+        integer_to_binary(byte_size(Raw)),
+        "}\r\n"
+    ],
     {Prefix, <<Raw/binary, "\r\n">>}.
 
 -spec expunge(binary()) -> iodata().
@@ -159,7 +215,8 @@ idle_done() -> "DONE\r\n".
 -spec read_response(binary()) -> {ok, binary(), binary()} | more.
 read_response(Buffer) ->
     case logical_length(Buffer, 0) of
-        more -> more;
+        more ->
+            more;
         {ok, TotalLen, CrlfLen} ->
             Line = binary:part(Buffer, 0, TotalLen - CrlfLen),
             Rest = binary:part(Buffer, TotalLen, byte_size(Buffer) - TotalLen),
@@ -171,7 +228,8 @@ read_response(Buffer) ->
 %% including that terminating CRLF.
 logical_length(Buffer, Pos) ->
     case find_crlf(Buffer, Pos) of
-        nomatch -> more;
+        nomatch ->
+            more;
         CrlfPos ->
             case literal_before(Buffer, Pos, CrlfPos) of
                 {literal, N} ->
@@ -191,7 +249,8 @@ find_crlf(Buffer, Pos) when Pos + 1 < byte_size(Buffer) ->
         <<_:Pos/binary, "\r\n", _/binary>> -> Pos;
         _ -> find_crlf(Buffer, Pos + 1)
     end;
-find_crlf(_Buffer, _Pos) -> nomatch.
+find_crlf(_Buffer, _Pos) ->
+    nomatch.
 
 %% Is the segment ending at CrlfPos terminated by a `{n}' or `{n+}' literal
 %% spec? Scan backwards: `}' , optional `+', digits, `{'.
@@ -200,7 +259,8 @@ literal_before(Buffer, From, CrlfPos) when CrlfPos > From ->
         $} -> scan_literal_digits(Buffer, From, CrlfPos - 2, false, []);
         _ -> none
     end;
-literal_before(_Buffer, _From, _CrlfPos) -> none.
+literal_before(_Buffer, _From, _CrlfPos) ->
+    none.
 
 scan_literal_digits(Buffer, From, Pos, SeenPlus, Digits) when Pos >= From ->
     case binary:at(Buffer, Pos) of
@@ -222,9 +282,12 @@ scan_literal_digits(_Buffer, _From, _Pos, _SeenPlus, _Digits) ->
 
 %% @doc Parse framed response bytes into a structured term.
 -spec parse_response(binary()) -> response().
-parse_response(<<"+ ", Rest/binary>>) -> {continuation, Rest};
-parse_response(<<"+", Rest/binary>>) -> {continuation, Rest};
-parse_response(<<"* ", Rest/binary>>) -> {untagged, parse_untagged(Rest)};
+parse_response(<<"+ ", Rest/binary>>) ->
+    {continuation, Rest};
+parse_response(<<"+", Rest/binary>>) ->
+    {continuation, Rest};
+parse_response(<<"* ", Rest/binary>>) ->
+    {untagged, parse_untagged(Rest)};
 parse_response(Bin) ->
     %% Tagged: "<tag> <STATUS> <text>"
     case split_word(Bin) of
@@ -248,27 +311,39 @@ parse_untagged(Bin) ->
             keyword_response(string:uppercase(First), Rest)
     end.
 
-numeric_response(<<"EXISTS">>, N, _) -> {exists, N};
-numeric_response(<<"RECENT">>, N, _) -> {recent, N};
-numeric_response(<<"EXPUNGE">>, N, _) -> {expunge, N};
+numeric_response(<<"EXISTS">>, N, _) ->
+    {exists, N};
+numeric_response(<<"RECENT">>, N, _) ->
+    {recent, N};
+numeric_response(<<"EXPUNGE">>, N, _) ->
+    {expunge, N};
 numeric_response(<<"FETCH">>, N, Rest) ->
     Tokens = tokenize(Rest),
     {fetch, N, fetch_items(Tokens)};
-numeric_response(Other, N, _) -> {other_numeric, Other, N}.
+numeric_response(Other, N, _) ->
+    {other_numeric, Other, N}.
 
 keyword_response(<<"CAPABILITY">>, Rest) ->
     {capability, [T || {atom, T} <- tokenize(Rest)]};
 keyword_response(<<"FLAGS">>, Rest) ->
     {flags, flag_list(unwrap_list(tokenize(Rest)))};
-keyword_response(<<"LIST">>, Rest) -> parse_list(Rest);
-keyword_response(<<"LSUB">>, Rest) -> parse_list(Rest);
-keyword_response(<<"STATUS">>, Rest) -> parse_status(Rest);
+keyword_response(<<"LIST">>, Rest) ->
+    parse_list(Rest);
+keyword_response(<<"LSUB">>, Rest) ->
+    parse_list(Rest);
+keyword_response(<<"STATUS">>, Rest) ->
+    parse_status(Rest);
 keyword_response(<<"SEARCH">>, Rest) ->
     {search, [N || {number, N} <- tokenize(Rest)]};
-keyword_response(<<"VANISHED">>, Rest) -> parse_vanished(Rest);
-keyword_response(Status, Rest)
-  when Status =:= <<"OK">>; Status =:= <<"NO">>; Status =:= <<"BAD">>;
-       Status =:= <<"BYE">>; Status =:= <<"PREAUTH">> ->
+keyword_response(<<"VANISHED">>, Rest) ->
+    parse_vanished(Rest);
+keyword_response(Status, Rest) when
+    Status =:= <<"OK">>;
+    Status =:= <<"NO">>;
+    Status =:= <<"BAD">>;
+    Status =:= <<"BYE">>;
+    Status =:= <<"PREAUTH">>
+->
     {Code, Text} = parse_resp_text(Rest),
     {status_resp, status_atom(Status), Code, Text};
 keyword_response(Other, Rest) ->
@@ -360,7 +435,8 @@ fetch_items([{list, Items} | _]) -> kv_pairs(Items);
 fetch_items(Toks) -> kv_pairs(Toks).
 
 kv_pairs(Tokens) -> kv_pairs(Tokens, []).
-kv_pairs([], Acc) -> lists:reverse(Acc);
+kv_pairs([], Acc) ->
+    lists:reverse(Acc);
 %% A section with a field list, `BODY[HEADER.FIELDS (FROM TO)]' (optionally
 %% followed by `<origin>'), tokenizes as an atom, a list and an atom that
 %% starts with `]'. Rebuild it as one key so the data lands under it.
@@ -370,7 +446,9 @@ kv_pairs([{atom, Key} | Rest], Acc) ->
             case open_section(Key) of
                 true ->
                     Names = lists:join(<<" ">>, [token_to_bin(F) || F <- Fields]),
-                    Full = string:uppercase(iolist_to_binary([Key, <<" (">>, Names, <<")]">>, Suffix])),
+                    Full = string:uppercase(
+                        iolist_to_binary([Key, <<" (">>, Names, <<")]">>, Suffix])
+                    ),
                     {Value, Rest2} = take_value(Full, Rest1),
                     kv_pairs(Rest2, [{Full, Value} | Acc]);
                 false ->
@@ -432,10 +510,14 @@ tokenize(Bin) ->
     {Tokens, _Rest} = tokens(mailio_ascii:trim_leading(Bin), []),
     Tokens.
 
-tokens(<<>>, Acc) -> {lists:reverse(Acc), <<>>};
-tokens(<<")", Rest/binary>>, Acc) -> {lists:reverse(Acc), Rest};
-tokens(<<" ", Rest/binary>>, Acc) -> tokens(Rest, Acc);
-tokens(<<"\t", Rest/binary>>, Acc) -> tokens(Rest, Acc);
+tokens(<<>>, Acc) ->
+    {lists:reverse(Acc), <<>>};
+tokens(<<")", Rest/binary>>, Acc) ->
+    {lists:reverse(Acc), Rest};
+tokens(<<" ", Rest/binary>>, Acc) ->
+    tokens(Rest, Acc);
+tokens(<<"\t", Rest/binary>>, Acc) ->
+    tokens(Rest, Acc);
 tokens(<<"(", Rest/binary>>, Acc) ->
     {Inner, Rest2} = tokens(Rest, []),
     tokens(Rest2, [{list, Inner} | Acc]);
@@ -464,20 +546,25 @@ literal(Bin) ->
                 <<Data:N/binary, Rest2/binary>> -> {ok, Data, Rest2};
                 _ -> error
             end;
-        _ -> error
+        _ ->
+            error
     end.
 
 take_digits(<<D, Rest/binary>>, Acc) when D >= $0, D =< $9 ->
     take_digits(Rest, <<Acc/binary, D>>);
-take_digits(Bin, Acc) -> {Acc, Bin}.
+take_digits(Bin, Acc) ->
+    {Acc, Bin}.
 
 %% Atom: run until a delimiter. Brackets are kept (so BODY[] is one atom).
-atom_token(<<C, Rest/binary>>, Acc)
-  when C =/= $\s, C =/= $\t, C =/= $(, C =/= $), C =/= ${, C =/= $" ->
+atom_token(<<C, Rest/binary>>, Acc) when
+    C =/= $\s, C =/= $\t, C =/= $(, C =/= $), C =/= ${, C =/= $"
+->
     atom_token(Rest, <<Acc/binary, C>>);
-atom_token(Bin, Acc) -> {Acc, Bin}.
+atom_token(Bin, Acc) ->
+    {Acc, Bin}.
 
-classify_atom(<<"NIL">>) -> nil;
+classify_atom(<<"NIL">>) ->
+    nil;
 classify_atom(Bin) ->
     case is_all_digits(Bin) of
         true -> {number, binary_to_integer(Bin)};
@@ -491,7 +578,8 @@ classify_atom(Bin) ->
 %% @doc Format a sequence/uid set for a command.
 -spec format_seqset(term()) -> iodata().
 format_seqset(N) when is_integer(N) -> integer_to_binary(N);
-format_seqset({range, A, B}) -> [integer_to_binary(A), ":", to_set_bound(B)];
+format_seqset({range, A, B}) ->
+    [integer_to_binary(A), ":", to_set_bound(B)];
 format_seqset(L) when is_list(L) ->
     lists:join(",", [format_seqset(E) || E <- L]);
 format_seqset(Bin) when is_binary(Bin) -> Bin.
@@ -520,14 +608,18 @@ parse_uid_range(Part) ->
 -spec quote(binary()) -> iodata().
 quote(Bin) ->
     Escaped = binary:replace(
-                binary:replace(Bin, <<"\\">>, <<"\\\\">>, [global]),
-                <<"\"">>, <<"\\\"">>, [global]),
+        binary:replace(Bin, <<"\\">>, <<"\\\\">>, [global]),
+        <<"\"">>,
+        <<"\\\"">>,
+        [global]
+    ),
     [$", Escaped, $"].
 
 split_word(Bin) ->
     Trimmed = mailio_ascii:trim_leading(Bin),
     case Trimmed of
-        <<>> -> none;
+        <<>> ->
+            none;
         _ ->
             case binary:split(Trimmed, <<" ">>) of
                 [Word, Rest] -> {Word, Rest};

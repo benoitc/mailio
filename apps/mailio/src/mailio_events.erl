@@ -17,10 +17,12 @@
 -define(SERVER, ?MODULE).
 -define(TABLE, mailio_events_subs).
 
--record(sub, {ref :: reference(),
-              pid :: pid(),
-              account :: binary() | '_',
-              types :: [atom()] | all}).
+-record(sub, {
+    ref :: reference(),
+    pid :: pid(),
+    account :: binary() | '_',
+    types :: [atom()] | all
+}).
 
 -record(state, {monitors = #{} :: #{reference() => pid()}}).
 
@@ -54,15 +56,19 @@ dispatch(Envelope) ->
     Account = maps:get(account_id, Envelope, undefined),
     Type = maps:get(type, Envelope, undefined),
     Subs = ets:tab2list(?TABLE),
-    lists:foldl(fun(#sub{ref = Ref, pid = Pid} = Sub, N) ->
-                    case matches(Sub, Account, Type) of
-                        true ->
-                            Pid ! {mailio_event, Ref, Envelope},
-                            N + 1;
-                        false ->
-                            N
-                    end
-                end, 0, Subs).
+    lists:foldl(
+        fun(#sub{ref = Ref, pid = Pid} = Sub, N) ->
+            case matches(Sub, Account, Type) of
+                true ->
+                    Pid ! {mailio_event, Ref, Envelope},
+                    N + 1;
+                false ->
+                    N
+            end
+        end,
+        0,
+        Subs
+    ).
 
 %%====================================================================
 %% gen_server
@@ -74,10 +80,12 @@ init([]) ->
 
 handle_call({subscribe, Topic, Pid}, _From, State) ->
     Ref = make_ref(),
-    Sub = #sub{ref = Ref,
-               pid = Pid,
-               account = maps:get(account, Topic, '_'),
-               types = maps:get(types, Topic, all)},
+    Sub = #sub{
+        ref = Ref,
+        pid = Pid,
+        account = maps:get(account, Topic, '_'),
+        types = maps:get(types, Topic, all)
+    },
     ets:insert(?TABLE, Sub),
     MRef = erlang:monitor(process, Pid),
     Monitors = maps:put(MRef, Ref, State#state.monitors),

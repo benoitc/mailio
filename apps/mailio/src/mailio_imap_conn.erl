@@ -13,30 +13,48 @@
 -module(mailio_imap_conn).
 -behaviour(gen_statem).
 
--export([start_link/1, run/2, run/3, idle_start/2, idle_stop/1, capabilities/1,
-         close/1]).
+-export([
+    start_link/1,
+    run/2, run/3,
+    idle_start/2,
+    idle_stop/1,
+    capabilities/1,
+    close/1
+]).
 -export([callback_mode/0, init/1, terminate/3]).
--export([connect/3, greeting/3, starttls/3, auth/3, auth_failed/3, tls_failed/3, ready/3, running/3,
-         idle/3, backoff/3]).
+-export([
+    connect/3,
+    greeting/3,
+    starttls/3,
+    auth/3,
+    auth_failed/3,
+    tls_failed/3,
+    ready/3,
+    running/3,
+    idle/3,
+    backoff/3
+]).
 
 -define(CONNECT_TIMEOUT, 30000).
 -define(CMD_TIMEOUT, 30000).
 -define(BACKOFF_MIN, 1000).
 -define(BACKOFF_MAX, 300000).
 
--record(data, {config :: map(),
-               transport :: gen_tcp | ssl,
-               sock :: term() | undefined,
-               buffer = <<>> :: binary(),
-               tagn = 0 :: non_neg_integer(),
-               from :: gen_statem:from() | undefined,
-               tag :: binary() | undefined,
-               untagged = [] :: [term()],
-               literal :: binary() | [binary()] | undefined,
-               caps = [] :: [binary()],
-               notify :: pid() | undefined,
-               unsolicited = [] :: [term()],
-               backoff = ?BACKOFF_MIN :: pos_integer()}).
+-record(data, {
+    config :: map(),
+    transport :: gen_tcp | ssl,
+    sock :: term() | undefined,
+    buffer = <<>> :: binary(),
+    tagn = 0 :: non_neg_integer(),
+    from :: gen_statem:from() | undefined,
+    tag :: binary() | undefined,
+    untagged = [] :: [term()],
+    literal :: binary() | [binary()] | undefined,
+    caps = [] :: [binary()],
+    notify :: pid() | undefined,
+    unsolicited = [] :: [term()],
+    backoff = ?BACKOFF_MIN :: pos_integer()
+}).
 
 %%====================================================================
 %% API
@@ -94,15 +112,20 @@ close(Pid) ->
 callback_mode() -> [state_functions, state_enter].
 
 init(Config) ->
-    Transport = case maps:get(tls, Config, false) of
-                    true -> ssl;
-                    _ -> gen_tcp
-                end,
-    Data = #data{config = Config, transport = Transport,
-                 notify = maps:get(notify, Config, undefined)},
+    Transport =
+        case maps:get(tls, Config, false) of
+            true -> ssl;
+            _ -> gen_tcp
+        end,
+    Data = #data{
+        config = Config,
+        transport = Transport,
+        notify = maps:get(notify, Config, undefined)
+    },
     {ok, connect, Data}.
 
-terminate(_Reason, _State, #data{sock = undefined}) -> ok;
+terminate(_Reason, _State, #data{sock = undefined}) ->
+    ok;
 terminate(_Reason, _State, #data{transport = T, sock = Sock}) ->
     _ = catch_close(T, Sock),
     ok.
@@ -145,17 +168,23 @@ do_connect(#data{config = Config, transport = Transport} = Data) ->
 mailio_tls_opts(Config) ->
     Host = binary_to_list(maps:get(host, Config)),
     case maps:get(verify, Config, verify_peer) of
-        verify_none -> [{verify, verify_none}];
+        verify_none ->
+            [{verify, verify_none}];
         verify_peer ->
-            CA = case {maps:find(cacerts, Config), maps:find(cacertfile, Config)} of
-                     {{ok, Certs}, _} -> [{cacerts, Certs}];
-                     {_, {ok, F}} -> [{cacertfile, F}];
-                     _ -> [{cacerts, public_key:cacerts_get()}]
-                 end,
-            [{verify, verify_peer},
-             {customize_hostname_check,
-              [{match_fun, public_key:pkix_verify_hostname_match_fun(https)}]},
-             {server_name_indication, Host} | CA]
+            CA =
+                case {maps:find(cacerts, Config), maps:find(cacertfile, Config)} of
+                    {{ok, Certs}, _} -> [{cacerts, Certs}];
+                    {_, {ok, F}} -> [{cacertfile, F}];
+                    _ -> [{cacerts, public_key:cacerts_get()}]
+                end,
+            [
+                {verify, verify_peer},
+                {customize_hostname_check, [
+                    {match_fun, public_key:pkix_verify_hostname_match_fun(https)}
+                ]},
+                {server_name_indication, Host}
+                | CA
+            ]
     end.
 
 %% The credentials from the config, forcing a token_fun.
@@ -168,7 +197,8 @@ force_credentials({token_fun, F}) ->
         {ok, Cred} -> force_credentials(Cred);
         {error, _} = E -> E
     end;
-force_credentials(Cred) -> Cred.
+force_credentials(Cred) ->
+    Cred.
 
 %%====================================================================
 %% State: greeting
@@ -176,8 +206,9 @@ force_credentials(Cred) -> Cred.
 
 greeting(enter, _Old, Data) ->
     {keep_state, set_active(Data)};
-greeting(info, {Tag, Sock, Bin}, #data{sock = Sock} = Data)
-  when Tag =:= tcp; Tag =:= ssl ->
+greeting(info, {Tag, Sock, Bin}, #data{sock = Sock} = Data) when
+    Tag =:= tcp; Tag =:= ssl
+->
     Data1 = set_active(append_buf(Data, Bin)),
     case take_one(Data1) of
         {ok, {untagged, {status_resp, ok, _Code, _Text}}, Data2} ->
@@ -205,12 +236,17 @@ starttls(enter, _Old, Data) ->
     {Tag, Data1} = next_tag(Data),
     _ = send(Data1, mailio_imap_proto:starttls(Tag)),
     {keep_state, Data1#data{tag = Tag, untagged = []}};
-starttls(info, {T, Sock, Bin}, #data{sock = Sock} = Data)
-  when T =:= tcp; T =:= ssl ->
-    process_until_tagged(Data, Bin,
-        fun(ok, _Code, _Text, Data1) -> upgrade(Data1#data{tag = undefined});
-           (_Status, _Code, _Text, Data1) -> {next_state, tls_failed, Data1#data{tag = undefined}}
-        end);
+starttls(info, {T, Sock, Bin}, #data{sock = Sock} = Data) when
+    T =:= tcp; T =:= ssl
+->
+    process_until_tagged(
+        Data,
+        Bin,
+        fun
+            (ok, _Code, _Text, Data1) -> upgrade(Data1#data{tag = undefined});
+            (_Status, _Code, _Text, Data1) -> {next_state, tls_failed, Data1#data{tag = undefined}}
+        end
+    );
 starttls(info, Event, Data) ->
     handle_socket_closed(Event, Data);
 starttls({call, _From}, _Req, Data) ->
@@ -221,7 +257,7 @@ upgrade(#data{sock = Sock, config = Config} = Data) ->
     case ssl:connect(Sock, mailio_tls_opts(Config), ?CONNECT_TIMEOUT) of
         {ok, SslSock} ->
             {next_state, auth,
-             set_active(Data#data{transport = ssl, sock = SslSock, buffer = <<>>})};
+                set_active(Data#data{transport = ssl, sock = SslSock, buffer = <<>>})};
         {error, _Reason} ->
             {next_state, tls_failed, Data}
     end.
@@ -240,20 +276,26 @@ auth(enter, _Old, #data{config = Config} = Data) ->
             _ = send(Data1, mailio_imap_proto:authenticate_xoauth2(Tag)),
             %% the token answers the first `+'; an error challenge after it is
             %% answered with an empty line, which ends the exchange
-            Replies = [iolist_to_binary(mailio_imap_proto:xoauth2_response(User, Token)), <<"\r\n">>],
+            Replies = [
+                iolist_to_binary(mailio_imap_proto:xoauth2_response(User, Token)), <<"\r\n">>
+            ],
             {keep_state, Data1#data{tag = Tag, untagged = [], literal = Replies}};
         {error, _} ->
             {next_state, auth_failed, Data1}
     end;
-auth(info, {T, Sock, Bin}, #data{sock = Sock} = Data)
-  when T =:= tcp; T =:= ssl ->
-    process_until_tagged(Data, Bin,
+auth(info, {T, Sock, Bin}, #data{sock = Sock} = Data) when
+    T =:= tcp; T =:= ssl
+->
+    process_until_tagged(
+        Data,
+        Bin,
         fun(Status, _Code, _Text, Data1) ->
             case Status of
                 ok -> {next_state, ready, Data1#data{tag = undefined, literal = undefined}};
                 _ -> {next_state, auth_failed, Data1#data{tag = undefined, literal = undefined}}
             end
-        end);
+        end
+    );
 auth(info, Event, Data) ->
     handle_socket_closed(Event, Data);
 auth({call, _From}, _Req, Data) ->
@@ -276,10 +318,11 @@ auth_failed(_Type, _Event, Data) ->
 %%====================================================================
 
 tls_failed(enter, _Old, #data{transport = T, sock = Sock} = Data) ->
-    _ = case Sock of
-        undefined -> ok;
-        _ -> catch_close(T, Sock)
-    end,
+    _ =
+        case Sock of
+            undefined -> ok;
+            _ -> catch_close(T, Sock)
+        end,
     {keep_state, Data#data{sock = undefined}};
 tls_failed({call, From}, _Req, Data) ->
     {keep_state, Data, [{reply, From, {error, tls_failed}}]};
@@ -296,19 +339,18 @@ ready({call, From}, {run, Builder}, Data) ->
     {Tag, Data1} = next_tag(Data),
     {IoData, Literal} = Builder(Tag),
     send(Data1, IoData),
-    {next_state, running,
-     Data1#data{from = From, tag = Tag, untagged = [], literal = Literal}};
+    {next_state, running, Data1#data{from = From, tag = Tag, untagged = [], literal = Literal}};
 ready({call, From}, capabilities, Data) ->
     {keep_state, Data, [{reply, From, Data#data.caps}]};
 ready({call, From}, {idle_start, NotifyPid}, Data) ->
     {Tag, Data1} = next_tag(Data),
     send(Data1, mailio_imap_proto:idle(Tag)),
-    {next_state, idle,
-     Data1#data{from = From, tag = Tag, notify = NotifyPid, untagged = []}};
+    {next_state, idle, Data1#data{from = From, tag = Tag, notify = NotifyPid, untagged = []}};
 ready({call, From}, idle_stop, Data) ->
     {keep_state, Data, [{reply, From, ok}]};
-ready(info, {T, Sock, Bin}, #data{sock = Sock} = Data)
-  when T =:= tcp; T =:= ssl ->
+ready(info, {T, Sock, Bin}, #data{sock = Sock} = Data) when
+    T =:= tcp; T =:= ssl
+->
     %% Unsolicited data while idle-at-ready: buffer and drop framed responses.
     Data1 = set_active(append_buf(Data, Bin)),
     {keep_state, drain_unsolicited(Data1)};
@@ -321,13 +363,17 @@ ready(info, Event, Data) ->
 
 running(enter, _Old, Data) ->
     {keep_state, Data};
-running(info, {T, Sock, Bin}, #data{sock = Sock} = Data)
-  when T =:= tcp; T =:= ssl ->
-    process_until_tagged(Data, Bin,
+running(info, {T, Sock, Bin}, #data{sock = Sock} = Data) when
+    T =:= tcp; T =:= ssl
+->
+    process_until_tagged(
+        Data,
+        Bin,
         fun(Status, Code, Text, Data1) ->
             Reply = {ok, lists:reverse(Data1#data.untagged), {Status, Code, Text}},
             {next_state, ready, Data1, [{reply, Data1#data.from, Reply}]}
-        end);
+        end
+    );
 running(info, Event, Data) ->
     reply_error_and(Event, Data);
 running({call, _From}, _Req, Data) ->
@@ -345,8 +391,9 @@ idle({call, From}, idle_stop, Data) ->
     {keep_state, Data#data{from = From}};
 idle({call, _From}, _Req, Data) ->
     {keep_state, Data, [{postpone, true}]};
-idle(info, {T, Sock, Bin}, #data{sock = Sock} = Data)
-  when T =:= tcp; T =:= ssl ->
+idle(info, {T, Sock, Bin}, #data{sock = Sock} = Data) when
+    T =:= tcp; T =:= ssl
+->
     Data1 = set_active(append_buf(Data, Bin)),
     handle_idle_responses(Data1);
 idle(info, Event, Data) ->
@@ -413,18 +460,21 @@ loop_responses(Data, Done) ->
             {keep_state, Data};
         {ok, {continuation, _Text}, Data1} ->
             case Data1#data.literal of
-                undefined -> loop_responses(Data1, Done);
+                undefined ->
+                    loop_responses(Data1, Done);
                 [Next | Rest] ->
                     %% a scripted exchange (SASL): one reply per continuation
                     send(Data1, Next),
                     loop_responses(Data1#data{literal = Rest}, Done);
-                [] -> loop_responses(Data1, Done);
+                [] ->
+                    loop_responses(Data1, Done);
                 Lit ->
                     send(Data1, Lit),
                     loop_responses(Data1#data{literal = undefined}, Done)
             end;
-        {ok, {tagged, Tag, Status, #{code := Code, text := Text}}, Data1}
-          when Tag =:= Data#data.tag ->
+        {ok, {tagged, Tag, Status, #{code := Code, text := Text}}, Data1} when
+            Tag =:= Data#data.tag
+        ->
             Done(Status, Code, Text, Data1);
         {ok, {untagged, Event}, Data1} ->
             Data2 = Data1#data{untagged = [Event | Data1#data.untagged]},
@@ -448,7 +498,8 @@ drain_unsolicited(Data) ->
 %% Frame and parse a single response from the buffer.
 take_one(#data{buffer = Buf} = Data) ->
     case mailio_imap_proto:read_response(Buf) of
-        more -> more;
+        more ->
+            more;
         {ok, Line, Rest} ->
             Resp = mailio_imap_proto:parse_response(Line),
             {ok, Resp, Data#data{buffer = Rest}}
@@ -459,9 +510,11 @@ take_one(#data{buffer = Buf} = Data) ->
 %%====================================================================
 
 set_active(#data{transport = gen_tcp, sock = Sock} = Data) ->
-    _ = inet:setopts(Sock, [{active, once}]), Data;
+    _ = inet:setopts(Sock, [{active, once}]),
+    Data;
 set_active(#data{transport = ssl, sock = Sock} = Data) ->
-    _ = ssl:setopts(Sock, [{active, once}]), Data.
+    _ = ssl:setopts(Sock, [{active, once}]),
+    Data.
 
 append_buf(#data{buffer = Buf} = Data, Bin) ->
     io_hook(Data, received, byte_size(Bin)),
@@ -481,23 +534,36 @@ next_tag(#data{tagn = N} = Data) ->
     Tag = iolist_to_binary([$A, integer_to_binary(N + 1)]),
     {Tag, Data#data{tagn = N + 1}}.
 
-catch_close(gen_tcp, Sock) -> try gen_tcp:close(Sock) catch _:_ -> ok end;
-catch_close(ssl, Sock) -> try ssl:close(Sock) catch _:_ -> ok end.
+catch_close(gen_tcp, Sock) ->
+    try
+        gen_tcp:close(Sock)
+    catch
+        _:_ -> ok
+    end;
+catch_close(ssl, Sock) ->
+    try
+        ssl:close(Sock)
+    catch
+        _:_ -> ok
+    end.
 
-handle_socket_closed({Closed, _Sock}, Data)
-  when Closed =:= tcp_closed; Closed =:= ssl_closed ->
+handle_socket_closed({Closed, _Sock}, Data) when
+    Closed =:= tcp_closed; Closed =:= ssl_closed
+->
     {next_state, backoff, Data#data{sock = undefined, buffer = <<>>}};
-handle_socket_closed({Err, _Sock, _Reason}, Data)
-  when Err =:= tcp_error; Err =:= ssl_error ->
+handle_socket_closed({Err, _Sock, _Reason}, Data) when
+    Err =:= tcp_error; Err =:= ssl_error
+->
     {next_state, backoff, Data#data{sock = undefined, buffer = <<>>}};
 handle_socket_closed(_Other, Data) ->
     {keep_state, Data}.
 
 reply_error_and(Event, #data{from = From} = Data) ->
-    Replies = case From of
-                  undefined -> [];
-                  _ -> [{reply, From, {error, connection_lost}}]
-              end,
+    Replies =
+        case From of
+            undefined -> [];
+            _ -> [{reply, From, {error, connection_lost}}]
+        end,
     case handle_socket_closed(Event, Data) of
         {next_state, S, Data1} -> {next_state, S, Data1#data{from = undefined}, Replies};
         Other -> Other

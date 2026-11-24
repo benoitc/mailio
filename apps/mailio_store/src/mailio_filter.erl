@@ -16,7 +16,7 @@
 
 -export([matches/2, matches/3, needs_body/1, index_query/1, normalize/1]).
 
--export_type([filter/0]).
+-export_type([filter/0, body_getter/0]).
 
 -type filter() :: map().
 -type body_getter() :: fun(() -> binary()).
@@ -96,9 +96,9 @@ cond_matches(Ctx, body, Sub) ->
 cond_matches(Ctx, text, Sub) ->
     %% `text' matches any of subject, addresses, or body.
     #{email := E} = Ctx,
-    contains(subject_text(E), Sub)
-        orelse addr_contains(E, [<<"from">>, <<"to">>, <<"cc">>, <<"bcc">>], Sub)
-        orelse contains(body_text(Ctx), Sub);
+    contains(subject_text(E), Sub) orelse
+        addr_contains(E, [<<"from">>, <<"to">>, <<"cc">>, <<"bcc">>], Sub) orelse
+        contains(body_text(Ctx), Sub);
 cond_matches(_Ctx, _Unknown, _Value) ->
     %% Unknown conditions do not constrain (lenient).
     true.
@@ -180,10 +180,12 @@ index_query(_) ->
 
 sub_index(Cond) when is_map(Cond) ->
     case maps:is_key(operator, Cond) of
-        true -> [];                       %% nested operators: not pushed down
+        %% nested operators: not pushed down
+        true -> [];
         false -> condition_wheres(Cond)
     end;
-sub_index(_) -> [].
+sub_index(_) ->
+    [].
 
 wrap([]) -> all;
 wrap(Wheres) -> {where, Wheres}.
@@ -204,7 +206,8 @@ where_for(maxSize, N) -> [{compare, [<<"size">>], '=<', N}];
 where_for(after_, Date) -> [{compare, [?MAILIO_NS, <<"received_ts">>], '>=', to_epoch(Date)}];
 where_for('after', Date) -> [{compare, [?MAILIO_NS, <<"received_ts">>], '>=', to_epoch(Date)}];
 where_for(before, Date) -> [{compare, [?MAILIO_NS, <<"received_ts">>], '<', to_epoch(Date)}];
-where_for(_K, _V) -> [].   %% substring/negation conditions: post-filter only
+%% substring/negation conditions: post-filter only
+where_for(_K, _V) -> [].
 
 %%====================================================================
 %% Field helpers
@@ -227,17 +230,23 @@ addr_contains(E, Fields, Sub) ->
     Hay = iolist_to_binary(lists:join(<<" ">>, Addrs)),
     contains(Hay, Sub).
 
-addr_list(null) -> [];
+addr_list(null) ->
+    [];
 addr_list(List) when is_list(List) ->
-    lists:flatmap(fun(#{<<"email">> := Em} = A) ->
-                      Name = case maps:get(<<"name">>, A, null) of
-                                 null -> <<>>;
-                                 N -> N
-                             end,
-                      [Em, Name]
-                  end, List).
+    lists:flatmap(
+        fun(#{<<"email">> := Em} = A) ->
+            Name =
+                case maps:get(<<"name">>, A, null) of
+                    null -> <<>>;
+                    N -> N
+                end,
+            [Em, Name]
+        end,
+        List
+    ).
 
-contains(_Hay, <<>>) -> true;
+contains(_Hay, <<>>) ->
+    true;
 contains(Hay, Needle) when is_binary(Hay), is_binary(Needle) ->
     binary:match(mailio_ascii:lower(Hay), mailio_ascii:lower(Needle)) =/= nomatch;
 contains(_Hay, _Needle) ->
@@ -246,10 +255,12 @@ contains(_Hay, _Needle) ->
 %% Parse a JMAP UTCDate (RFC 3339) to epoch seconds.
 to_epoch(Date) when is_integer(Date) -> Date;
 to_epoch(Date) when is_binary(Date) ->
-    try calendar:rfc3339_to_system_time(binary_to_list(Date), [{unit, second}])
-    catch _:_ ->
-        case mailio_rfc5322:parse_date(Date) of
-            {ok, E} -> E;
-            error -> 0
-        end
+    try
+        calendar:rfc3339_to_system_time(binary_to_list(Date), [{unit, second}])
+    catch
+        _:_ ->
+            case mailio_rfc5322:parse_date(Date) of
+                {ok, E} -> E;
+                error -> 0
+            end
     end.

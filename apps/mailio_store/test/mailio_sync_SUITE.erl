@@ -10,22 +10,31 @@
 -include_lib("stdlib/include/assert.hrl").
 -include("mailio_store.hrl").
 
--export([all/0, init_per_suite/1, end_per_suite/1,
-         init_per_testcase/2, end_per_testcase/2]).
--export([backfill_ingests_messages/1,
-         backfill_emits_events/1,
-         cursor_persists_no_redundant_fetch/1,
-         flag_change_updates_email/1,
-         qresync_expunge_removes_email/1,
-         idle_push_triggers_sync/1]).
+-export([
+    all/0,
+    init_per_suite/1,
+    end_per_suite/1,
+    init_per_testcase/2,
+    end_per_testcase/2
+]).
+-export([
+    backfill_ingests_messages/1,
+    backfill_emits_events/1,
+    cursor_persists_no_redundant_fetch/1,
+    flag_change_updates_email/1,
+    qresync_expunge_removes_email/1,
+    idle_push_triggers_sync/1
+]).
 
 all() ->
-    [backfill_ingests_messages,
-     backfill_emits_events,
-     cursor_persists_no_redundant_fetch,
-     flag_change_updates_email,
-     qresync_expunge_removes_email,
-     idle_push_triggers_sync].
+    [
+        backfill_ingests_messages,
+        backfill_emits_events,
+        cursor_persists_no_redundant_fetch,
+        flag_change_updates_email,
+        qresync_expunge_removes_email,
+        idle_push_triggers_sync
+    ].
 
 init_per_suite(Config) ->
     {ok, _} = application:ensure_all_started(ssl),
@@ -43,16 +52,33 @@ end_per_suite(_Config) ->
 init_per_testcase(_TC, Config) ->
     Srv = mailio_fake_imap:start(),
     Account = list_to_binary("SYNC" ++ integer_to_list(erlang:unique_integer([positive]))),
-    Imap = #{host => <<"127.0.0.1">>, port => mailio_fake_imap:port(Srv),
-             tls => false, username => <<"u">>, password => <<"p">>},
+    Imap = #{
+        host => <<"127.0.0.1">>,
+        port => mailio_fake_imap:port(Srv),
+        tls => false,
+        username => <<"u">>,
+        password => <<"p">>
+    },
     {ok, _} = mailio_accounts_sup:start_account(Account, #{imap => Imap}),
     [{srv, Srv}, {account, Account} | Config].
 
 end_per_testcase(_TC, Config) ->
     Account = ?config(account, Config),
-    try mailio_accounts_sup:stop_account(Account) catch _:_ -> ok end,
-    try mailio_db:delete_db(mailio_account:db_name(Account)) catch _:_ -> ok end,
-    try mailio_fake_imap:stop(?config(srv, Config)) catch _:_ -> ok end,
+    try
+        mailio_accounts_sup:stop_account(Account)
+    catch
+        _:_ -> ok
+    end,
+    try
+        mailio_db:delete_db(mailio_account:db_name(Account))
+    catch
+        _:_ -> ok
+    end,
+    try
+        mailio_fake_imap:stop(?config(srv, Config))
+    catch
+        _:_ -> ok
+    end,
     ok.
 
 %%====================================================================
@@ -79,8 +105,12 @@ backfill_emits_events(Config) ->
     {ok, _Ref} = mailio_events:subscribe(#{account => Account, types => [email]}),
     {ok, _} = mailio_sync_mgr:sync_mailbox(Account, <<"INBOX">>),
     Events = drain(500),
-    Created = [E || E <- Events, maps:get(type, E) =:= email,
-                    maps:get(verb, E) =:= created],
+    Created = [
+        E
+     || E <- Events,
+        maps:get(type, E) =:= email,
+        maps:get(verb, E) =:= created
+    ],
     ?assertEqual(2, length(Created)).
 
 cursor_persists_no_redundant_fetch(Config) ->
@@ -118,8 +148,15 @@ flag_change_updates_email(Config) ->
     ?assert(mailio_email:is_seen(E1)),
 
     Events = drain(500),
-    ?assert(lists:any(fun(E) -> maps:get(type, E) =:= email andalso
-                                maps:get(verb, E) =:= updated end, Events)),
+    ?assert(
+        lists:any(
+            fun(E) ->
+                maps:get(type, E) =:= email andalso
+                    maps:get(verb, E) =:= updated
+            end,
+            Events
+        )
+    ),
 
     %% Unread counter dropped to 0.
     {ok, LocalId} = inbox_local_id(Account),
@@ -166,11 +203,17 @@ idle_push_triggers_sync(Config) ->
     ?assert(lists:member(<<"Pushed message">>, Subjects)).
 
 wait_until(Pred, Timeout) when Timeout =< 0 ->
-    case Pred() of true -> ok; false -> error(timeout) end;
-wait_until(Pred, Timeout) ->
     case Pred() of
         true -> ok;
-        false -> timer:sleep(100), wait_until(Pred, Timeout - 100)
+        false -> error(timeout)
+    end;
+wait_until(Pred, Timeout) ->
+    case Pred() of
+        true ->
+            ok;
+        false ->
+            timer:sleep(100),
+            wait_until(Pred, Timeout - 100)
     end.
 
 %%====================================================================
@@ -183,8 +226,10 @@ all_emails(Db) ->
 
 email_by_subject(Db, Subject) ->
     {ok, [E | _], _} = mailio_db:find(
-        Db, #{where => [{path, [<<"subject">>], Subject}], limit => 1},
-        #{include_docs => true}),
+        Db,
+        #{where => [{path, [<<"subject">>], Subject}], limit => 1},
+        #{include_docs => true}
+    ),
     E.
 
 inbox_local_id(Account) ->

@@ -17,18 +17,16 @@
 
 %% {Seq, Uid, FlagsList, ModSeq, Raw}
 messages() ->
-    [{1, 100, [<<"\\Seen">>], 5, msg(<<"m100@x">>, <<"First message">>)},
-     {2, 101, [], 6, msg(<<"m101@x">>, <<"Second message">>)}].
+    [
+        {1, 100, [<<"\\Seen">>], 5, msg(<<"m100@x">>, <<"First message">>)},
+        {2, 101, [], 6, msg(<<"m101@x">>, <<"Second message">>)}
+    ].
 
 msg(Id, Subject) ->
-    <<"From: sender@example.com\r\n",
-      "To: me@example.com\r\n",
-      "Subject: ", Subject/binary, "\r\n",
-      "Message-ID: <", Id/binary, ">\r\n",
-      "Date: Mon, 2 Jun 2025 09:00:00 +0000\r\n",
-      "Content-Type: text/plain; charset=utf-8\r\n",
-      "\r\n",
-      "Body of ", Subject/binary, ".\r\n">>.
+    <<"From: sender@example.com\r\n", "To: me@example.com\r\n", "Subject: ", Subject/binary, "\r\n",
+        "Message-ID: <", Id/binary, ">\r\n", "Date: Mon, 2 Jun 2025 09:00:00 +0000\r\n",
+        "Content-Type: text/plain; charset=utf-8\r\n", "\r\n", "Body of ", Subject/binary,
+        ".\r\n">>.
 
 %%====================================================================
 %% Control
@@ -37,15 +35,21 @@ msg(Id, Subject) ->
 start() -> start(#{}).
 
 start(Opts) ->
-    {ok, LSock} = gen_tcp:listen(0, [binary, {active, false},
-                                     {packet, line}, {reuseaddr, true}]),
+    {ok, LSock} = gen_tcp:listen(0, [
+        binary,
+        {active, false},
+        {packet, line},
+        {reuseaddr, true}
+    ]),
     {ok, Port} = inet:port(LSock),
     Ref = make_ref(),
     Tab = ets:new(fake_imap_log, [public, ordered_set]),
     Pid = spawn(fun() -> accept_loop(LSock, Opts#{log => Tab}, Ref, init_state()) end),
     #srv{port = Port, pid = Pid, ref = Ref, tab = Tab}.
 
-stop(#srv{pid = Pid}) -> exit(Pid, shutdown), ok.
+stop(#srv{pid = Pid}) ->
+    exit(Pid, shutdown),
+    ok.
 
 port(#srv{port = Port}) -> Port.
 
@@ -64,7 +68,10 @@ expunge(Srv, Uid) -> call(Srv, {expunge, Uid}, ok).
 
 call(#srv{pid = Pid, ref = Ref}, Msg, Reply) ->
     Pid ! {control, self(), Ref, Msg},
-    receive {Reply, Ref, Result} -> Result after 2000 -> timeout end.
+    receive
+        {Reply, Ref, Result} -> Result
+    after 2000 -> timeout
+    end.
 
 %%====================================================================
 %% Server loop
@@ -76,7 +83,10 @@ accept_loop(LSock, Opts, Ref, State) ->
     case gen_tcp:accept(LSock, 50) of
         {ok, Sock} ->
             put(fake_opts, Opts),
-            gen_tcp:send(Sock, <<"* OK [CAPABILITY IMAP4rev1 IDLE CONDSTORE QRESYNC MOVE UIDPLUS SPECIAL-USE] ready\r\n">>),
+            gen_tcp:send(
+                Sock,
+                <<"* OK [CAPABILITY IMAP4rev1 IDLE CONDSTORE QRESYNC MOVE UIDPLUS SPECIAL-USE] ready\r\n">>
+            ),
             inet:setopts(Sock, [{active, once}]),
             State1 = loop(Sock, State#{selected => undefined, idling => undefined}, Ref),
             accept_loop(LSock, Opts, Ref, State1);
@@ -94,8 +104,13 @@ accept_loop(LSock, Opts, Ref, State) ->
     end.
 
 init_state() ->
-    #{messages => messages(), selected => undefined,
-      idling => undefined, vanished => [], uidnext => 102}.
+    #{
+        messages => messages(),
+        selected => undefined,
+        idling => undefined,
+        vanished => [],
+        uidnext => 102
+    }.
 
 loop(Sock, State, Ref) ->
     receive
@@ -127,8 +142,13 @@ handle_control(_Sock, Ref, {get_flags, Uid}, State) ->
     {{flags, Ref, flags_for(State, Uid)}, State};
 handle_control(Sock, Ref, {set_flags, Uid, Flags}, #{messages := Ms} = State) ->
     Next = highestmodseq(State) + 1,
-    Ms1 = [case M of {Seq, U, _F, _MS, Raw} when U =:= Uid -> {Seq, U, Flags, Next, Raw};
-                     _ -> M end || M <- Ms],
+    Ms1 = [
+        case M of
+            {Seq, U, _F, _MS, Raw} when U =:= Uid -> {Seq, U, Flags, Next, Raw};
+            _ -> M
+        end
+     || M <- Ms
+    ],
     State1 = State#{messages => Ms1},
     notify_flags(Sock, State1, Uid),
     {{ok, Ref, ok}, State1};
@@ -159,17 +179,20 @@ notify_flags(Sock, #{idling := Tag, messages := Ms} = State, Uid) when Tag =/= u
         false -> ok
     end,
     State;
-notify_flags(_Sock, State, _Uid) -> State.
+notify_flags(_Sock, State, _Uid) ->
+    State.
 
 notify_exists(Sock, #{idling := Tag, messages := Ms}) when Tag =/= undefined ->
     N = integer_to_binary(length(Ms)),
     gen_tcp:send(Sock, <<"* ", N/binary, " EXISTS\r\n">>);
-notify_exists(_Sock, _State) -> ok.
+notify_exists(_Sock, _State) ->
+    ok.
 
 notify_expunge(Sock, Seq, #{idling := Tag}) when Tag =/= undefined ->
     SeqB = integer_to_binary(Seq),
     gen_tcp:send(Sock, <<"* ", SeqB/binary, " EXPUNGE\r\n">>);
-notify_expunge(_Sock, _Seq, _State) -> ok.
+notify_expunge(_Sock, _Seq, _State) ->
+    ok.
 
 flags_for(#{messages := Ms}, Uid) ->
     case lists:keyfind(Uid, 2, Ms) of
@@ -188,7 +211,8 @@ highestmodseq(#{messages := Ms, vanished := V}) ->
 
 handle_line(Sock, Line, State) ->
     case chomp(Line) of
-        <<"DONE">> -> handle_done(Sock, State);
+        <<"DONE">> ->
+            handle_done(Sock, State);
         Trimmed ->
             case binary:split(Trimmed, <<" ">>) of
                 [Tag, Rest] -> dispatch(Sock, Tag, Rest, State);
@@ -210,9 +234,15 @@ log_command(Rest) ->
 
 %% FETCH 1:* (UID FLAGS): the flags of every message.
 handle_plain_fetch(Sock, Tag, #{messages := Ms} = State) ->
-    [send(Sock, [<<"* ", (integer_to_binary(Seq))/binary, " FETCH (UID ", (integer_to_binary(Uid))/binary,
-                   " FLAGS (">>, lists:join(<<" ">>, Flags), <<"))\r\n">>])
-     || {Seq, Uid, Flags, _MS, _Raw} <- Ms],
+    [
+        send(Sock, [
+            <<"* ", (integer_to_binary(Seq))/binary, " FETCH (UID ",
+                (integer_to_binary(Uid))/binary, " FLAGS (">>,
+            lists:join(<<" ">>, Flags),
+            <<"))\r\n">>
+        ])
+     || {Seq, Uid, Flags, _MS, _Raw} <- Ms
+    ],
     tagged(Sock, Tag, <<"OK FETCH done">>),
     {continue, State}.
 
@@ -237,7 +267,10 @@ dispatch(Sock, Tag, Rest, State) ->
     {Cmd, Args} = split1(Rest),
     case string:uppercase(Cmd) of
         <<"CAPABILITY">> ->
-            send(Sock, <<"* CAPABILITY IMAP4rev1 IDLE CONDSTORE QRESYNC MOVE UIDPLUS SPECIAL-USE\r\n">>),
+            send(
+                Sock,
+                <<"* CAPABILITY IMAP4rev1 IDLE CONDSTORE QRESYNC MOVE UIDPLUS SPECIAL-USE\r\n">>
+            ),
             tagged(Sock, Tag, <<"OK CAPABILITY done">>),
             {continue, State};
         <<"LOGIN">> ->
@@ -319,7 +352,8 @@ send_select(Sock, #{messages := Ms, uidnext := UidNext} = State) ->
 emit_qresync(Sock, #{vanished := V, messages := Ms}, Since) ->
     Gone = [Uid || {Uid, MS} <- V, MS > Since],
     case Gone of
-        [] -> ok;
+        [] ->
+            ok;
         _ ->
             Set = lists:join(<<",">>, [integer_to_binary(U) || U <- lists:sort(Gone)]),
             send(Sock, [<<"* VANISHED (EARLIER) ">>, Set, <<"\r\n">>])
@@ -328,8 +362,13 @@ emit_qresync(Sock, #{vanished := V, messages := Ms}, Since) ->
     ok.
 
 qresync_modseq(Args) ->
-    case re:run(string:uppercase(Args), <<"QRESYNC \\([0-9]+ ([0-9]+)\\)">>,
-                [{capture, all_but_first, binary}]) of
+    case
+        re:run(
+            string:uppercase(Args),
+            <<"QRESYNC \\([0-9]+ ([0-9]+)\\)">>,
+            [{capture, all_but_first, binary}]
+        )
+    of
         {match, [N]} -> {ok, binary_to_integer(N)};
         nomatch -> none
     end.
@@ -337,9 +376,12 @@ qresync_modseq(Args) ->
 handle_uid(Sock, Tag, Args, State) ->
     {Sub, Rest} = split1(Args),
     case string:uppercase(Sub) of
-        <<"FETCH">> -> handle_uid_fetch(Sock, Tag, Rest, State);
-        <<"STORE">> -> handle_uid_store(Sock, Tag, Rest, State);
-        <<"SEARCH">> -> handle_uid_search(Sock, Tag, State);
+        <<"FETCH">> ->
+            handle_uid_fetch(Sock, Tag, Rest, State);
+        <<"STORE">> ->
+            handle_uid_store(Sock, Tag, Rest, State);
+        <<"SEARCH">> ->
+            handle_uid_search(Sock, Tag, State);
         _ ->
             tagged(Sock, Tag, <<"BAD unsupported UID command">>),
             {continue, State}
@@ -377,8 +419,13 @@ handle_uid_search(Sock, Tag, #{messages := Ms} = State) ->
     {continue, State}.
 
 changedsince(Bin) ->
-    case re:run(string:uppercase(Bin), <<"CHANGEDSINCE ([0-9]+)">>,
-                [{capture, all_but_first, binary}]) of
+    case
+        re:run(
+            string:uppercase(Bin),
+            <<"CHANGEDSINCE ([0-9]+)">>,
+            [{capture, all_but_first, binary}]
+        )
+    of
         {match, [N]} -> {ok, binary_to_integer(N)};
         nomatch -> none
     end.
@@ -388,24 +435,38 @@ send_meta(Sock, {Seq, Uid, Flags, _MS, Raw}) ->
     UidB = integer_to_binary(Uid),
     Size = integer_to_binary(byte_size(Raw)),
     FlagsB = lists:join(<<" ">>, Flags),
-    send(Sock, [<<"* ", SeqB/binary, " FETCH (UID ", UidB/binary, " FLAGS (">>,
-                FlagsB, <<") INTERNALDATE \"02-Jun-2025 09:00:00 +0000\" RFC822.SIZE ">>,
-                Size, <<")\r\n">>]).
+    send(Sock, [
+        <<"* ", SeqB/binary, " FETCH (UID ", UidB/binary, " FLAGS (">>,
+        FlagsB,
+        <<") INTERNALDATE \"02-Jun-2025 09:00:00 +0000\" RFC822.SIZE ">>,
+        Size,
+        <<")\r\n">>
+    ]).
 
 send_changed(Sock, {Seq, Uid, Flags, MS, _Raw}) ->
     SeqB = integer_to_binary(Seq),
     UidB = integer_to_binary(Uid),
     MSB = integer_to_binary(MS),
     FlagsB = lists:join(<<" ">>, Flags),
-    send(Sock, [<<"* ", SeqB/binary, " FETCH (UID ", UidB/binary, " MODSEQ (">>,
-                MSB, <<") FLAGS (">>, FlagsB, <<"))\r\n">>]).
+    send(Sock, [
+        <<"* ", SeqB/binary, " FETCH (UID ", UidB/binary, " MODSEQ (">>,
+        MSB,
+        <<") FLAGS (">>,
+        FlagsB,
+        <<"))\r\n">>
+    ]).
 
 send_body(Sock, Seq, Uid, Raw) ->
     SeqB = integer_to_binary(Seq),
     UidB = integer_to_binary(Uid),
     Len = integer_to_binary(byte_size(Raw)),
-    send(Sock, [<<"* ", SeqB/binary, " FETCH (UID ", UidB/binary, " BODY[] {">>,
-                Len, <<"}\r\n">>, Raw, <<")\r\n">>]).
+    send(Sock, [
+        <<"* ", SeqB/binary, " FETCH (UID ", UidB/binary, " BODY[] {">>,
+        Len,
+        <<"}\r\n">>,
+        Raw,
+        <<")\r\n">>
+    ]).
 
 handle_uid_store(Sock, Tag, Rest, #{messages := Ms} = State) ->
     {SetBin, OpAndFlags} = split1(Rest),
@@ -424,15 +485,20 @@ store_op(_) -> set.
 update_flags(State, Ms, Uid, Op, Flags) ->
     Next = highestmodseq(State) + 1,
     lists:map(
-        fun({Seq, U, Existing, _MS, Raw}) when U =:= Uid ->
-                New = case Op of
-                          add -> lists:usort(Existing ++ Flags);
-                          remove -> Existing -- Flags;
-                          set -> Flags
-                      end,
+        fun
+            ({Seq, U, Existing, _MS, Raw}) when U =:= Uid ->
+                New =
+                    case Op of
+                        add -> lists:usort(Existing ++ Flags);
+                        remove -> Existing -- Flags;
+                        set -> Flags
+                    end,
                 {Seq, U, New, Next, Raw};
-           (M) -> M
-        end, Ms).
+            (M) ->
+                M
+        end,
+        Ms
+    ).
 
 %%====================================================================
 %% Parsing helpers
@@ -455,13 +521,19 @@ parse_paren_flags(Bin) ->
 
 unparen(Bin) ->
     B1 = string:trim(Bin),
-    B2 = case B1 of <<"(", R/binary>> -> R; _ -> B1 end,
+    B2 =
+        case B1 of
+            <<"(", R/binary>> -> R;
+            _ -> B1
+        end,
     case B2 of
-        <<>> -> <<>>;
-        _ -> case binary:last(B2) of
-                 $) -> binary:part(B2, 0, byte_size(B2) - 1);
-                 _ -> B2
-             end
+        <<>> ->
+            <<>>;
+        _ ->
+            case binary:last(B2) of
+                $) -> binary:part(B2, 0, byte_size(B2) - 1);
+                _ -> B2
+            end
     end.
 
 first_token(Bin) -> hd(binary:split(string:trim(Bin, leading), <<" ">>)).
@@ -474,7 +546,8 @@ unquote(Bin) ->
                 $" -> binary:part(R, 0, byte_size(R) - 1);
                 _ -> T
             end;
-        _ -> T
+        _ ->
+            T
     end.
 
 split1(Bin) ->

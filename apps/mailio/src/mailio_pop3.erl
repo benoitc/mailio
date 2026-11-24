@@ -45,9 +45,12 @@ open(#{host := Host} = Config) ->
         C3 = auth(C2),
         {ok, refresh_caps(C3)}
     catch
-        throw:{mailio_pop3, Error} -> Error;
+        throw:{mailio_pop3, Error} ->
+            Error;
         error:{badmatch, _} ->
-            mailio_error:new(pop3_connect_failed, <<"unexpected greeting from the POP3 server">>, #{})
+            mailio_error:new(
+                pop3_connect_failed, <<"unexpected greeting from the POP3 server">>, #{}
+            )
     end.
 
 default_port(true) -> 995;
@@ -71,10 +74,16 @@ connect(Host, Port, Config) ->
             end;
         _ ->
             case gen_tcp:connect(Host, Port, sock_opts(), ?TIMEOUT) of
-                {ok, S} -> {gen_tcp, S};
+                {ok, S} ->
+                    {gen_tcp, S};
                 {error, R} ->
-                    fail(mailio_error:new(pop3_connect_failed, <<"cannot connect to the POP3 server">>,
-                                          #{reason => R}))
+                    fail(
+                        mailio_error:new(
+                            pop3_connect_failed,
+                            <<"cannot connect to the POP3 server">>,
+                            #{reason => R}
+                        )
+                    )
             end
     end.
 
@@ -86,19 +95,25 @@ ssl_opts(Config, Host) ->
         verify_none ->
             [{verify, verify_none} | Base];
         verify_peer ->
-            CA = case {maps:find(cacerts, Config), maps:find(cacertfile, Config)} of
-                     {{ok, Certs}, _} -> [{cacerts, Certs}];
-                     {_, {ok, F}} -> [{cacertfile, F}];
-                     _ -> [{cacerts, public_key:cacerts_get()}]
-                 end,
-            [{verify, verify_peer},
-             {customize_hostname_check,
-              [{match_fun, public_key:pkix_verify_hostname_match_fun(https)}]}
-             | CA ++ Base]
+            CA =
+                case {maps:find(cacerts, Config), maps:find(cacertfile, Config)} of
+                    {{ok, Certs}, _} -> [{cacerts, Certs}];
+                    {_, {ok, F}} -> [{cacertfile, F}];
+                    _ -> [{cacerts, public_key:cacerts_get()}]
+                end,
+            [
+                {verify, verify_peer},
+                {customize_hostname_check, [
+                    {match_fun, public_key:pkix_verify_hostname_match_fun(https)}
+                ]}
+                | CA ++ Base
+            ]
     end.
 
 tls_failed(R) ->
-    mailio_error:new(pop3_tls_failed, <<"TLS handshake with the POP3 server failed">>, #{reason => R}).
+    mailio_error:new(pop3_tls_failed, <<"TLS handshake with the POP3 server failed">>, #{
+        reason => R
+    }).
 
 refresh_caps(C) ->
     case cmd_multi(C, [<<"CAPA">>]) of
@@ -113,8 +128,11 @@ stls(#{mod := gen_tcp, config := Config} = C) ->
         starttls ->
             case lists:member(<<"STLS">>, maps:get(caps, C)) of
                 false ->
-                    fail(mailio_error:new(pop3_tls_failed, <<"the server does not offer STLS">>, #{}));
-                true -> ok
+                    fail(
+                        mailio_error:new(pop3_tls_failed, <<"the server does not offer STLS">>, #{})
+                    );
+                true ->
+                    ok
             end,
             {ok, _} = cmd(C, [<<"STLS">>]),
             ok = inet:setopts(maps:get(sock, C), [{packet, raw}]),
@@ -126,9 +144,11 @@ stls(#{mod := gen_tcp, config := Config} = C) ->
                 {error, R} ->
                     fail(tls_failed(R))
             end;
-        _ -> C
+        _ ->
+            C
     end;
-stls(C) -> C.
+stls(C) ->
+    C.
 
 auth(#{config := Config} = C) ->
     case maps:get(credentials, Config, undefined) of
@@ -138,10 +158,13 @@ auth(#{config := Config} = C) ->
 
 force({token_fun, F}) ->
     case F() of
-        {ok, Cred} -> force(Cred);
-        {error, R} -> fail(mailio_error:new(pop3_auth_failed, <<"credentials unavailable">>, #{reason => R}))
+        {ok, Cred} ->
+            force(Cred);
+        {error, R} ->
+            fail(mailio_error:new(pop3_auth_failed, <<"credentials unavailable">>, #{reason => R}))
     end;
-force(Cred) -> Cred.
+force(Cred) ->
+    Cred.
 
 auth_with(C, {password, User, Pass}) ->
     case cmd(C, [<<"USER ">>, User]) of
@@ -150,19 +173,22 @@ auth_with(C, {password, User, Pass}) ->
                 {ok, _} -> C;
                 {err, T} -> fail(auth_failed(T))
             end;
-        {err, T} -> fail(auth_failed(T))
+        {err, T} ->
+            fail(auth_failed(T))
     end;
 auth_with(C, {oauth2, User, Token}) ->
     Init = base64:encode(<<"user=", User/binary, 1, "auth=Bearer ", Token/binary, 1, 1>>),
     ok = send(C, [<<"AUTH XOAUTH2 ">>, Init]),
     case read_line(C) of
-        {ok, <<"+OK", _/binary>>} -> C;
+        {ok, <<"+OK", _/binary>>} ->
+            C;
         {ok, <<"+ ", _/binary>>} ->
             %% error challenge: finish the exchange with an empty line
             ok = send(C, [<<>>]),
             _ = read_line(C),
             fail(auth_failed(<<"XOAUTH2 refused">>));
-        {ok, Other} -> fail(auth_failed(Other))
+        {ok, Other} ->
+            fail(auth_failed(Other))
     end.
 
 auth_failed(Text) ->
@@ -179,7 +205,8 @@ stat(C) ->
             {ok, T} ->
                 [N, O | _] = binary:split(T, <<" ">>, [global]),
                 {ok, binary_to_integer(N), binary_to_integer(O)};
-            {err, T} -> server_error(T)
+            {err, T} ->
+                server_error(T)
         end
     end).
 
@@ -188,9 +215,12 @@ list(C) ->
     wrap(fun() ->
         case cmd_multi(C, [<<"LIST">>]) of
             {ok, Lines} ->
-                {ok, [{binary_to_integer(N), binary_to_integer(S)}
-                      || L <- Lines, [N, S | _] <- [binary:split(L, <<" ">>, [global])]]};
-            {err, T} -> server_error(T)
+                {ok, [
+                    {binary_to_integer(N), binary_to_integer(S)}
+                 || L <- Lines, [N, S | _] <- [binary:split(L, <<" ">>, [global])]
+                ]};
+            {err, T} ->
+                server_error(T)
         end
     end).
 
@@ -200,9 +230,14 @@ uidl(C) ->
     wrap(fun() ->
         case cmd_multi(C, [<<"UIDL">>]) of
             {ok, Lines} ->
-                {ok, [{binary_to_integer(N), U} || L <- Lines, [N, U | _] <- [binary:split(L, <<" ">>)]]};
+                {ok, [
+                    {binary_to_integer(N), U}
+                 || L <- Lines, [N, U | _] <- [binary:split(L, <<" ">>)]
+                ]};
             {err, _} ->
-                mailio_error:new(pop3_unsupported, <<"the server has no UIDL">>, #{command => <<"UIDL">>})
+                mailio_error:new(pop3_unsupported, <<"the server has no UIDL">>, #{
+                    command => <<"UIDL">>
+                })
         end
     end).
 
@@ -219,8 +254,12 @@ top(C, N, Lines) ->
 
 top_error(T) ->
     case binary:match(string:lowercase(T), [<<"no such">>, <<"not found">>, <<"invalid">>]) of
-        nomatch -> mailio_error:new(pop3_unsupported, <<"the server has no TOP">>, #{command => <<"TOP">>, reply => T});
-        _ -> mailio_error:new(pop3_no_such_message, <<"no such message">>, #{reply => T})
+        nomatch ->
+            mailio_error:new(pop3_unsupported, <<"the server has no TOP">>, #{
+                command => <<"TOP">>, reply => T
+            });
+        _ ->
+            mailio_error:new(pop3_no_such_message, <<"no such message">>, #{reply => T})
     end.
 
 %% @doc The whole message, refused when its size exceeds `MaxBytes'.
@@ -229,12 +268,17 @@ retr(C, N, MaxBytes) ->
     wrap(fun() ->
         case list_one(C, N) of
             {ok, Size} when Size > MaxBytes ->
-                mailio_error:new(pop3_too_large, <<"the message is larger than the limit">>,
-                                 #{size => Size, limit => MaxBytes});
+                mailio_error:new(
+                    pop3_too_large,
+                    <<"the message is larger than the limit">>,
+                    #{size => Size, limit => MaxBytes}
+                );
             {ok, _} ->
                 case cmd_multi(C, [<<"RETR ">>, integer_to_binary(N)]) of
-                    {ok, L} -> {ok, join(L)};
-                    {err, T} -> mailio_error:new(pop3_no_such_message, <<"no such message">>, #{reply => T})
+                    {ok, L} ->
+                        {ok, join(L)};
+                    {err, T} ->
+                        mailio_error:new(pop3_no_such_message, <<"no such message">>, #{reply => T})
                 end;
             {err, T} ->
                 mailio_error:new(pop3_no_such_message, <<"no such message">>, #{reply => T})
@@ -246,7 +290,8 @@ list_one(C, N) ->
         {ok, T} ->
             [_, S | _] = binary:split(T, <<" ">>, [global]),
             {ok, binary_to_integer(S)};
-        {err, _} = E -> E
+        {err, _} = E ->
+            E
     end.
 
 %% @doc Headers of a message: TOP when the server has it, else RETR when the
@@ -254,10 +299,12 @@ list_one(C, N) ->
 -spec headers(conn(), pos_integer(), non_neg_integer(), map()) -> {ok, binary()} | mailio_error:t().
 headers(C, N, Size, Opts) ->
     case lists:member(<<"TOP">>, capabilities(C)) of
-        true -> top(C, N, 0);
+        true ->
+            top(C, N, 0);
         false ->
             case top(C, N, 0) of
-                {ok, _} = Ok -> Ok;
+                {ok, _} = Ok ->
+                    Ok;
                 {error, #{code := pop3_unsupported}} ->
                     Max = maps:get(max_retr, Opts, 2097152),
                     case Size =< Max of
@@ -266,13 +313,18 @@ headers(C, N, Size, Opts) ->
                                 {ok, Raw} ->
                                     [H | _] = binary:split(Raw, <<"\r\n\r\n">>),
                                     {ok, H};
-                                Error -> Error
+                                Error ->
+                                    Error
                             end;
                         false ->
-                            mailio_error:new(pop3_too_large, <<"no TOP, and the message is too large to fetch">>,
-                                             #{size => Size, limit => Max})
+                            mailio_error:new(
+                                pop3_too_large,
+                                <<"no TOP, and the message is too large to fetch">>,
+                                #{size => Size, limit => Max}
+                            )
                     end;
-                Error -> Error
+                Error ->
+                    Error
             end
     end.
 
@@ -282,12 +334,16 @@ unique_ids(Pairs) ->
     {Out, _} = lists:mapfoldl(
         fun({N, U}, Seen) ->
             K = maps:get(U, Seen, 0),
-            Id = case K of
-                     0 -> U;
-                     _ -> <<U/binary, "#", (integer_to_binary(K))/binary>>
-                 end,
+            Id =
+                case K of
+                    0 -> U;
+                    _ -> <<U/binary, "#", (integer_to_binary(K))/binary>>
+                end,
             {{N, Id}, Seen#{U => K + 1}}
-        end, #{}, Pairs),
+        end,
+        #{},
+        Pairs
+    ),
     Out.
 
 %%====================================================================
@@ -295,14 +351,17 @@ unique_ids(Pairs) ->
 %%====================================================================
 
 wrap(Fun) ->
-    try Fun()
-    catch throw:{mailio_pop3, Error} -> Error
+    try
+        Fun()
+    catch
+        throw:{mailio_pop3, Error} -> Error
     end.
 
 -spec fail(mailio_error:t()) -> no_return().
 fail(Error) -> throw({mailio_pop3, Error}).
 
-server_error(T) -> mailio_error:new(pop3_error, <<"the server refused the command">>, #{reply => T}).
+server_error(T) ->
+    mailio_error:new(pop3_error, <<"the server refused the command">>, #{reply => T}).
 
 send(#{mod := M, sock := S}, Parts) ->
     case M:send(S, iolist_to_binary([Parts, <<"\r\n">>])) of
@@ -311,13 +370,18 @@ send(#{mod := M, sock := S}, Parts) ->
     end.
 
 disconnected(R) ->
-    mailio_error:new(pop3_disconnected, <<"the connection to the POP3 server was lost">>, #{reason => R}).
+    mailio_error:new(pop3_disconnected, <<"the connection to the POP3 server was lost">>, #{
+        reason => R
+    }).
 
 read_line(#{mod := M, sock := S}) ->
     case M:recv(S, 0, ?TIMEOUT) of
-        {ok, L} -> {ok, chomp(L)};
-        {error, timeout} -> fail(mailio_error:new(pop3_timeout, <<"the POP3 server did not answer in time">>, #{}));
-        {error, R} -> fail(disconnected(R))
+        {ok, L} ->
+            {ok, chomp(L)};
+        {error, timeout} ->
+            fail(mailio_error:new(pop3_timeout, <<"the POP3 server did not answer in time">>, #{}));
+        {error, R} ->
+            fail(disconnected(R))
     end.
 
 cmd(C, Parts) ->
@@ -353,7 +417,11 @@ chomp(Bin) ->
     end.
 
 catch_all(F) ->
-    try F() catch _:_ -> ok end.
+    try
+        F()
+    catch
+        _:_ -> ok
+    end.
 
 to_list(B) when is_binary(B) -> binary_to_list(B);
 to_list(L) when is_list(L) -> L.

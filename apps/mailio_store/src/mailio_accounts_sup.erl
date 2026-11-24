@@ -28,19 +28,24 @@ start_account(AccountId) ->
 %% AdapterConfig' to also start the sync engine.
 -spec start_account(binary(), map()) -> {ok, pid()} | {error, term()}.
 start_account(AccountId, Opts) when is_binary(AccountId), is_map(Opts) ->
-    Spec = #{id => {account, AccountId},
-             start => {mailio_account_sup, start_link, [AccountId, Opts]},
-             restart => transient,
-             shutdown => infinity,
-             type => supervisor,
-             modules => [mailio_account_sup]},
+    Spec = #{
+        id => {account, AccountId},
+        start => {mailio_account_sup, start_link, [AccountId, Opts]},
+        restart => transient,
+        shutdown => infinity,
+        type => supervisor,
+        modules => [mailio_account_sup]
+    },
     case supervisor:start_child(?SERVER, Spec) of
-        {ok, Pid} -> {ok, Pid};
-        {error, {already_started, Pid}} -> {ok, Pid};
+        {ok, Pid} ->
+            {ok, Pid};
+        {error, {already_started, Pid}} ->
+            {ok, Pid};
         {error, already_present} ->
             _ = supervisor:delete_child(?SERVER, {account, AccountId}),
             start_account(AccountId, Opts);
-        {error, _} = Err -> Err
+        {error, _} = Err ->
+            Err
     end.
 
 -spec stop_account(binary()) -> ok | {error, not_found}.
@@ -53,12 +58,17 @@ stop_account(AccountId) when is_binary(AccountId) ->
 
 -spec which_accounts() -> [binary()].
 which_accounts() ->
-    [AccountId || {{account, AccountId}, _Pid, _Type, _Mods}
-                      <- supervisor:which_children(?SERVER)].
+    [
+        AccountId
+     || {{account, AccountId}, _Pid, _Type, _Mods} <-
+            supervisor:which_children(?SERVER)
+    ].
 
 -spec init([]) -> {ok, {supervisor:sup_flags(), []}}.
 init([]) ->
-    SupFlags = #{strategy => one_for_one,
-                 intensity => 10,
-                 period => 60},
+    SupFlags = #{
+        strategy => one_for_one,
+        intensity => 10,
+        period => 60
+    },
     {ok, {SupFlags, []}}.

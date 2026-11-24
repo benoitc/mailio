@@ -91,11 +91,13 @@ upsert_ref(Db, DocId, BlobId, Content, RefId, Store) ->
                 {error, _} = Err -> Err
             end;
         {error, not_found} ->
-            Doc = #{<<"id">> => DocId,
-                    <<"blobId">> => BlobId,
-                    <<"size">> => byte_size(Content),
-                    <<"store">> => Store,
-                    <<"refs">> => #{RefId => true}},
+            Doc = #{
+                <<"id">> => DocId,
+                <<"blobId">> => BlobId,
+                <<"size">> => byte_size(Content),
+                <<"store">> => Store,
+                <<"refs">> => #{RefId => true}
+            },
             case mailio_db:put(Db, Doc) of
                 {ok, _, _} -> {ok, BlobId};
                 {error, _} = Err -> Err
@@ -106,13 +108,15 @@ upsert_ref(Db, DocId, BlobId, Content, RefId, Store) ->
 -spec get(binary(), binary()) -> {ok, binary()} | {error, not_found}.
 get(Db, BlobIdOrHex) ->
     Hex = hex_of(BlobIdOrHex),
-    Order = case mailio_config:blob_backend() of
-                files -> [files, docdb];
-                docdb -> [docdb, files]
-            end,
+    Order =
+        case mailio_config:blob_backend() of
+            files -> [files, docdb];
+            docdb -> [docdb, files]
+        end,
     first_found(Order, Db, Hex).
 
-first_found([], _Db, _Hex) -> {error, not_found};
+first_found([], _Db, _Hex) ->
+    {error, not_found};
 first_found([Where | Rest], Db, Hex) ->
     case read(Where, Db, Hex) of
         {ok, _} = Ok -> Ok;
@@ -171,11 +175,16 @@ remove_ref(Db, BlobIdOrHex, RefId) ->
             Refs = maps:remove(RefId, maps:get(<<"refs">>, Doc, #{})),
             {Doc1, Result} =
                 case maps:size(Refs) of
-                    0 -> {Doc#{<<"refs">> => Refs,
-                               <<"orphanedAt">> => erlang:system_time(second)},
-                          orphaned};
-                    _ -> {maps:remove(<<"orphanedAt">>, Doc#{<<"refs">> => Refs}),
-                          referenced}
+                    0 ->
+                        {
+                            Doc#{
+                                <<"refs">> => Refs,
+                                <<"orphanedAt">> => erlang:system_time(second)
+                            },
+                            orphaned
+                        };
+                    _ ->
+                        {maps:remove(<<"orphanedAt">>, Doc#{<<"refs">> => Refs}), referenced}
                 end,
             case mailio_db:put(Db, Doc1) of
                 {ok, _, _} -> {ok, Result};
@@ -195,16 +204,24 @@ sweep(Db, Now, GraceSecs) ->
     case mailio_db:find(Db, #{where => [{compare, [<<"orphanedAt">>], '=<', Cutoff}]}) of
         {ok, Docs, _} ->
             Deleted = lists:foldl(
-                fun(#{<<"id">> := Id, <<"refs">> := Refs}, N) when map_size(Refs) =:= 0 ->
+                fun
+                    (#{<<"id">> := Id, <<"refs">> := Refs}, N) when map_size(Refs) =:= 0 ->
                         case mailio_db:delete(Db, Id) of
                             {ok, _} ->
                                 %% the attachment went with the document; a file is separate
-                                _ = mailio_blob_files:delete(mailio_config:blob_root(), Db, hex_of(Id)),
+                                _ = mailio_blob_files:delete(
+                                    mailio_config:blob_root(), Db, hex_of(Id)
+                                ),
                                 N + 1;
-                            _ -> N
+                            _ ->
+                                N
                         end;
-                   (_, N) -> N
-                end, 0, Docs),
+                    (_, N) ->
+                        N
+                end,
+                0,
+                Docs
+            ),
             {ok, Deleted};
         {error, _} ->
             {ok, 0}
@@ -226,7 +243,6 @@ add_ref_to_doc(Doc, RefId) ->
     %% Re-referencing revives an orphaned blob.
     maps:remove(<<"orphanedAt">>, Doc#{<<"refs">> => Refs#{RefId => true}}).
 
-
 %%====================================================================
 %% Consistency and replication
 %%
@@ -246,7 +262,9 @@ install(Db, BlobIdOrHex, Bytes) ->
                 files ->
                     mailio_blob_files:put(mailio_config:blob_root(), Db, Hex, Bytes);
                 docdb ->
-                    case mailio_db:put_attachment(Db, <<?ID_BLOB, Hex/binary>>, <<"data">>, Bytes) of
+                    case
+                        mailio_db:put_attachment(Db, <<?ID_BLOB, Hex/binary>>, <<"data">>, Bytes)
+                    of
                         {ok, _} -> ok;
                         {error, _} = Err -> Err
                     end
@@ -258,7 +276,8 @@ install(Db, BlobIdOrHex, Bytes) ->
 %% @doc What is wrong with the blobs of a database:
 %% `missing' have a document and no bytes, `corrupt' are files whose content
 %% no longer matches their name, `orphan_files' are files no document names.
--spec check(binary()) -> {ok, #{missing := [binary()], corrupt := [binary()], orphan_files := [binary()]}}.
+-spec check(binary()) ->
+    {ok, #{missing := [binary()], corrupt := [binary()], orphan_files := [binary()]}}.
 check(Db) ->
     Root = mailio_config:blob_root(),
     {ok, Docs} = mailio_db:by_id_prefix(Db, <<?ID_BLOB>>),
@@ -266,9 +285,11 @@ check(Db) ->
     Files = mailio_blob_files:list(Root, Db),
     Corrupt = [H || H <- Files, mailio_blob_files:verify(Root, Db, H) =:= {error, corrupt}],
     Missing = [H || H <- Hexes, not bytes_present(Db, H) orelse lists:member(H, Corrupt)],
-    {ok, #{missing => lists:sort(Missing),
-           corrupt => lists:sort(Corrupt),
-           orphan_files => lists:sort(Files -- Hexes)}}.
+    {ok, #{
+        missing => lists:sort(Missing),
+        corrupt => lists:sort(Corrupt),
+        orphan_files => lists:sort(Files -- Hexes)
+    }}.
 
 %% @doc Repair what {@link check/1} finds: move corrupt files aside, remove
 %% orphan files older than `orphan_grace' seconds (a file is written just
@@ -296,23 +317,28 @@ repair(Db, Opts) ->
                 {ok, #{missing := Still}} = check(Db),
                 #{fetched => 0, failed => Still}
         end,
-    {ok, #{quarantined => length(Corrupt),
-           orphans_removed => length(Removed),
-           pulled => maps:get(fetched, Pulled),
-           failed => maps:get(failed, Pulled)}}.
+    {ok, #{
+        quarantined => length(Corrupt),
+        orphans_removed => length(Removed),
+        pulled => maps:get(fetched, Pulled),
+        failed => maps:get(failed, Pulled)
+    }}.
 
 %% @doc Fetch the bytes of every blob that has a document and no bytes, with
 %% the `blob_fetcher' setting: `fun((Db, Hex) -> {ok, Bytes} | {error, Why})'.
 %% Bytes that do not hash to the name are refused.
--spec pull_missing(binary()) -> {ok, #{fetched := non_neg_integer(), failed := [binary()]}}
-                              | {error, no_fetcher}.
+-spec pull_missing(binary()) ->
+    {ok, #{fetched := non_neg_integer(), failed := [binary()]}}
+    | {error, no_fetcher}.
 pull_missing(Db) ->
     case mailio_config:get(blob_fetcher) of
         Fetcher when is_function(Fetcher, 2) ->
             {ok, #{missing := Missing}} = check(Db),
             Results = [{H, fetch_one(Fetcher, Db, H)} || H <- Missing],
-            {ok, #{fetched => length([ok || {_, ok} <- Results]),
-                   failed => [H || {H, R} <- Results, R =/= ok]}};
+            {ok, #{
+                fetched => length([ok || {_, ok} <- Results]),
+                failed => [H || {H, R} <- Results, R =/= ok]
+            }};
         _ ->
             case check(Db) of
                 {ok, #{missing := []}} -> {ok, #{fetched => 0, failed => []}};
@@ -328,7 +354,8 @@ fetch_one(Fetcher, Db, Hex) ->
     end.
 
 bytes_present(Db, Hex) ->
-    mailio_blob_files:exists(mailio_config:blob_root(), Db, Hex) orelse has_bytes_attachment(Db, Hex).
+    mailio_blob_files:exists(mailio_config:blob_root(), Db, Hex) orelse
+        has_bytes_attachment(Db, Hex).
 
 %% @doc Is there an attachment holding the bytes (the `docdb' backend)?
 -spec has_bytes_attachment(binary(), binary()) -> boolean().
@@ -337,7 +364,6 @@ has_bytes_attachment(Db, Hex) ->
         {ok, _} -> true;
         {error, _} -> false
     end.
-
 
 %%====================================================================
 %% Migration
@@ -356,9 +382,11 @@ migrate_to_files(Db, Opts) ->
     DryRun = maps:get(dry_run, Opts, false),
     {ok, Docs} = mailio_db:by_id_prefix(Db, <<?ID_BLOB>>),
     Results = [{hex_of(Id), migrate_one(Db, Doc, DryRun)} || #{<<"id">> := Id} = Doc <- Docs],
-    {ok, #{moved => length([ok || {_, moved} <- Results]),
-           skipped => length([ok || {_, skipped} <- Results]),
-           failed => [H || {H, failed} <- Results]}}.
+    {ok, #{
+        moved => length([ok || {_, moved} <- Results]),
+        skipped => length([ok || {_, skipped} <- Results]),
+        failed => [H || {H, failed} <- Results]
+    }}.
 
 migrate_one(Db, #{<<"id">> := Id} = Doc, DryRun) ->
     Hex = hex_of(Id),

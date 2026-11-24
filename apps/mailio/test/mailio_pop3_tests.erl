@@ -6,18 +6,31 @@ msg(Subject, Body) ->
     <<"From: a@x\r\nTo: b@y\r\nSubject: ", Subject/binary, "\r\n\r\n", Body/binary>>.
 
 msgs() ->
-    [{<<"u1">>, msg(<<"one">>, <<"first body\r\n.starts with a dot\r\nlast\r\n">>)},
-     {<<"u2">>, msg(<<"two">>, <<"second\r\n">>)},
-     {<<"u2">>, msg(<<"two">>, <<"second\r\n">>)}].
+    [
+        {<<"u1">>, msg(<<"one">>, <<"first body\r\n.starts with a dot\r\nlast\r\n">>)},
+        {<<"u2">>, msg(<<"two">>, <<"second\r\n">>)},
+        {<<"u2">>, msg(<<"two">>, <<"second\r\n">>)}
+    ].
 
 cfg(Srv) -> cfg(Srv, #{}).
 cfg(Srv, Extra) ->
-    maps:merge(#{host => <<"127.0.0.1">>, port => mailio_fake_pop3:port(Srv), tls => false,
-                 credentials => {password, <<"u">>, <<"p">>}}, Extra).
+    maps:merge(
+        #{
+            host => <<"127.0.0.1">>,
+            port => mailio_fake_pop3:port(Srv),
+            tls => false,
+            credentials => {password, <<"u">>, <<"p">>}
+        },
+        Extra
+    ).
 
 with(Opts, Fun) ->
     Srv = mailio_fake_pop3:start(Opts),
-    try Fun(Srv) after mailio_fake_pop3:stop(Srv) end.
+    try
+        Fun(Srv)
+    after
+        mailio_fake_pop3:stop(Srv)
+    end.
 
 code({error, #{code := C}}) -> C.
 
@@ -78,7 +91,9 @@ no_top_falls_back_to_retr_for_small_messages_test() ->
 never_deletes_test() ->
     with(#{messages => msgs()}, fun(Srv) ->
         {ok, C} = mailio_pop3:open(cfg(Srv)),
-        _ = mailio_pop3:list(C), _ = mailio_pop3:uidl(C), _ = mailio_pop3:top(C, 1, 0),
+        _ = mailio_pop3:list(C),
+        _ = mailio_pop3:uidl(C),
+        _ = mailio_pop3:top(C, 1, 0),
         _ = mailio_pop3:retr(C, 1, 1000000),
         mailio_pop3:close(C),
         timer:sleep(100),
@@ -117,7 +132,9 @@ authentication_test() ->
     with(#{messages => msgs()}, fun(Srv) ->
         {ok, C} = mailio_pop3:open(cfg(Srv, #{credentials => {oauth2, <<"u@x">>, <<"tok">>}})),
         [{xoauth2, B64}] = mailio_fake_pop3:auth_seen(Srv),
-        ?assertEqual(<<"user=u@x", 1, "auth=Bearer tok", 1, 1>>, base64:decode(list_to_binary(B64))),
+        ?assertEqual(
+            <<"user=u@x", 1, "auth=Bearer tok", 1, 1>>, base64:decode(list_to_binary(B64))
+        ),
         mailio_pop3:close(C)
     end),
     with(#{messages => msgs(), auth => reject_xoauth2}, fun(Srv) ->
@@ -135,12 +152,19 @@ certs() ->
     #{server_config := Server, client_config := Client} =
         public_key:pkix_test_data(#{
             server_chain => #{root => [Key, Dig], peer => [Key, Dig, {extensions, [SAN]}]},
-            client_chain => #{root => [Key, Dig], peer => [Key, Dig]}}),
+            client_chain => #{root => [Key, Dig], peer => [Key, Dig]}
+        }),
     {Server, Client}.
 
 tls_cfg(Srv, Extra) ->
-    maps:merge(#{host => <<"localhost">>, port => mailio_fake_pop3:port(Srv),
-                 credentials => {password, <<"u">>, <<"p">>}}, Extra).
+    maps:merge(
+        #{
+            host => <<"localhost">>,
+            port => mailio_fake_pop3:port(Srv),
+            credentials => {password, <<"u">>, <<"p">>}
+        },
+        Extra
+    ).
 
 implicit_tls_test() ->
     {Server, Client} = certs(),
@@ -150,8 +174,14 @@ implicit_tls_test() ->
         ?assertMatch({ok, 3, _}, mailio_pop3:stat(C)),
         mailio_pop3:close(C),
         ?assertEqual(pop3_tls_failed, code(mailio_pop3:open(tls_cfg(Srv, #{tls => true})))),
-        ?assertEqual(pop3_tls_failed,
-                     code(mailio_pop3:open(tls_cfg(Srv, #{tls => true, cacerts => CACerts, host => <<"127.0.0.1">>}))))
+        ?assertEqual(
+            pop3_tls_failed,
+            code(
+                mailio_pop3:open(
+                    tls_cfg(Srv, #{tls => true, cacerts => CACerts, host => <<"127.0.0.1">>})
+                )
+            )
+        )
     end).
 
 stls_test() ->

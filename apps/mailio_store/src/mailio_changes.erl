@@ -45,11 +45,17 @@
 since(AccountId, Cursor, Opts) ->
     Db = mailio_account:db_name(AccountId),
     Limit = maps:get(limit, Opts, 1000),
-    {ok, Changes, NewHlc} = mailio_db:changes(Db, Cursor, #{include_docs => true,
-                                                            limit => Limit}),
+    {ok, Changes, NewHlc} = mailio_db:changes(Db, Cursor, #{
+        include_docs => true,
+        limit => Limit
+    }),
     Wanted = wanted_types(Opts),
     Envelopes = envelopes_for(AccountId, Changes, Wanted),
-    More = case length(Changes) >= Limit of true -> more; false -> done end,
+    More =
+        case length(Changes) >= Limit of
+            true -> more;
+            false -> done
+        end,
     {ok, Envelopes, NewHlc, More}.
 
 %% @doc Build envelopes from raw barrel change maps, keeping only the
@@ -58,7 +64,8 @@ since(AccountId, Cursor, Opts) ->
 envelopes_for(AccountId, Changes, Wanted) ->
     lists:filtermap(
         fun(Change) -> to_envelope(AccountId, Change, Wanted) end,
-        Changes).
+        Changes
+    ).
 
 %% @doc Map a document id to its entity type atom.
 -spec domain_type(binary()) -> atom().
@@ -87,20 +94,23 @@ to_envelope(AccountId, Change, Wanted) ->
     DocId = maps:get(id, Change),
     Type = domain_type(DocId),
     case type_wanted(Type, Wanted) of
-        false -> false;
+        false ->
+            false;
         true ->
             Hlc = maps:get(hlc, Change),
             Rev = maps:get(rev, Change, <<>>),
             Deleted = maps:get(deleted, Change, false),
             Doc = maps:get(doc, Change, undefined),
-            Envelope = #{v => 1,
-                         id => <<DocId/binary, "@", Rev/binary>>,
-                         seq => mailio_cursor:encode(Hlc),
-                         account_id => AccountId,
-                         type => Type,
-                         verb => verb(Deleted, AccountId, DocId),
-                         object_id => object_id(Type, DocId),
-                         data => data_for(Type, Doc)},
+            Envelope = #{
+                v => 1,
+                id => <<DocId/binary, "@", Rev/binary>>,
+                seq => mailio_cursor:encode(Hlc),
+                account_id => AccountId,
+                type => Type,
+                verb => verb(Deleted, AccountId, DocId),
+                object_id => object_id(Type, DocId),
+                data => data_for(Type, Doc)
+            },
             {true, Envelope}
     end.
 
@@ -109,7 +119,8 @@ type_wanted(Type, Types) -> lists:member(Type, Types).
 
 %% barrel 3 revisions are `<hlc>@<writer>' and carry no generation, so
 %% "created" means the document has a single version.
-verb(true, _AccountId, _DocId) -> destroyed;
+verb(true, _AccountId, _DocId) ->
+    destroyed;
 verb(false, AccountId, DocId) ->
     case mailio_db:version_count(mailio_account:db_name(AccountId), DocId) of
         1 -> created;
@@ -124,15 +135,20 @@ object_id(submission, <<?ID_SUBMISSION, Id/binary>>) -> Id;
 object_id(identity, <<?ID_IDENTITY, Id/binary>>) -> Id;
 object_id(_Type, DocId) -> DocId.
 
-data_for(_Type, undefined) -> #{};
+data_for(_Type, undefined) ->
+    #{};
 data_for(email, Doc) ->
-    #{subject => maps:get(<<"subject">>, Doc, null),
-      thread_id => maps:get(<<"threadId">>, Doc, undefined),
-      mailbox_ids => maps:keys(maps:get(<<"mailboxIds">>, Doc, #{})),
-      keywords => maps:keys(maps:get(<<"keywords">>, Doc, #{})),
-      has_attachment => maps:get(<<"hasAttachment">>, Doc, false)};
+    #{
+        subject => maps:get(<<"subject">>, Doc, null),
+        thread_id => maps:get(<<"threadId">>, Doc, undefined),
+        mailbox_ids => maps:keys(maps:get(<<"mailboxIds">>, Doc, #{})),
+        keywords => maps:keys(maps:get(<<"keywords">>, Doc, #{})),
+        has_attachment => maps:get(<<"hasAttachment">>, Doc, false)
+    };
 data_for(mailbox, Doc) ->
-    #{name => maps:get(<<"name">>, Doc, null),
-      role => maps:get(<<"role">>, Doc, null)};
+    #{
+        name => maps:get(<<"name">>, Doc, null),
+        role => maps:get(<<"role">>, Doc, null)
+    };
 data_for(_Type, _Doc) ->
     #{}.

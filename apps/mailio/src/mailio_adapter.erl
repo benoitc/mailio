@@ -18,12 +18,16 @@
 
 %% A mailbox as the remote server sees it.
 -type remote_mailbox() :: #{
-    id := binary(),                 %% adapter-stable mailbox id (e.g. IMAP name)
-    name := binary(),               %% display name
-    role => atom() | undefined,     %% inbox|sent|drafts|trash|junk|archive|...
+    %% adapter-stable mailbox id (e.g. IMAP name)
+    id := binary(),
+    %% display name
+    name := binary(),
+    %% inbox|sent|drafts|trash|junk|archive|...
+    role => atom() | undefined,
     parent_id => binary() | null,
     delimiter => binary(),
-    attrs => [binary()]             %% raw server attributes (\Noselect, \Sent, ...)
+    %% raw server attributes (\Noselect, \Sent, ...)
+    attrs => [binary()]
 }.
 
 %% Opaque per-mailbox cursor, adapter-encoded (for IMAP:
@@ -32,11 +36,17 @@
 
 %% A single change reported by fetch_changes_since/4.
 -type change() ::
-    {added, #{uid := term(), keywords := [binary()],
-              internal_date => integer(), size => non_neg_integer()}}
-  | {updated, #{uid := term(), keywords := [binary()]}}
-  | {removed, term()}             %% uid
-  | reset.                        %% cursor invalid (UIDVALIDITY change): full resync
+    {added, #{
+        uid := term(),
+        keywords := [binary()],
+        internal_date => integer(),
+        size => non_neg_integer()
+    }}
+    | {updated, #{uid := term(), keywords := [binary()]}}
+    %% uid
+    | {removed, term()}
+    %% cursor invalid (UIDVALIDITY change): full resync
+    | reset.
 
 %% Streaming sink for raw message bytes.
 -type fetch_sink() :: fun((iodata()) -> ok).
@@ -56,26 +66,47 @@
 
 %% Fetch changes for a mailbox since a cursor. Returns the changes, the new
 %% cursor, and whether more changes remain (paging).
--callback fetch_changes_since(conn(), MailboxId :: binary(),
-                              remote_state(), Opts :: map()) ->
+-callback fetch_changes_since(
+    conn(),
+    MailboxId :: binary(),
+    remote_state(),
+    Opts :: map()
+) ->
     {ok, [change()], remote_state(), more | done}
-  | {error, mailio_error:error_map()}.
+    | {error, mailio_error:error_map()}.
 
 %% Stream a message's raw RFC 5322 bytes to the sink.
--callback fetch_message(conn(), MailboxId :: binary(), Uid :: term(),
-                        fetch_sink()) ->
+-callback fetch_message(
+    conn(),
+    MailboxId :: binary(),
+    Uid :: term(),
+    fetch_sink()
+) ->
     {ok, #{size := non_neg_integer()}} | {error, mailio_error:error_map()}.
 
--callback set_keywords(conn(), MailboxId :: binary(), Uid :: term(),
-                       Add :: [binary()], Remove :: [binary()]) ->
+-callback set_keywords(
+    conn(),
+    MailboxId :: binary(),
+    Uid :: term(),
+    Add :: [binary()],
+    Remove :: [binary()]
+) ->
     ok | {error, mailio_error:error_map()}.
 
--callback move(conn(), FromMailbox :: binary(), Uid :: term(),
-               ToMailbox :: binary()) ->
+-callback move(
+    conn(),
+    FromMailbox :: binary(),
+    Uid :: term(),
+    ToMailbox :: binary()
+) ->
     {ok, NewUid :: term() | undefined} | {error, mailio_error:error_map()}.
 
--callback append(conn(), MailboxId :: binary(), Raw :: binary(),
-                 Keywords :: [binary()]) ->
+-callback append(
+    conn(),
+    MailboxId :: binary(),
+    Raw :: binary(),
+    Keywords :: [binary()]
+) ->
     {ok, Uid :: term() | undefined} | {error, mailio_error:error_map()}.
 
 -callback expunge(conn(), MailboxId :: binary(), Uids :: [term()]) ->

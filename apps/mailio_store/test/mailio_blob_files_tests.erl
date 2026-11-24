@@ -2,7 +2,9 @@
 -include_lib("eunit/include/eunit.hrl").
 
 with_root(Fun) ->
-    Root = filename:join("/tmp", "mailio_blob_files_" ++ integer_to_list(erlang:unique_integer([positive]))),
+    Root = filename:join(
+        "/tmp", "mailio_blob_files_" ++ integer_to_list(erlang:unique_integer([positive]))
+    ),
     ok = filelib:ensure_dir(filename:join(Root, "x")),
     try
         Fun(Root)
@@ -24,7 +26,8 @@ roundtrip_test() ->
         %% the layout: a two-digit shard, then the full hash
         {ok, Path} = mailio_blob_files:path(Root, <<"acct">>, H),
         ?assertEqual(
-            filename:join([Root, "acct", binary_to_list(binary:part(H, 0, 2)), binary_to_list(H)]), Path
+            filename:join([Root, "acct", binary_to_list(binary:part(H, 0, 2)), binary_to_list(H)]),
+            Path
         ),
         ?assertEqual([H], mailio_blob_files:list(Root, <<"acct">>))
     end).
@@ -44,7 +47,9 @@ identical_content_is_one_file_test() ->
 wrong_bytes_for_a_name_are_refused_test() ->
     with_root(fun(Root) ->
         H = hex(<<"what the name promises">>),
-        ?assertEqual({error, hash_mismatch}, mailio_blob_files:put(Root, <<"a">>, H, <<"something else">>)),
+        ?assertEqual(
+            {error, hash_mismatch}, mailio_blob_files:put(Root, <<"a">>, H, <<"something else">>)
+        ),
         ?assertNot(mailio_blob_files:exists(Root, <<"a">>, H)),
         ?assertEqual([], mailio_blob_files:list(Root, <<"a">>))
     end).
@@ -55,11 +60,17 @@ names_cannot_escape_the_store_test() ->
         H = hex(Data),
         Bad = [<<"..">>, <<"../etc">>, <<"a/b">>, <<"">>, <<"tmp">>, <<"corrupt">>, <<".hidden">>],
         lists:foreach(
-            fun(S) -> ?assertEqual({error, bad_name}, mailio_blob_files:put(Root, S, H, Data)) end, Bad
+            fun(S) -> ?assertEqual({error, bad_name}, mailio_blob_files:put(Root, S, H, Data)) end,
+            Bad
         ),
-        BadHex = [<<"../../etc/passwd">>, <<"ABCDEF">>, binary:copy(<<"g">>, 64), binary:copy(<<"a">>, 63)],
+        BadHex = [
+            <<"../../etc/passwd">>, <<"ABCDEF">>, binary:copy(<<"g">>, 64), binary:copy(<<"a">>, 63)
+        ],
         lists:foreach(
-            fun(X) -> ?assertEqual({error, bad_name}, mailio_blob_files:put(Root, <<"a">>, X, Data)) end, BadHex
+            fun(X) ->
+                ?assertEqual({error, bad_name}, mailio_blob_files:put(Root, <<"a">>, X, Data))
+            end,
+            BadHex
         ),
         ?assertEqual({error, bad_name}, mailio_blob_files:get(Root, <<"a">>, <<"../x">>)),
         %% nothing was written, anywhere
@@ -85,7 +96,9 @@ verify_finds_a_damaged_file_test() ->
         {ok, Path} = mailio_blob_files:path(Root, <<"a">>, H),
         ok = file:write_file(Path, <<"tampered">>),
         ?assertEqual({error, corrupt}, mailio_blob_files:verify(Root, <<"a">>, H)),
-        ?assertEqual({error, not_found}, mailio_blob_files:verify(Root, <<"a">>, hex(<<"never stored">>))),
+        ?assertEqual(
+            {error, not_found}, mailio_blob_files:verify(Root, <<"a">>, hex(<<"never stored">>))
+        ),
         %% a damaged file is moved aside, not served and not lost
         ?assertEqual(ok, mailio_blob_files:quarantine(Root, <<"a">>, H)),
         ?assertNot(mailio_blob_files:exists(Root, <<"a">>, H)),

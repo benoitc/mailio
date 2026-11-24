@@ -11,13 +11,13 @@
 -export([to_integer/2]).
 
 -spec lower(binary()) -> binary().
-lower(Bin) -> << <<(lc(B))>> || <<B>> <= Bin >>.
+lower(Bin) -> <<<<(lc(B))>> || <<B>> <= Bin>>.
 
 lc(B) when B >= $A, B =< $Z -> B + 32;
 lc(B) -> B.
 
 -spec upper(binary()) -> binary().
-upper(Bin) -> << <<(uc(B))>> || <<B>> <= Bin >>.
+upper(Bin) -> <<<<(uc(B))>> || <<B>> <= Bin>>.
 
 uc(B) when B >= $a, B =< $z -> B - 32;
 uc(B) -> B.
@@ -26,10 +26,12 @@ uc(B) -> B.
 trim(Bin) -> trim_trailing(trim_leading(Bin)).
 
 -spec trim_leading(binary()) -> binary().
-trim_leading(<<C, Rest/binary>>)
-  when C =:= $\s; C =:= $\t; C =:= $\r; C =:= $\n ->
+trim_leading(<<C, Rest/binary>>) when
+    C =:= $\s; C =:= $\t; C =:= $\r; C =:= $\n
+->
     trim_leading(Rest);
-trim_leading(Bin) -> Bin.
+trim_leading(Bin) ->
+    Bin.
 
 -spec trim_trailing(binary()) -> binary().
 trim_trailing(Bin) ->

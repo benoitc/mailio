@@ -12,8 +12,16 @@
 
 -export([ulid/0]).
 -export([email_id/1, blob_id/1, blob_hex/1, msgid_hash/1]).
--export([account_id/0, mailbox_id/0, thread_id/0, identity_id/0,
-         submission_id/0, rule_id/0, job_id/0, grant_id/0]).
+-export([
+    account_id/0,
+    mailbox_id/0,
+    thread_id/0,
+    identity_id/0,
+    submission_id/0,
+    rule_id/0,
+    job_id/0,
+    grant_id/0
+]).
 -export([b32_lower/1]).
 
 %% Crockford base32, uppercase (ULID canonical).

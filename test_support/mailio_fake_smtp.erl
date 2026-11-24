@@ -13,20 +13,26 @@ start(Opts0) ->
     Opts = maps:merge(#{mode => ok, tls => none, auth => plain}, Opts0),
     Tab = ets:new(fake_smtp, [public, bag]),
     LOpts = [binary, {active, false}, {reuseaddr, true}, {ip, {127, 0, 0, 1}}],
-    {ok, L} = case maps:get(tls, Opts) of
-                  implicit -> ssl:listen(0, LOpts ++ maps:get(tls_opts, Opts));
-                  _ -> gen_tcp:listen(0, LOpts)
-              end,
-    {ok, {_, Port}} = case maps:get(tls, Opts) of
-                          implicit -> ssl:sockname(L);
-                          _ -> inet:sockname(L)
-                      end,
+    {ok, L} =
+        case maps:get(tls, Opts) of
+            implicit -> ssl:listen(0, LOpts ++ maps:get(tls_opts, Opts));
+            _ -> gen_tcp:listen(0, LOpts)
+        end,
+    {ok, {_, Port}} =
+        case maps:get(tls, Opts) of
+            implicit -> ssl:sockname(L);
+            _ -> inet:sockname(L)
+        end,
     Pid = spawn_link(fun() -> accept_loop(L, Opts, Tab) end),
     #{listen => L, port => Port, pid => Pid, tab => Tab, opts => Opts}.
 
 stop(#{listen := L, pid := P, opts := Opts}) ->
-    unlink(P), exit(P, kill),
-    case maps:get(tls, Opts) of implicit -> ssl:close(L); _ -> gen_tcp:close(L) end,
+    unlink(P),
+    exit(P, kill),
+    case maps:get(tls, Opts) of
+        implicit -> ssl:close(L);
+        _ -> gen_tcp:close(L)
+    end,
     ok.
 
 port(#{port := P}) -> P.
@@ -36,30 +42,45 @@ auth_seen(#{tab := T}) -> [A || {auth, A} <- ets:tab2list(T)].
 
 accept_loop(L, Opts, Tab) ->
     Tls = maps:get(tls, Opts),
-    Res = case Tls of
-              implicit ->
-                  case ssl:transport_accept(L) of
-                      {ok, S} ->
-                          case ssl:handshake(S, 5000) of
-                              {ok, SS} -> ok = ssl:setopts(SS, [{packet, line}]), {ok, ssl, SS};
-                              _ -> error
-                          end;
-                      _ -> stop
-                  end;
-              _ ->
-                  case gen_tcp:accept(L) of
-                      {ok, S} -> ok = inet:setopts(S, [{packet, line}]), {ok, gen_tcp, S};
-                      _ -> stop
-                  end
-          end,
+    Res =
+        case Tls of
+            implicit ->
+                case ssl:transport_accept(L) of
+                    {ok, S} ->
+                        case ssl:handshake(S, 5000) of
+                            {ok, SS} ->
+                                ok = ssl:setopts(SS, [{packet, line}]),
+                                {ok, ssl, SS};
+                            _ ->
+                                error
+                        end;
+                    _ ->
+                        stop
+                end;
+            _ ->
+                case gen_tcp:accept(L) of
+                    {ok, S} ->
+                        ok = inet:setopts(S, [{packet, line}]),
+                        {ok, gen_tcp, S};
+                    _ ->
+                        stop
+                end
+        end,
     case Res of
         {ok, Mod, Sock} ->
-            Pid = spawn(fun() -> receive go -> ok end, session(Mod, Sock, Opts, Tab) end),
+            Pid = spawn(fun() ->
+                receive
+                    go -> ok
+                end,
+                session(Mod, Sock, Opts, Tab)
+            end),
             _ = Mod:controlling_process(Sock, Pid),
             Pid ! go,
             accept_loop(L, Opts, Tab);
-        error -> accept_loop(L, Opts, Tab);
-        stop -> ok
+        error ->
+            accept_loop(L, Opts, Tab);
+        stop ->
+            ok
     end.
 
 session(Mod, Sock, Opts, Tab) ->
@@ -69,16 +90,21 @@ session(Mod, Sock, Opts, Tab) ->
 send(Mod, Sock, D) -> Mod:send(Sock, D).
 
 ehlo_reply(#{tls := Tls, auth := Auth}, Mod) ->
-    Lines = ["250-fake\r\n"]
-        ++ [case {Tls, Mod} of
-                {starttls, gen_tcp} -> "250-STARTTLS\r\n";
-                _ -> ""
-            end]
-        ++ [case Auth of
-                plain -> "250 AUTH PLAIN\r\n";
-                login -> "250 AUTH LOGIN\r\n";
-                none -> "250 OK\r\n"
-            end],
+    Lines =
+        ["250-fake\r\n"] ++
+            [
+                case {Tls, Mod} of
+                    {starttls, gen_tcp} -> "250-STARTTLS\r\n";
+                    _ -> ""
+                end
+            ] ++
+            [
+                case Auth of
+                    plain -> "250 AUTH PLAIN\r\n";
+                    login -> "250 AUTH LOGIN\r\n";
+                    none -> "250 OK\r\n"
+                end
+            ],
     Lines.
 
 loop(Mod, Sock, Opts, Tab, St) ->
@@ -97,13 +123,18 @@ loop(Mod, Sock, Opts, Tab, St) ->
                         {ok, SS} ->
                             ok = ssl:setopts(SS, [{packet, line}]),
                             loop(ssl, SS, Opts, Tab, St);
-                        _ -> ok
+                        _ ->
+                            ok
                     end;
                 "AUTH PLAIN " ++ _ ->
-                    ets:insert(Tab, {auth, {plain, string:trim(lists:nthtail(11, binary_to_list(Line)))}}),
+                    ets:insert(
+                        Tab, {auth, {plain, string:trim(lists:nthtail(11, binary_to_list(Line)))}}
+                    ),
                     auth_reply(Mod, Sock, Opts, Tab, St);
                 "AUTH XOAUTH2 " ++ _ ->
-                    ets:insert(Tab, {auth, {xoauth2, string:trim(lists:nthtail(13, binary_to_list(Line)))}}),
+                    ets:insert(
+                        Tab, {auth, {xoauth2, string:trim(lists:nthtail(13, binary_to_list(Line)))}}
+                    ),
                     auth_reply(Mod, Sock, Opts, Tab, St);
                 "AUTH LOGIN" ++ _ ->
                     send(Mod, Sock, "334 VXNlcm5hbWU6\r\n"),
@@ -130,23 +161,35 @@ loop(Mod, Sock, Opts, Tab, St) ->
                     Data = read_data(Mod, Sock, []),
                     ets:insert(Tab, {message, Data}),
                     case Mode of
-                        drop_after_data -> Mod:close(Sock);
-                        reject_data -> send(Mod, Sock, "554 message refused\r\n"), loop(Mod, Sock, Opts, Tab, St);
-                        defer_data -> send(Mod, Sock, "451 try again\r\n"), loop(Mod, Sock, Opts, Tab, St);
-                        _ -> send(Mod, Sock, "250 2.0.0 queued as FAKE1\r\n"), loop(Mod, Sock, Opts, Tab, St)
+                        drop_after_data ->
+                            Mod:close(Sock);
+                        reject_data ->
+                            send(Mod, Sock, "554 message refused\r\n"),
+                            loop(Mod, Sock, Opts, Tab, St);
+                        defer_data ->
+                            send(Mod, Sock, "451 try again\r\n"),
+                            loop(Mod, Sock, Opts, Tab, St);
+                        _ ->
+                            send(Mod, Sock, "250 2.0.0 queued as FAKE1\r\n"),
+                            loop(Mod, Sock, Opts, Tab, St)
                     end;
                 "QUIT" ++ _ ->
-                    send(Mod, Sock, "221 bye\r\n"), Mod:close(Sock);
+                    send(Mod, Sock, "221 bye\r\n"),
+                    Mod:close(Sock);
                 _ ->
-                    send(Mod, Sock, "250 ok\r\n"), loop(Mod, Sock, Opts, Tab, St)
+                    send(Mod, Sock, "250 ok\r\n"),
+                    loop(Mod, Sock, Opts, Tab, St)
             end;
-        _ -> ok
+        _ ->
+            ok
     end.
 
 auth_reply(Mod, Sock, #{mode := auth_fail} = Opts, Tab, St) ->
-    send(Mod, Sock, "535 5.7.8 bad credentials\r\n"), loop(Mod, Sock, Opts, Tab, St);
+    send(Mod, Sock, "535 5.7.8 bad credentials\r\n"),
+    loop(Mod, Sock, Opts, Tab, St);
 auth_reply(Mod, Sock, Opts, Tab, St) ->
-    send(Mod, Sock, "235 ok\r\n"), loop(Mod, Sock, Opts, Tab, St).
+    send(Mod, Sock, "235 ok\r\n"),
+    loop(Mod, Sock, Opts, Tab, St).
 
 read_data(Mod, Sock, Acc) ->
     case Mod:recv(Sock, 0, 10000) of

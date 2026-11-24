@@ -8,8 +8,14 @@
 -module(mailio_registry).
 -behaviour(gen_server).
 
--export([start_link/0, whereis_name/1, register_name/2, unregister_name/1,
-         send/2, lookup/1]).
+-export([
+    start_link/0,
+    whereis_name/1,
+    register_name/2,
+    unregister_name/1,
+    send/2,
+    lookup/1
+]).
 -export([init/1, handle_call/3, handle_cast/2, handle_info/2, terminate/2]).
 
 -define(SERVER, ?MODULE).
@@ -57,8 +63,11 @@ unregister_name(Name) ->
 -spec send(term(), term()) -> pid().
 send(Name, Msg) ->
     case whereis_name(Name) of
-        undefined -> exit({badarg, {Name, Msg}});
-        Pid -> Pid ! Msg, Pid
+        undefined ->
+            exit({badarg, {Name, Msg}});
+        Pid ->
+            Pid ! Msg,
+            Pid
     end.
 
 %%====================================================================
@@ -66,8 +75,12 @@ send(Name, Msg) ->
 %%====================================================================
 
 init([]) ->
-    ?TABLE = ets:new(?TABLE, [named_table, set, public,
-                              {read_concurrency, true}]),
+    ?TABLE = ets:new(?TABLE, [
+        named_table,
+        set,
+        public,
+        {read_concurrency, true}
+    ]),
     {ok, #{monitors => #{}}}.
 
 handle_call({register, Name, Pid}, _From, State) ->

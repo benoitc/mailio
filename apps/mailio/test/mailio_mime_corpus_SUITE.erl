@@ -13,18 +13,22 @@
 -include_lib("stdlib/include/assert.hrl").
 
 -export([all/0]).
--export([rfc2047_multicharset_subject/1,
-         nested_multipart_with_message/1,
-         cp1252_quoted_printable/1,
-         rfc2231_split_extended_filename/1,
-         wrapped_base64_body/1]).
+-export([
+    rfc2047_multicharset_subject/1,
+    nested_multipart_with_message/1,
+    cp1252_quoted_printable/1,
+    rfc2231_split_extended_filename/1,
+    wrapped_base64_body/1
+]).
 
 all() ->
-    [rfc2047_multicharset_subject,
-     nested_multipart_with_message,
-     cp1252_quoted_printable,
-     rfc2231_split_extended_filename,
-     wrapped_base64_body].
+    [
+        rfc2047_multicharset_subject,
+        nested_multipart_with_message,
+        cp1252_quoted_printable,
+        rfc2231_split_extended_filename,
+        wrapped_base64_body
+    ].
 
 load(Config, Name) ->
     Path = filename:join(?config(data_dir, Config), Name),
@@ -37,7 +41,8 @@ rfc2047_multicharset_subject(Config) ->
     Raw = load(Config, "rfc2047_subject.eml"),
     {H, _} = mailio_rfc5322:split(Raw),
     Subject = mailio_rfc5322:decode_unstructured(
-                mailio_rfc5322:header(<<"subject">>, H)),
+        mailio_rfc5322:header(<<"subject">>, H)
+    ),
     %% Two adjacent encoded-words (different charsets); inter-word ws dropped.
     ?assertEqual(<<"If you can read this how are you?">>, Subject),
     %% From display name has a latin1 encoded-word.
@@ -67,7 +72,7 @@ nested_multipart_with_message(Config) ->
     %% Third child: base64 attachment.
     ?assert(mailio_mime:is_attachment(Att)),
     ?assertEqual(<<"data.bin">>, mailio_mime:filename(Att)),
-    ?assertEqual(<<0,1,2,3,4,5>>, mailio_mime:body(Att)),
+    ?assertEqual(<<0, 1, 2, 3, 4, 5>>, mailio_mime:body(Att)),
 
     %% No structural defects.
     Defects = (mailio_mime:walk(fun(Pt, Acc) -> mailio_mime:defects(Pt) ++ Acc end, []))(P),
@@ -83,8 +88,10 @@ cp1252_quoted_printable(Config) ->
     %% the indexing layer, so verify the decoded cp1252 bytes here.
     Qp = mailio_mime:body(P),
     Utf8 = mailio_mime_decode:to_utf8(Qp, mailio_mime:charset(P)),
-    ?assertEqual(<<"Smart quotes ‘here’ and a price of €100 with a dash – done."/utf8>>,
-                 mailio_ascii:trim_trailing(Utf8)).
+    ?assertEqual(
+        <<"Smart quotes ‘here’ and a price of €100 with a dash – done."/utf8>>,
+        mailio_ascii:trim_trailing(Utf8)
+    ).
 
 rfc2231_split_extended_filename(Config) ->
     Raw = load(Config, "rfc2231_filename.eml"),

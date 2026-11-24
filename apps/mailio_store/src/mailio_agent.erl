@@ -38,14 +38,16 @@ open(AgentId, Secret) ->
 -spec open(binary()) -> {ok, session()} | {error, denied}.
 open(AgentId) -> open(AgentId, <<>>).
 
-usable(#{<<"revoked">> := true}) -> false;
+usable(#{<<"revoked">> := true}) ->
+    false;
 usable(Grant) ->
     case maps:get(<<"expiresAt">>, Grant, null) of
         null -> true;
         Exp -> erlang:system_time(second) < Exp
     end.
 
-secret_ok(#{<<"secretHash">> := null}, _Secret) -> true;
+secret_ok(#{<<"secretHash">> := null}, _Secret) ->
+    true;
 secret_ok(#{<<"secretHash">> := Hash}, Secret) ->
     binary:encode_hex(crypto:hash(sha256, Secret), lowercase) =:= Hash.
 
@@ -58,7 +60,10 @@ secret_ok(#{<<"secretHash">> := Hash}, Secret) ->
 %% `after', `before', `limit'. Returns email summaries.
 -spec search(session(), binary(), map()) -> {ok, [map()]} | {error, denied}.
 search(Session, Account, Filters) ->
-    with_access(Session, Account, search,
+    with_access(
+        Session,
+        Account,
+        search,
         fun(Perm) ->
             Filter = to_jmap_filter(Filters),
             Limit = maps:get(limit, Filters, 50),
@@ -66,29 +71,39 @@ search(Session, Account, Filters) ->
                 mailio_email:query(Account, #{filter => Filter, limit => Limit}),
             Db = mailio_account:db_name(Account),
             Summaries = lists:filtermap(
-                fun(Id) -> summarize_visible(Db, Perm, Id) end, Ids),
+                fun(Id) -> summarize_visible(Db, Perm, Id) end, Ids
+            ),
             {ok, Summaries}
-        end).
+        end
+    ).
 
 %% @doc Render a thread as a list of plain-text messages (no raw MIME),
 %% restricted to the emails the agent may see.
 -spec get_thread(session(), binary(), binary()) -> {ok, map()} | {error, denied | not_found}.
 get_thread(Session, Account, ThreadId) ->
-    with_access(Session, Account, read,
+    with_access(
+        Session,
+        Account,
+        read,
         fun(Perm) ->
             Db = mailio_account:db_name(Account),
             case mailio_db:get(Db, <<?ID_THREAD, ThreadId/binary>>) of
                 {ok, Thread} ->
                     EmailIds = maps:get(<<"emailIds">>, Thread, []),
-                    Messages = [render_message(Db, Id)
-                                || Id <- EmailIds, visible(Db, Perm, Id)],
-                    {ok, #{<<"id">> => ThreadId,
-                           <<"messages">> => Messages,
-                           <<"participants">> => participants(Messages)}};
+                    Messages = [
+                        render_message(Db, Id)
+                     || Id <- EmailIds, visible(Db, Perm, Id)
+                    ],
+                    {ok, #{
+                        <<"id">> => ThreadId,
+                        <<"messages">> => Messages,
+                        <<"participants">> => participants(Messages)
+                    }};
                 {error, not_found} ->
                     {error, not_found}
             end
-        end).
+        end
+    ).
 
 %% @doc Build a token-budgeted context window for a thread or a single
 %% email: newest messages in full, older ones degraded to one-line
@@ -101,10 +116,12 @@ context_window(Session, Account, Target, Opts) ->
         {ok, Messages} ->
             {Text, Included, Truncated} = fill(lists:reverse(Messages), MaxTokens, [], [], false),
             Body = iolist_to_binary(lists:join(<<"\n\n">>, Text)),
-            {ok, #{<<"text">> => Body,
-                   <<"included">> => Included,
-                   <<"truncated">> => Truncated,
-                   <<"token_estimate">> => byte_size(Body) div 4}};
+            {ok, #{
+                <<"text">> => Body,
+                <<"included">> => Included,
+                <<"truncated">> => Truncated,
+                <<"token_estimate">> => byte_size(Body) div 4
+            }};
         {error, _} = Err ->
             Err
     end.
@@ -115,14 +132,18 @@ messages_for(Session, Account, {thread, ThreadId}) ->
         Err -> Err
     end;
 messages_for(Session, Account, {email, EmailId}) ->
-    with_access(Session, Account, read,
+    with_access(
+        Session,
+        Account,
+        read,
         fun(Perm) ->
             Db = mailio_account:db_name(Account),
             case visible(Db, Perm, EmailId) of
                 true -> {ok, [render_message(Db, EmailId)]};
                 false -> {error, not_found}
             end
-        end).
+        end
+    ).
 
 %% Greedy newest-first fill within the token budget.
 fill([], _Budget, Acc, Included, Trunc) ->
@@ -132,17 +153,29 @@ fill([M | Rest], Budget, Acc, Included, Trunc) ->
     Cost = byte_size(Full) div 4,
     case Cost =< Budget of
         true ->
-            fill(Rest, Budget - Cost, [Full | Acc],
-                 [maps:get(<<"id">>, M) | Included], Trunc);
+            fill(
+                Rest,
+                Budget - Cost,
+                [Full | Acc],
+                [maps:get(<<"id">>, M) | Included],
+                Trunc
+            );
         false ->
             %% No room for the full message: append a one-line summary and
             %% mark truncated, but keep scanning older messages (cheap).
             Line = one_line(M),
             LCost = byte_size(Line) div 4,
             case LCost =< Budget of
-                true -> fill(Rest, Budget - LCost, [Line | Acc],
-                             [maps:get(<<"id">>, M) | Included], true);
-                false -> fill(Rest, Budget, Acc, Included, true)
+                true ->
+                    fill(
+                        Rest,
+                        Budget - LCost,
+                        [Line | Acc],
+                        [maps:get(<<"id">>, M) | Included],
+                        true
+                    );
+                false ->
+                    fill(Rest, Budget, Acc, Included, true)
             end
     end.
 
@@ -154,27 +187,39 @@ fill([M | Rest], Budget, Acc, Included, Trunc) ->
 %% keywords (`$'-prefixed) are not settable here — use {@link mark/4}.
 -spec tag(session(), binary(), [binary()], map()) -> {ok, map()} | {error, denied}.
 tag(Session, Account, EmailIds, Change) ->
-    with_access(Session, Account, tag,
+    with_access(
+        Session,
+        Account,
+        tag,
         fun(Perm) ->
             Add = [K || K <- maps:get(add, Change, []), not system_kw(K)],
             Remove = [K || K <- maps:get(remove, Change, []), not system_kw(K)],
-            Updated = apply_to_visible(Account, Perm, EmailIds,
-                                       #{add_keywords => Add, remove_keywords => Remove}),
+            Updated = apply_to_visible(
+                Account,
+                Perm,
+                EmailIds,
+                #{add_keywords => Add, remove_keywords => Remove}
+            ),
             audit(Account, Session, tag, Updated),
             {ok, #{<<"updated">> => Updated}}
-        end).
+        end
+    ).
 
 %% @doc Set a read/flagged state on visible emails.
 -spec mark(session(), binary(), [binary()], read | unread | flagged | unflagged) ->
     {ok, map()} | {error, denied}.
 mark(Session, Account, EmailIds, Flag) ->
-    with_access(Session, Account, mark,
+    with_access(
+        Session,
+        Account,
+        mark,
         fun(Perm) ->
             Patch = mark_patch(Flag),
             Updated = apply_to_visible(Account, Perm, EmailIds, Patch),
             audit(Account, Session, {mark, Flag}, Updated),
             {ok, #{<<"updated">> => Updated}}
-        end).
+        end
+    ).
 
 mark_patch(read) -> #{add_keywords => [?KW_SEEN]};
 mark_patch(unread) -> #{remove_keywords => [?KW_SEEN]};
@@ -194,7 +239,9 @@ apply_to_visible(Account, Perm, EmailIds, Patch) ->
                 false ->
                     false
             end
-        end, EmailIds).
+        end,
+        EmailIds
+    ).
 
 %%====================================================================
 %% Enforcement
@@ -216,11 +263,13 @@ account_perm(#{<<"accounts">> := Accounts}, Account) ->
         {ok, Perm} -> {ok, Perm};
         error -> error
     end;
-account_perm(_, _) -> error.
+account_perm(_, _) ->
+    error.
 
 scope_allowed(#{<<"scopes">> := Scopes}, Scope) ->
     lists:member(atom_to_binary(Scope, utf8), Scopes);
-scope_allowed(_, _) -> false.
+scope_allowed(_, _) ->
+    false.
 
 visible(Db, Perm, EmailId) ->
     case mailio_db:get(Db, <<?ID_EMAIL, EmailId/binary>>) of
@@ -231,8 +280,9 @@ visible(Db, Perm, EmailId) ->
 mailbox_visible(Perm, Mailboxes) ->
     Allow = maps:get(<<"mailboxAllow">>, Perm, <<"all">>),
     Deny = maps:get(<<"mailboxDeny">>, Perm, []),
-    AllowOK = (Allow =:= <<"all">>)
-        orelse lists:any(fun(M) -> lists:member(M, Allow) end, Mailboxes),
+    AllowOK =
+        (Allow =:= <<"all">>) orelse
+            lists:any(fun(M) -> lists:member(M, Allow) end, Mailboxes),
     DenyOK = not lists:any(fun(M) -> lists:member(M, Deny) end, Mailboxes),
     AllowOK andalso DenyOK.
 
@@ -252,23 +302,27 @@ summarize_visible(Db, Perm, EmailId) ->
     end.
 
 summary(Email) ->
-    #{<<"id">> => mailio_email:id_of(Email),
-      <<"threadId">> => mailio_email:thread_id(Email),
-      <<"from">> => maps:get(<<"from">>, Email, null),
-      <<"subject">> => maps:get(<<"subject">>, Email, null),
-      <<"receivedAt">> => maps:get(<<"receivedAt">>, Email, null),
-      <<"preview">> => maps:get(<<"preview">>, Email, <<>>),
-      <<"keywords">> => maps:keys(maps:get(<<"keywords">>, Email, #{})),
-      <<"hasAttachment">> => maps:get(<<"hasAttachment">>, Email, false)}.
+    #{
+        <<"id">> => mailio_email:id_of(Email),
+        <<"threadId">> => mailio_email:thread_id(Email),
+        <<"from">> => maps:get(<<"from">>, Email, null),
+        <<"subject">> => maps:get(<<"subject">>, Email, null),
+        <<"receivedAt">> => maps:get(<<"receivedAt">>, Email, null),
+        <<"preview">> => maps:get(<<"preview">>, Email, <<>>),
+        <<"keywords">> => maps:keys(maps:get(<<"keywords">>, Email, #{})),
+        <<"hasAttachment">> => maps:get(<<"hasAttachment">>, Email, false)
+    }.
 
 render_message(Db, EmailId) ->
     {ok, Email} = mailio_db:get(Db, <<?ID_EMAIL, EmailId/binary>>),
-    #{<<"id">> => EmailId,
-      <<"from">> => maps:get(<<"from">>, Email, null),
-      <<"to">> => maps:get(<<"to">>, Email, null),
-      <<"sentAt">> => maps:get(<<"sentAt">>, Email, null),
-      <<"subject">> => maps:get(<<"subject">>, Email, null),
-      <<"text">> => body_text(Db, EmailId)}.
+    #{
+        <<"id">> => EmailId,
+        <<"from">> => maps:get(<<"from">>, Email, null),
+        <<"to">> => maps:get(<<"to">>, Email, null),
+        <<"sentAt">> => maps:get(<<"sentAt">>, Email, null),
+        <<"subject">> => maps:get(<<"subject">>, Email, null),
+        <<"text">> => body_text(Db, EmailId)
+    }.
 
 body_text(Db, EmailId) ->
     case mailio_db:get(Db, <<?ID_TEXT, EmailId/binary>>) of
@@ -289,8 +343,11 @@ one_line(M) ->
     iolist_to_binary([<<"(earlier) ">>, From, <<" ">>, Date, <<": ">>, Subject]).
 
 participants(Messages) ->
-    lists:usort(lists:flatmap(
-        fun(M) -> addr_emails(maps:get(<<"from">>, M, null)) end, Messages)).
+    lists:usort(
+        lists:flatmap(
+            fun(M) -> addr_emails(maps:get(<<"from">>, M, null)) end, Messages
+        )
+    ).
 
 addr_emails(null) -> [];
 addr_emails(List) -> [E || #{<<"email">> := E} <- List].
@@ -312,11 +369,13 @@ system_kw(_) -> false.
 
 audit(Account, #{agent_id := AgentId}, Action, EmailIds) ->
     Db = mailio_account:db_name(Account),
-    Doc = #{<<"id">> => <<"audit/", (mailio_id:ulid())/binary>>,
-            <<"agentId">> => AgentId,
-            <<"action">> => action_bin(Action),
-            <<"emailIds">> => EmailIds,
-            <<"at">> => erlang:system_time(second)},
+    Doc = #{
+        <<"id">> => <<"audit/", (mailio_id:ulid())/binary>>,
+        <<"agentId">> => AgentId,
+        <<"action">> => action_bin(Action),
+        <<"emailIds">> => EmailIds,
+        <<"at">> => erlang:system_time(second)
+    },
     _ = mailio_db:put(Db, Doc),
     ok.
 

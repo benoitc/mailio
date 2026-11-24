@@ -13,10 +13,15 @@ email_id_is_26_chars_test() ->
 
 email_id_is_lowercase_base32_test() ->
     Id = mailio_id:email_id(<<"hello world">>),
-    ?assert(lists:all(fun(C) ->
-                          (C >= $0 andalso C =< $9) orelse
-                          (C >= $a andalso C =< $z)
-                      end, binary_to_list(Id))).
+    ?assert(
+        lists:all(
+            fun(C) ->
+                (C >= $0 andalso C =< $9) orelse
+                    (C >= $a andalso C =< $z)
+            end,
+            binary_to_list(Id)
+        )
+    ).
 
 ulid_is_26_chars_test() ->
     ?assertEqual(26, byte_size(mailio_id:ulid())).
@@ -40,5 +45,7 @@ blob_hex_is_64_chars_test() ->
     ?assertEqual(64, byte_size(mailio_id:blob_hex(<<"x">>))).
 
 msgid_hash_is_deterministic_test() ->
-    ?assertEqual(mailio_id:msgid_hash(<<"<a@b>">>),
-                 mailio_id:msgid_hash(<<"<a@b>">>)).
+    ?assertEqual(
+        mailio_id:msgid_hash(<<"<a@b>">>),
+        mailio_id:msgid_hash(<<"<a@b>">>)
+    ).
