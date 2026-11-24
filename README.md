@@ -1,5 +1,7 @@
 # mailio
 
+[![CI](https://github.com/benoitc/mailio/actions/workflows/ci.yml/badge.svg)](https://github.com/benoitc/mailio/actions/workflows/ci.yml)
+
 An Erlang/OTP umbrella for working with mail. This page tells you which app to use and how to run the checks. To see how the apps fit together and why, read [the architecture](docs/architecture.md).
 
 | App | What it is | Depends on |
