@@ -43,6 +43,9 @@
 }.
 
 -define(MAX_DEPTH, 50).
+%% Parts parsed per message; the rest are dropped with a `too_many_parts'
+%% defect. Overridable with the `mailio' app env `max_mime_parts'.
+-define(MAX_PARTS, 1000).
 
 %%====================================================================
 %% Parsing
@@ -51,9 +54,11 @@
 %% @doc Parse raw message bytes into a part tree.
 -spec parse(binary()) -> part().
 parse(Raw) when is_binary(Raw) ->
-    parse_part(Raw, 0).
+    Budget = counters:new(1, []),
+    parse_part(Raw, 0, Budget).
 
-parse_part(Raw, Depth) ->
+parse_part(Raw, Depth, Budget) ->
+    counters:add(Budget, 1, 1),
     {Headers, Body} = mailio_rfc5322:split(Raw),
     {Type, Sub, CtParams} = mailio_rfc5322:parse_content_type(
         mailio_rfc5322:header(<<"content-type">>, Headers)
@@ -75,10 +80,10 @@ parse_part(Raw, Depth) ->
         headers => Headers,
         defects => []
     },
-    classify(Base, Type, Sub, CtParams, Body, Depth).
+    classify(Base, Type, Sub, CtParams, Body, Depth, Budget).
 
 %% Multipart: split on the boundary, parse each sub-part.
-classify(Base, <<"multipart">>, _Sub, CtParams, Body, Depth) ->
+classify(Base, <<"multipart">>, _Sub, CtParams, Body, Depth, Budget) ->
     case maps:get(<<"boundary">>, CtParams, undefined) of
         undefined ->
             %% No boundary: treat the body as a single opaque leaf.
@@ -90,29 +95,51 @@ classify(Base, <<"multipart">>, _Sub, CtParams, Body, Depth) ->
                 {[], _Closed} ->
                     leaf(add_defect(Base, empty_multipart), Body);
                 {PartBins, Closed} ->
-                    Children = [parse_part(P, Depth + 1) || P <- PartBins],
+                    {Children, Dropped} = parse_children(PartBins, Depth + 1, Budget, []),
+                    B0 =
+                        case Dropped of
+                            true -> add_defect(Base, too_many_parts);
+                            false -> Base
+                        end,
                     B1 =
                         case Closed of
-                            true -> Base;
-                            false -> add_defect(Base, no_closing_boundary)
+                            true -> B0;
+                            false -> add_defect(B0, no_closing_boundary)
                         end,
                     B1#{parts => Children}
             end
     end;
 %% message/rfc822 (and partial/external are treated as opaque leaves).
-classify(Base, <<"message">>, <<"rfc822">>, _CtParams, Body, Depth) when
+classify(Base, <<"message">>, <<"rfc822">>, _CtParams, Body, Depth, Budget) when
     Depth < ?MAX_DEPTH
 ->
-    Decoded = mailio_mime_decode:decode_transfer(Body, maps:get(encoding, Base)),
-    Nested = parse_part(Decoded, Depth + 1),
-    Base#{parts => [Nested]};
+    case counters:get(Budget, 1) >= max_parts() of
+        true ->
+            leaf(add_defect(Base, too_many_parts), Body);
+        false ->
+            Decoded = mailio_mime_decode:decode_transfer(Body, maps:get(encoding, Base)),
+            Nested = parse_part(Decoded, Depth + 1, Budget),
+            Base#{parts => [Nested]}
+    end;
 %% Leaf part: decode transfer encoding.
-classify(Base, _Type, _Sub, _CtParams, Body, _Depth) ->
+classify(Base, _Type, _Sub, _CtParams, Body, _Depth, _Budget) ->
     Decoded = mailio_mime_decode:decode_transfer(Body, maps:get(encoding, Base)),
     leaf(Base, Decoded).
 
+%% Parse children in order until the part budget is spent.
+parse_children([], _Depth, _Budget, Acc) ->
+    {lists:reverse(Acc), false};
+parse_children([P | Rest], Depth, Budget, Acc) ->
+    case counters:get(Budget, 1) >= max_parts() of
+        true -> {lists:reverse(Acc), true};
+        false -> parse_children(Rest, Depth, Budget, [parse_part(P, Depth, Budget) | Acc])
+    end.
+
 leaf(Base, Body) ->
     Base#{body => Body}.
+
+max_parts() ->
+    application:get_env(mailio, max_mime_parts, ?MAX_PARTS).
 
 add_defect(#{defects := D} = Part, Defect) ->
     Part#{defects => [Defect | D]}.

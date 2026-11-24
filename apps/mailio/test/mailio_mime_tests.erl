@@ -112,3 +112,38 @@ empty_input_never_crashes_test() ->
     P = mailio_mime:parse(<<>>),
     ?assertEqual(<<"text">>, mailio_mime:type(P)),
     ?assertEqual(<<>>, mailio_mime:body(P)).
+
+%%====================================================================
+%% Part budget
+%%====================================================================
+
+count_parts(P) ->
+    1 + lists:sum([count_parts(C) || C <- maps:get(parts, P, [])]).
+
+flat_multipart(N) ->
+    Parts = [<<"--b\r\nContent-Type: text/plain\r\n\r\np\r\n">> || _ <- lists:seq(1, N)],
+    iolist_to_binary([
+        <<"Content-Type: multipart/mixed; boundary=b\r\n\r\n">>, Parts, <<"--b--\r\n">>
+    ]).
+
+wide_message_stays_within_the_part_budget_test() ->
+    P = mailio_mime:parse(flat_multipart(5000)),
+    ?assertEqual(1000, count_parts(P)),
+    ?assert(lists:member(too_many_parts, mailio_mime:defects(P))).
+
+nested_message_is_bounded_too_test() ->
+    Inner = flat_multipart(600),
+    Outer = iolist_to_binary([
+        <<"Content-Type: multipart/mixed; boundary=o\r\n\r\n">>,
+        [
+            [<<"--o\r\nContent-Type: message/rfc822\r\n\r\n">>, Inner, <<"\r\n">>]
+         || _ <- lists:seq(1, 10)
+        ],
+        <<"--o--\r\n">>
+    ]),
+    ?assert(count_parts(mailio_mime:parse(Outer)) =< 1000).
+
+message_under_the_budget_is_untouched_test() ->
+    P = mailio_mime:parse(flat_multipart(20)),
+    ?assertEqual(21, count_parts(P)),
+    ?assertNot(lists:member(too_many_parts, mailio_mime:defects(P))).
