@@ -5,8 +5,19 @@
 %%% after the body was sent, the record becomes outcome_unknown and is never
 %%% resent automatically. Records are persisted before the connection is
 %%% opened, so a crash in between also ends as outcome_unknown.
+%%%
+%%% Submissions run in supervised workers that this server monitors. A worker
+%%% that crashes or runs past `send_timeout' (milliseconds, default 5 minutes)
+%%% ends the send as outcome_unknown: the body may already have gone out, so
+%%% it is never retried automatically. At most `max_concurrent_sends' (default
+%%% 8) run at once; another is refused with `too_many_sends' before anything
+%%% is recorded. `smtp_module' (default mailio_mcp_smtp) is the submission
+%%% module, replaceable in tests.
 -module(mailio_mcp_send).
 -behaviour(gen_server).
+
+-define(DEFAULT_SEND_TIMEOUT, 300000).
+-define(DEFAULT_MAX_SENDS, 8).
 
 -export([start_link/0, init/1, handle_call/3, handle_cast/2, handle_info/2]).
 -export([submit/4, status/2]).
@@ -54,7 +65,7 @@ init([]) ->
         end,
         Fix
     ),
-    {ok, #{waiters => #{}}}.
+    {ok, #{waiters => #{}, workers => #{}}}.
 
 handle_call({submit, Principal, DraftId, Revision, Key}, From, #{waiters := W} = S) ->
     maybe
@@ -102,7 +113,13 @@ existing(#{status := failed_temporary}, RevKey, From, W, S, D, Key, P) ->
 existing(Rec, _RevKey, _From, _W, S, D, _, _) ->
     {reply, {ok, out(Rec, D)}, S}.
 
-start(D, RevKey, IdemKey, Hash, Key, Principal, From, W, S) ->
+start(D, RevKey, IdemKey, Hash, Key, Principal, From, W, #{workers := Ws} = S) ->
+    case map_size(Ws) >= max_sends() of
+        true -> {reply, {error, too_many_sends}, S};
+        false -> start_send(D, RevKey, IdemKey, Hash, Key, Principal, From, W, S)
+    end.
+
+start_send(D, RevKey, IdemKey, Hash, Key, Principal, From, W, #{workers := Ws} = S) ->
     AccId = maps:get(account, D),
     Rec = #{
         status => sending,
@@ -120,13 +137,62 @@ start(D, RevKey, IdemKey, Hash, Key, Principal, From, W, S) ->
     Self = self(),
     {ok, Account} = mailio_mcp_config:account(AccId),
     {Raw, Rcpts, EnvFrom} = mailio_mcp_draft:build(D),
-    spawn(fun() ->
-        Result = mailio_mcp_smtp:submit(Account, EnvFrom, Rcpts, Raw),
-        Self ! {done, RevKey, Result}
-    end),
-    {noreply, S#{waiters := maps:update_with(RevKey, fun(L) -> [From | L] end, [From], W)}}.
+    Smtp = application:get_env(mailio_mcp, smtp_module, mailio_mcp_smtp),
+    case
+        mailio_mcp_send_workers:start_worker(fun() ->
+            Result = Smtp:submit(Account, EnvFrom, Rcpts, Raw),
+            Self ! {done, RevKey, Result}
+        end)
+    of
+        {ok, Pid} ->
+            MRef = erlang:monitor(process, Pid),
+            Timer = erlang:send_after(send_timeout(), self(), {send_timeout, RevKey}),
+            Ws1 = Ws#{RevKey => #{pid => Pid, mref => MRef, timer => Timer}},
+            {noreply, S#{
+                waiters := maps:update_with(RevKey, fun(L) -> [From | L] end, [From], W),
+                workers := Ws1
+            }};
+        {error, Reason} ->
+            %% No worker was started, so nothing was submitted.
+            {ok, Rec} = mailio_mcp_store:get(send, RevKey),
+            mailio_mcp_store:put(
+                send, RevKey, Rec#{status => failed_temporary, reason => fmt(Reason)}
+            ),
+            {reply, {error, {send_unavailable, fmt(Reason)}}, S}
+    end.
 
-handle_info({done, RevKey, Result}, #{waiters := W} = S) ->
+send_timeout() -> application:get_env(mailio_mcp, send_timeout, ?DEFAULT_SEND_TIMEOUT).
+max_sends() -> application:get_env(mailio_mcp, max_concurrent_sends, ?DEFAULT_MAX_SENDS).
+
+handle_info({done, RevKey, Result}, #{workers := Ws} = S) ->
+    case Ws of
+        #{RevKey := _} ->
+            handle_info({finished, RevKey, Result}, S#{workers := release(RevKey, Ws, false)});
+        _ ->
+            %% a late answer from a worker already given up on
+            {noreply, S}
+    end;
+handle_info({send_timeout, RevKey}, #{workers := Ws} = S) ->
+    case Ws of
+        #{RevKey := _} ->
+            handle_info(
+                {finished, RevKey, {error, {unknown, send_timeout}}},
+                S#{workers := release(RevKey, Ws, true)}
+            );
+        _ ->
+            {noreply, S}
+    end;
+handle_info({'DOWN', MRef, process, _Pid, Reason}, #{workers := Ws} = S) ->
+    case [K || {K, #{mref := M}} <- maps:to_list(Ws), M =:= MRef] of
+        [RevKey] ->
+            handle_info(
+                {finished, RevKey, {error, {unknown, {worker_down, Reason}}}},
+                S#{workers := release(RevKey, Ws, false)}
+            );
+        [] ->
+            {noreply, S}
+    end;
+handle_info({finished, RevKey, Result}, #{waiters := W} = S) ->
     {ok, Rec} = mailio_mcp_store:get(send, RevKey),
     Rec2 = finish(Rec, Result),
     mailio_mcp_store:put(send, RevKey, Rec2),
@@ -144,6 +210,18 @@ handle_info(_, S) ->
     {noreply, S}.
 
 handle_cast(_, S) -> {noreply, S}.
+
+%% Forget a worker: stop its monitor and timer, and kill it when asked.
+release(RevKey, Ws, Kill) ->
+    case maps:take(RevKey, Ws) of
+        {#{pid := Pid, mref := MRef, timer := Timer}, Ws1} ->
+            erlang:demonitor(MRef, [flush]),
+            _ = erlang:cancel_timer(Timer),
+            Kill andalso exit(Pid, kill),
+            Ws1;
+        error ->
+            Ws
+    end.
 
 finish(Rec, {ok, #{accepted := Acc, rejected := Rej, reply := Reply}}) ->
     Rec#{
