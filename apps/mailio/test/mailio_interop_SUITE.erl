@@ -81,60 +81,6 @@ groups() ->
 %% Servers
 %%====================================================================
 
-%% What each server offers. A key that is missing means "not offered", and the
-%% case that needs it is skipped for that server.
-profile(dovecot) ->
-    #{
-        name => dovecot,
-        user => <<"testuser">>,
-        pass => <<"testpass">>,
-        imap => 31143,
-        imap_tls => 31993,
-        imap_starttls => true,
-        exact_sizes => true,
-        pop3_stls => false,
-        %% the host name in the certificate
-        tls_host => <<"localhost">>,
-        pop3 => 31110,
-        pop3_tls => 31995,
-        %% the private CA of apps/mailio/test/mailpit/gen-certs.sh
-        verify => ca
-    };
-profile(greenmail) ->
-    #{
-        name => greenmail,
-        user => <<"alice">>,
-        pass => <<"secret">>,
-        address => <<"alice@example.test">>,
-        imap => 3143,
-        imap_tls => 3993,
-        pop3 => 3110,
-        pop3_tls => 3995,
-        smtp => 3025,
-        smtp_tls => 3465,
-        %% GreenMail makes a self-signed certificate on every start
-        verify => none
-    };
-%% Stalwart: apps/mailio/test/stalwart/setup.sh. It refuses a plain login, so
-%% every connection upgrades with STARTTLS or STLS first.
-profile(stalwart) ->
-    #{
-        name => stalwart,
-        user => <<"alice@interop.test">>,
-        pass => <<"interop-secret">>,
-        address => <<"alice@interop.test">>,
-        plain_tls => starttls,
-        imap => 32143,
-        imap_tls => 32993,
-        imap_starttls => true,
-        pop3 => 32110,
-        pop3_tls => 32995,
-        pop3_stls => true,
-        smtp => 32587,
-        smtp_tls => 32465,
-        verify => none
-    }.
-
 init_per_suite(Config) ->
     {ok, _} = application:ensure_all_started(ssl),
     Config.
@@ -143,8 +89,8 @@ end_per_suite(_Config) ->
     ok.
 
 init_per_group(Name, Config) ->
-    P = profile(Name),
-    case reachable(maps:get(imap, P)) of
+    P = mailio_servers:profile(Name),
+    case mailio_servers:reachable(maps:get(imap, P)) of
         false ->
             {skip,
                 lists:flatten(
@@ -164,15 +110,6 @@ init_per_testcase(_Case, Config) ->
     P = ?config(profile, Config),
     purge(P),
     Config.
-
-reachable(Port) ->
-    case gen_tcp:connect("127.0.0.1", Port, [binary], 500) of
-        {ok, S} ->
-            gen_tcp:close(S),
-            true;
-        _ ->
-            false
-    end.
 
 wait_ready(_P, 0) ->
     timeout;
@@ -507,10 +444,7 @@ smtp_implicit_tls(Config) ->
 tls_opts(#{verify := none}) ->
     #{verify => verify_none};
 tls_opts(#{verify := ca}) ->
-    #{verify => verify_peer, cacertfile => ca_file()}.
-
-ca_file() ->
-    filename:join([filename:dirname(?FILE), "mailpit", "certs", "ca.pem"]).
+    #{verify => verify_peer, cacertfile => mailio_servers:ca_file()}.
 
 imap_cfg(P, Extra) ->
     maps:merge(

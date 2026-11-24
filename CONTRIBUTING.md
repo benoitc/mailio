@@ -123,7 +123,10 @@ Then the suites against real servers that your change touches (see AGENTS.md).
 
 ```bash
 rebar3 ct --suite apps/mailio/test/mailio_interop_SUITE
+rebar3 ct --suite apps/mailio_store/test/mailio_store_interop_SUITE
 ```
+
+The second suite is the store syncing from the same servers: backfill of real messages (UTF-8 subject, an attachment), a second pass that must report nothing, flag changes, removals (by QRESYNC and by a reconcile pass), and an IDLE push. The server profiles live in `test_support/mailio_servers.erl`.
 
 Each case takes a server profile (ports, user, how its certificate is verified), so a new server is one more profile and one more group, not new cases. The suite covers: a message surviving render, SMTP, delivery, IMAP or POP3 and parse unchanged (UTF-8, a 300 KB attachment, a line that starts with a dot); reading never marking mail as seen; wrong passwords not being retried; IDLE waking for new mail; TLS being verified and an untrusted certificate refused; the size limits holding against a server that is not ours; and the sync adapter reporting new mail, changed flags and expunges the way each server's extensions allow.
 

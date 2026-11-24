@@ -133,8 +133,9 @@ jobs:
           rebar3 ct --suite apps/mailio/test/mailio_interop_SUITE
           rebar3 ct --suite apps/mailio/test/mailio_smtp_mailpit_SUITE
 
-      # mailio_store has no real-server suite yet: its suites in the tests job
-      # use scripted servers. These two run the mailio_mcp app.
+      - name: Store syncing from real servers
+        run: rebar3 ct --suite apps/mailio_store/test/mailio_store_interop_SUITE
+
       - name: MCP server end to end
         run: |
           rebar3 ct --suite apps/mailio_mcp/test/mailio_mcp_e2e_SUITE
