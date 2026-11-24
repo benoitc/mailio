@@ -4,6 +4,16 @@ This page shows how to build the mailio MCP server as a container image and run 
 
 The image holds the server and nothing else: it needs no database, and it keeps its drafts, checkpoints and send records in `/data`. It runs as an unprivileged user.
 
+## Get the image
+
+CI publishes the image to GitHub's container registry on every change to `main`, for `linux/amd64` and `linux/arm64`:
+
+```bash
+docker pull ghcr.io/benoitc/mailio-mcp:latest
+```
+
+The examples below use the name `mailio-mcp`; tag the pulled image with `docker tag ghcr.io/benoitc/mailio-mcp:latest mailio-mcp`, or build it yourself.
+
 ## Build the image
 
 From the repository root:
@@ -86,4 +96,4 @@ The script starts the image with the example config, checks that a request witho
 
 - A missing or unreadable config file stops the container at start with the file name in the message. Check `docker logs`.
 - Mount `/data` as a volume, or drafts and checkpoints are lost when the container is removed. Send records live there too, and they are what stops a message from being sent twice.
-- The image is not published anywhere. Build it yourself, or push it to your own registry.
+- `latest` follows `main`. Each build is also tagged with the short commit, such as `sha-97016d0`, so you can pin one.

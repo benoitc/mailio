@@ -6,7 +6,8 @@
 
 - The MCP server can run in a container. A Dockerfile, an example config and a
   Compose file are in the repository, with a page that explains how to run it
-  over HTTP or stdio. The image is not published.
+  over HTTP or stdio. CI publishes the image to the GitHub container registry
+  after every change to the main branch.
 - The HTTP settings of the MCP server can now name the address as text and read
   the token secret from an environment variable or a file, so a config file
   does not have to hold a secret.

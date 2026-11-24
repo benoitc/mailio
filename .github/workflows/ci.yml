@@ -191,3 +191,48 @@ jobs:
           (printf '%s\n' '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"ci","version":"1"}}}'; sleep 8) \
             | docker run -i --rm -e MAILIO_MCP_CONFIG= mailio-mcp stdio 2>/dev/null \
             | grep -q '"protocolVersion"'
+
+  # Publish the image once everything else has passed, from main only.
+  publish-image:
+    name: Publish the container image
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    needs: [checks, tests, interop, package, container]
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: docker/setup-qemu-action@v3
+
+      - uses: docker/setup-buildx-action@v3
+
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      # The source label ties the package to this repository.
+      - id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ghcr.io/${{ github.repository_owner }}/mailio-mcp
+          tags: |
+            type=raw,value=latest
+            type=sha,format=short
+          labels: |
+            org.opencontainers.image.title=mailio-mcp
+            org.opencontainers.image.description=MCP server for mail: find mail, read the part you need, draft and send
+            org.opencontainers.image.licenses=Apache-2.0
+
+      - uses: docker/build-push-action@v6
+        with:
+          context: .
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
