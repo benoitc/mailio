@@ -15,6 +15,9 @@
     utf7_mailbox_name/1,
     changes_with_qresync/1,
     changes_fall_back_without_a_modseq/1,
+    idle_times_out/1,
+    idle_wakes_for_new_mail_flags_and_expunges/1,
+    idle_sees_a_change_made_before_it_started/1,
     implicit_tls_verified/1,
     starttls_verified/1,
     untrusted_certificate_refused/1,
@@ -33,6 +36,9 @@ all() ->
         utf7_mailbox_name,
         changes_with_qresync,
         changes_fall_back_without_a_modseq,
+        idle_times_out,
+        idle_wakes_for_new_mail_flags_and_expunges,
+        idle_sees_a_change_made_before_it_started,
         implicit_tls_verified,
         starttls_verified,
         untrusted_certificate_refused,
@@ -382,6 +388,82 @@ changes_fall_back_without_a_modseq(_) ->
     [#{uid := U}] = maps:get(updated, R),
     1 = counter(changes_full),
     0 = counter(changes_qresync),
+    ok.
+
+wait(Snap, Ms) -> mailio_mcp_imap:wait_for_change(account(), <<"INBOX">>, Snap, Ms).
+
+timed(Fun) ->
+    T0 = erlang:monotonic_time(millisecond),
+    R = Fun(),
+    {R, erlang:monotonic_time(millisecond) - T0}.
+
+baseline() ->
+    {ok, #{snapshot := S}} = changes(undefined),
+    S.
+
+idle_times_out(_) ->
+    seed_three(),
+    S = baseline(),
+    {timeout, Ms} = timed(fun() -> wait(S, 1500) end),
+    true = Ms >= 1400,
+    1 = counter(idle_timeout),
+    ok.
+
+idle_wakes_for_new_mail_flags_and_expunges(_) ->
+    seed_three(),
+    [U1, U2, _] = all_uids(),
+    S0 = baseline(),
+    %% new mail from another connection while the wait is in IDLE
+    spawn_link(fun() ->
+        timer:sleep(700),
+        append(
+            <<"INBOX">>,
+            <<>>,
+            <<"14-Mar-2026 10:00:00 +0000">>,
+            msg(#{from => <<"d@x.test">>, to => <<"me@x.test">>, subject => <<"Pushed">>})
+        )
+    end),
+    {changed, Ms1} = timed(fun() -> wait(S0, 20000) end),
+    true = Ms1 < 10000,
+    {ok, #{snapshot := S1, added := [#{subject := <<"Pushed">>}]}} = changes(S0),
+    %% a flag change
+    spawn_link(fun() ->
+        timer:sleep(700),
+        with_conn(fun(C) ->
+            run(C, [<<"SELECT INBOX">>]),
+            run(C, [<<"UID STORE ">>, integer_to_binary(U1), <<" +FLAGS (\\Seen)">>])
+        end)
+    end),
+    {changed, Ms2} = timed(fun() -> wait(S1, 20000) end),
+    true = Ms2 < 10000,
+    {ok, #{snapshot := S2}} = changes(S1),
+    %% an expunge
+    spawn_link(fun() ->
+        timer:sleep(700),
+        with_conn(fun(C) ->
+            run(C, [<<"SELECT INBOX">>]),
+            run(C, [<<"UID STORE ">>, integer_to_binary(U2), <<" +FLAGS (\\Deleted)">>]),
+            run(C, [<<"EXPUNGE">>])
+        end)
+    end),
+    {changed, Ms3} = timed(fun() -> wait(S2, 20000) end),
+    true = Ms3 < 10000,
+    3 = counter(idle_woken),
+    ok.
+
+%% The checkpoint is compared before IDLE starts, so a change made just
+%% before the wait is reported at once.
+idle_sees_a_change_made_before_it_started(_) ->
+    seed_three(),
+    S = baseline(),
+    append(
+        <<"INBOX">>,
+        <<>>,
+        <<"15-Mar-2026 10:00:00 +0000">>,
+        msg(#{from => <<"e@x.test">>, to => <<"me@x.test">>, subject => <<"Earlier">>})
+    ),
+    {changed, Ms} = timed(fun() -> wait(S, 20000) end),
+    true = Ms < 5000,
     ok.
 
 implicit_tls_verified(Config) ->

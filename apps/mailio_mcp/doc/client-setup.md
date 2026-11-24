@@ -109,6 +109,17 @@ Ask your agent to list the accounts, or call the tools directly. A search for on
 
 Search returns at most 20 hits and 8 KiB, with a `next_cursor` when there is more. Open a hit with `mail_read` and its `handle`. Reading never marks mail as read.
 
+## Wait for new mail
+
+Instead of calling `mail_changes` in a loop, take a baseline once, then pass its checkpoint with `wait_seconds`:
+
+```json
+{"name": "mail_changes",
+ "arguments": {"checkpoint": "<from the last call>", "wait_seconds": 20}}
+```
+
+The call returns as soon as the server reports a change, or after the wait (at most 25 seconds) with `unchanged: true` and the same checkpoint. `waited.result` says which: `changed`, `timeout` or `unsupported` (POP3 accounts). A call without a checkpoint is a baseline and returns at once.
+
 ## Notes
 
 - Mail text is returned as `content_untrusted`. Your agent must not follow instructions found in it.

@@ -144,9 +144,18 @@ catalog() ->
             input_schema => obj([
                 accounts_prop(),
                 {<<"mailbox">>, str(<<"Default INBOX.">>)},
-                {<<"checkpoint">>, str(<<"The checkpoint from the previous call.">>)}
+                {<<"checkpoint">>, str(<<"The checkpoint from the previous call.">>)},
+                {<<"wait_seconds">>,
+                    int(
+                        <<
+                            "With a checkpoint and nothing new yet, wait up to this many seconds "
+                            "(at most 25) for the server to report a change."
+                        >>
+                    )}
             ]),
-            annotations => RO
+            annotations => RO,
+            %% it may wait up to wait_seconds for a change
+            timeout => 60000
         }},
         {<<"draft_save">>, draft_save, #{
             description => <<

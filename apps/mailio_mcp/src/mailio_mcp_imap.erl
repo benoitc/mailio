@@ -11,6 +11,7 @@
     fetch_part/4,
     thread/3,
     changes/3,
+    wait_for_change/4,
     fingerprint/3,
     excerpts/2
 ]).
@@ -846,6 +847,52 @@ changes(#{id := Id} = Account, Box, Prev) ->
                 counted(Id, changes_full, plain_changes(C, Account, Box, Prev))
         end
     end).
+
+%% @doc Wait until the mailbox differs from the checkpoint `Prev', for at most
+%% `Timeout' milliseconds, without polling: the server is held in IDLE and
+%% tells us. The checkpoint is compared first, so a change that happened
+%% before IDLE started is not missed. `unsupported' when the server has no
+%% IDLE or there is no checkpoint to compare with.
+-spec wait_for_change(map(), binary(), map() | undefined, non_neg_integer()) ->
+    changed | timeout | unsupported | {error, term()}.
+wait_for_change(_Account, _Box, undefined, _Timeout) ->
+    unsupported;
+wait_for_change(#{id := Id} = Account, Box, Prev, Timeout) ->
+    with_conn(Account, fun(C) ->
+        case mailio_mcp_imap_io:has_cap(C, <<"IDLE">>) of
+            false ->
+                unsupported;
+            true ->
+                _ = enable_modseq(C),
+                case examine(C, Box) of
+                    {ok, Sel} ->
+                        Result =
+                            case moved_on(Sel, Prev) of
+                                true -> changed;
+                                false -> mailio_mcp_imap_io:idle_wait(C, Timeout)
+                            end,
+                        case Result of
+                            changed -> mailio_mcp_stats:bump(Id, idle_woken, 1, 0);
+                            timeout -> mailio_mcp_stats:bump(Id, idle_timeout, 1, 0);
+                            _ -> ok
+                        end,
+                        Result;
+                    {error, _} = E ->
+                        E
+                end
+        end
+    end).
+
+%% Has the mailbox moved past what the checkpoint recorded?
+moved_on(Sel, Prev) ->
+    maps:get(uv, Sel) =/= maps:get(uv, Prev, undefined) orelse
+        maps:get(uidnext, Sel) =/= maps:get(uidnext, Prev, undefined) orelse
+        maps:get(exists, Sel) =/= maps:get(exists, Prev, undefined) orelse
+        modseq_moved(maps:get(modseq, Sel, undefined), maps:get(modseq, Prev, undefined)).
+
+modseq_moved(undefined, _) -> false;
+modseq_moved(_, undefined) -> false;
+modseq_moved(New, Old) -> New =/= Old.
 
 %% Which way a call to mail_changes was answered, for the stats counters.
 counted(Id, Kind, {ok, _} = Result) ->

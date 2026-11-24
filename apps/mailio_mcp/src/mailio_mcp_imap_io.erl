@@ -5,7 +5,7 @@
 %%% library's parsed untagged responses.
 -module(mailio_mcp_imap_io).
 
--export([open/1, close/1, cmd/2, caps/1, has_cap/2, quote/1]).
+-export([open/1, close/1, cmd/2, caps/1, has_cap/2, quote/1, idle_wait/2]).
 -export([utf7_decode/1, utf7_encode/1, tokens_to_term/1]).
 
 -type conn() :: #{pid := pid(), account := binary(), caps := [binary()]}.
@@ -87,6 +87,37 @@ cmd(#{pid := Pid, account := Id}, Parts) ->
         exit:{timeout, _} -> {error, timeout};
         exit:{noproc, _} -> {error, connection_lost};
         exit:Reason -> {error, Reason}
+    end.
+
+%% @doc Hold the selected mailbox in IDLE until the server reports a change or
+%% `Timeout' milliseconds pass. Returns `changed' or `timeout'. The mailbox
+%% must already be selected.
+-spec idle_wait(conn(), non_neg_integer()) -> changed | timeout | {error, term()}.
+idle_wait(#{pid := Pid, account := Id}, Timeout) ->
+    case mailio_imap_conn:idle_start(Pid, self()) of
+        ok ->
+            mailio_mcp_stats:bump(Id, imap, 1, 0),
+            Result = wait_event(Pid, Timeout),
+            _ = mailio_imap_conn:idle_stop(Pid),
+            Result;
+        {error, _} = E ->
+            E
+    end.
+
+%% Anything the server volunteers about the mailbox wakes the waiter, except
+%% plain status lines (keep-alives). Waking early only costs one comparison.
+wait_event(Pid, Timeout) ->
+    Deadline = erlang:monotonic_time(millisecond) + Timeout,
+    wait_event(Pid, Deadline, Timeout).
+
+wait_event(Pid, Deadline, Left) ->
+    receive
+        {imap_idle_event, Pid, {status_resp, _, _, _}} ->
+            wait_event(Pid, Deadline, max(0, Deadline - erlang:monotonic_time(millisecond)));
+        {imap_idle_event, Pid, _Event} ->
+            changed
+    after Left ->
+        timeout
     end.
 
 %% The command as the library connection wants it: the first chunk up to a

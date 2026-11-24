@@ -10,6 +10,7 @@
 -export([
     paris_invoices/1,
     changes_and_restart/1,
+    changes_wait_for_mail/1,
     reply_from_alias/1,
     lost_smtp_ack/1,
     read_only_agent/1,
@@ -22,6 +23,7 @@ all() ->
     [
         paris_invoices,
         changes_and_restart,
+        changes_wait_for_mail,
         reply_from_alias,
         lost_smtp_ack,
         read_only_agent,
@@ -440,6 +442,65 @@ changes_and_restart(_Config) ->
     }),
     true = binary:match(Text, <<"without a checkpoint">>) =/= nomatch,
     ok.
+
+%%====================================================================
+%% 2b. Wait for the next change instead of polling
+
+changes_wait_for_mail(_Config) ->
+    purge("carol"),
+    C = mailio_mcp_lib:client(<<"assistant">>),
+    Q = #{<<"account_ids">> => [<<"work2">>]},
+    %% the baseline returns at once, whatever wait_seconds says
+    {Base, BaseMs} = timed(fun() ->
+        ok(mailio_mcp_lib:call(C, <<"mail_changes">>, Q#{<<"wait_seconds">> => 20}))
+    end),
+    true = BaseMs < 5000,
+    false = maps:is_key(<<"waited">>, Base),
+    Ck = maps:get(<<"checkpoint">>, Base),
+    %% nothing arrives: the call waits its time and says so, with the same checkpoint
+    {Quiet, QuietMs} = timed(fun() ->
+        ok(
+            mailio_mcp_lib:call(C, <<"mail_changes">>, Q#{
+                <<"checkpoint">> => Ck, <<"wait_seconds">> => 2
+            })
+        )
+    end),
+    true = QuietMs >= 1800,
+    true = QuietMs < 8000,
+    #{<<"seconds">> := 2, <<"result">> := <<"timeout">>} = maps:get(<<"waited">>, Quiet),
+    #{<<"unchanged">> := true, <<"checkpoint">> := Ck} = Quiet,
+    %% mail arrives from another connection while the call waits: it returns
+    %% as soon as the server says so, with the new message
+    spawn_link(fun() ->
+        timer:sleep(1500),
+        seed(
+            "carol",
+            <<"20-Apr-2026 10:00:00 +0000">>,
+            mailio_mcp_lib:msg(#{
+                from => <<"x@y.test">>,
+                to => <<"carol@example.test">>,
+                subject => <<"pushed">>,
+                msgid => <<"<w1@y>">>
+            })
+        )
+    end),
+    {Woken, WokenMs} = timed(fun() ->
+        ok(
+            mailio_mcp_lib:call(C, <<"mail_changes">>, Q#{
+                <<"checkpoint">> => Ck, <<"wait_seconds">> => 20
+            })
+        )
+    end),
+    true = WokenMs < 12000,
+    #{<<"result">> := <<"changed">>} = maps:get(<<"waited">>, Woken),
+    [#{<<"subject">> := <<"pushed">>}] = maps:get(<<"added">>, Woken),
+    false = (maps:get(<<"checkpoint">>, Woken) =:= Ck),
+    ok.
+
+timed(Fun) ->
+    T0 = erlang:monotonic_time(millisecond),
+    R = Fun(),
+    {R, erlang:monotonic_time(millisecond) - T0}.
 
 %%====================================================================
 %% 3. Read the latest reply of a long thread, draft from the support alias
@@ -880,6 +941,16 @@ pop3_adapter(_Config) ->
         })
     ),
     #{<<"unchanged">> := true} = Same,
+    %% POP3 has no push: asking to wait returns at once and says why
+    {PopWait, PopMs} = timed(fun() ->
+        ok(
+            mailio_mcp_lib:call(C, <<"mail_changes">>, #{
+                <<"checkpoint">> => maps:get(<<"checkpoint">>, Ch), <<"wait_seconds">> => 10
+            })
+        )
+    end),
+    true = PopMs < 5000,
+    #{<<"result">> := <<"unsupported">>} = maps:get(<<"waited">>, PopWait),
     %% a reused UIDL gets an ordinal so both copies keep an identity
     [{1, <<"u1">>}, {2, <<"u1#1">>}, {3, <<"u2">>}] = mailio_pop3:unique_ids([
         {1, <<"u1">>}, {2, <<"u1">>}, {3, <<"u2">>}

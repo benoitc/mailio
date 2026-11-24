@@ -125,3 +125,83 @@ uidvalidity_change_test() ->
         Snap = (baseline(Acc))#{uv => 999},
         ?assertEqual({error, checkpoint_expired}, changes(Acc, Snap))
     end).
+
+%%--------------------------------------------------------------------
+%% Waiting for a change with IDLE
+
+wait(Acc, Prev, Ms) -> mailio_mcp_imap:wait_for_change(Acc, <<"INBOX">>, Prev, Ms).
+
+timed(Fun) ->
+    T0 = erlang:monotonic_time(millisecond),
+    R = Fun(),
+    {R, erlang:monotonic_time(millisecond) - T0}.
+
+%% Nothing happens: the wait runs its time out and says so.
+idle_times_out_test() ->
+    with(fun(_Srv, Acc) ->
+        Snap = baseline(Acc),
+        {R, Ms} = timed(fun() -> wait(Acc, Snap, 600) end),
+        ?assertEqual(timeout, R),
+        ?assert(Ms >= 550)
+    end).
+
+idle_wakes_for_a_new_message_test() ->
+    with(fun(Srv, Acc) ->
+        Snap = baseline(Acc),
+        spawn_link(fun() ->
+            timer:sleep(300),
+            ok = mailio_fake_imap:deliver(Srv, <<"Wake up">>)
+        end),
+        {R, Ms} = timed(fun() -> wait(Acc, Snap, 10000) end),
+        ?assertEqual(changed, R),
+        ?assert(Ms < 5000),
+        %% and the change is then there to read
+        {ok, Ch} = changes(Acc, Snap),
+        ?assertEqual(1, maps:get(added_total, Ch))
+    end).
+
+idle_wakes_for_a_flag_change_and_an_expunge_test() ->
+    with(fun(Srv, Acc) ->
+        S0 = baseline(Acc),
+        spawn_link(fun() ->
+            timer:sleep(300),
+            ok = mailio_fake_imap:set_flags(Srv, 101, [<<"\\Seen">>])
+        end),
+        ?assertMatch({changed, T} when T < 5000, timed(fun() -> wait(Acc, S0, 10000) end)),
+        {ok, #{snapshot := S1}} = changes(Acc, S0),
+        spawn_link(fun() ->
+            timer:sleep(300),
+            ok = mailio_fake_imap:expunge(Srv, 100)
+        end),
+        ?assertMatch({changed, T} when T < 5000, timed(fun() -> wait(Acc, S1, 10000) end))
+    end).
+
+%% A change that happened before the wait began is reported at once, not
+%% after the time out: the checkpoint is compared before IDLE starts.
+change_before_the_wait_is_not_missed_test() ->
+    with(fun(Srv, Acc) ->
+        Snap = baseline(Acc),
+        ok = mailio_fake_imap:deliver(Srv, <<"Already there">>),
+        {R, Ms} = timed(fun() -> wait(Acc, Snap, 10000) end),
+        ?assertEqual(changed, R),
+        ?assert(Ms < 3000),
+        ok = mailio_fake_imap:set_flags(Srv, 101, [<<"\\Seen">>]),
+        {ok, #{snapshot := S1}} = changes(Acc, Snap),
+        ok = mailio_fake_imap:set_flags(Srv, 100, [<<"\\Flagged">>]),
+        {R2, Ms2} = timed(fun() -> wait(Acc, S1, 10000) end),
+        ?assertEqual(changed, R2),
+        ?assert(Ms2 < 3000)
+    end).
+
+%% Without a checkpoint there is nothing to wait for.
+no_checkpoint_is_unsupported_test() ->
+    with(fun(_Srv, Acc) ->
+        ?assertEqual(
+            unsupported, mailio_mcp_adapter:wait_for_change(Acc, <<"INBOX">>, undefined, 1000)
+        )
+    end).
+
+%% An adapter with no push (POP3) says so instead of sleeping.
+pop3_has_no_idle_test() ->
+    Acc = #{incoming => #{protocol => pop3}},
+    ?assertEqual(unsupported, mailio_mcp_adapter:wait_for_change(Acc, <<"INBOX">>, #{}, 1000)).

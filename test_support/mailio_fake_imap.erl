@@ -125,11 +125,13 @@ loop(Sock, State, Ref) ->
 
 handle_control(_Sock, Ref, {get_flags, Uid}, State) ->
     {{flags, Ref, flags_for(State, Uid)}, State};
-handle_control(_Sock, Ref, {set_flags, Uid, Flags}, #{messages := Ms} = State) ->
+handle_control(Sock, Ref, {set_flags, Uid, Flags}, #{messages := Ms} = State) ->
     Next = highestmodseq(State) + 1,
     Ms1 = [case M of {Seq, U, _F, _MS, Raw} when U =:= Uid -> {Seq, U, Flags, Next, Raw};
                      _ -> M end || M <- Ms],
-    {{ok, Ref, ok}, State#{messages => Ms1}};
+    State1 = State#{messages => Ms1},
+    notify_flags(Sock, State1, Uid),
+    {{ok, Ref, ok}, State1};
 handle_control(Sock, Ref, {deliver, Subject}, #{messages := Ms, uidnext := Uid} = State) ->
     Next = highestmodseq(State) + 1,
     Seq = length(Ms) + 1,
@@ -149,6 +151,15 @@ handle_control(Sock, Ref, {expunge, Uid}, #{messages := Ms, vanished := V} = Sta
         false ->
             {{ok, Ref, ok}, State}
     end.
+
+%% A flag change while a client is in IDLE is volunteered as an untagged FETCH.
+notify_flags(Sock, #{idling := Tag, messages := Ms} = State, Uid) when Tag =/= undefined ->
+    case lists:keyfind(Uid, 2, Ms) of
+        {Seq, Uid, Flags, MS, _Raw} -> send_changed(Sock, {Seq, Uid, Flags, MS, <<>>});
+        false -> ok
+    end,
+    State;
+notify_flags(_Sock, State, _Uid) -> State.
 
 notify_exists(Sock, #{idling := Tag, messages := Ms}) when Tag =/= undefined ->
     N = integer_to_binary(length(Ms)),

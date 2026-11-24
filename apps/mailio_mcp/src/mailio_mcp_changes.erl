@@ -15,9 +15,104 @@ run(Principal, Args) ->
         Box = maps:get(<<"mailbox">>, Args, <<"INBOX">>),
         {ok, CkptId, Snaps} ?= load(Principal, Args),
         Pairs = [{A, Box} || A <- Accounts],
-        Results = [{P, one(Principal, P, maps:get(P, Snaps, undefined))} || P <- Pairs],
-        build(Principal, CkptId, Snaps, Results)
+        Results = pass(Principal, Pairs, Snaps),
+        Wait = wait_seconds(Args),
+        case Wait > 0 andalso CkptId =/= undefined andalso all_unchanged(Results) of
+            false ->
+                build(Principal, CkptId, Snaps, Results);
+            true ->
+                Outcome = wait_for_any(Principal, Pairs, Snaps, Wait * 1000),
+                Results2 =
+                    case Outcome of
+                        changed -> pass(Principal, Pairs, Snaps);
+                        _ -> Results
+                    end,
+                noted(Outcome, Wait, build(Principal, CkptId, Snaps, Results2))
+        end
     end.
+
+pass(Principal, Pairs, Snaps) ->
+    [{P, one(Principal, P, maps:get(P, Snaps, undefined))} || P <- Pairs].
+
+all_unchanged(Results) ->
+    lists:all(
+        fun
+            ({_, {ok, #{unchanged := true}}}) -> true;
+            (_) -> false
+        end,
+        Results
+    ).
+
+%% How long the caller is willing to wait, capped. Anything else means no wait.
+wait_seconds(Args) ->
+    case maps:get(<<"wait_seconds">>, Args, 0) of
+        N when is_integer(N), N > 0 -> min(N, mailio_mcp_config:limit(max_wait_seconds, 25));
+        _ -> 0
+    end.
+
+%% Hold every IMAP account that can be told about changes in IDLE at once, and
+%% return at the first change. POP3 accounts, and accounts with no checkpoint
+%% yet, have nothing to wait on.
+wait_for_any(Principal, Pairs, Snaps, TimeoutMs) ->
+    Parent = self(),
+    Ref = make_ref(),
+    Workers = [
+        spawn_monitor(fun() -> Parent ! {Ref, self(), wait_one(Principal, P, Prev, TimeoutMs)} end)
+     || P <- Pairs,
+        {ok, Prev} <- [maps:find(P, Snaps)]
+    ],
+    Outcome = collect(Ref, Workers, erlang:monotonic_time(millisecond) + TimeoutMs + 3000, []),
+    lists:foreach(
+        fun({Pid, Mon}) ->
+            erlang:demonitor(Mon, [flush]),
+            exit(Pid, kill)
+        end,
+        Workers
+    ),
+    Outcome.
+
+wait_one(Principal, {AccId, Box}, Prev, TimeoutMs) ->
+    case mailio_mcp_authz:check(Principal, AccId, read) of
+        ok ->
+            {ok, Account} = mailio_mcp_config:account(AccId),
+            mailio_mcp_adapter:wait_for_change(Account, Box, Prev, TimeoutMs);
+        {error, _} ->
+            unsupported
+    end.
+
+collect(_Ref, [], _Deadline, Seen) ->
+    summarize(Seen);
+collect(Ref, Pending, Deadline, Seen) ->
+    Left = max(0, Deadline - erlang:monotonic_time(millisecond)),
+    receive
+        {Ref, Pid, changed} ->
+            _ = Pid,
+            changed;
+        {Ref, Pid, Other} ->
+            collect(Ref, lists:keydelete(Pid, 1, Pending), Deadline, [Other | Seen]);
+        {'DOWN', _Mon, process, Pid, _Reason} ->
+            collect(Ref, lists:keydelete(Pid, 1, Pending), Deadline, [{error, down} | Seen])
+    after Left ->
+        timeout
+    end.
+
+summarize([]) ->
+    unsupported;
+summarize(Seen) ->
+    case lists:all(fun(R) -> R =:= unsupported end, Seen) of
+        true -> unsupported;
+        false -> timeout
+    end.
+
+noted(Outcome, Wait, {ok, Result}) ->
+    {ok, Result#{
+        <<"waited">> => #{
+            <<"seconds">> => Wait,
+            <<"result">> => atom_to_binary(Outcome)
+        }
+    }};
+noted(_Outcome, _Wait, Other) ->
+    Other.
 
 load(Principal, Args) ->
     case maps:get(<<"checkpoint">>, Args, undefined) of
