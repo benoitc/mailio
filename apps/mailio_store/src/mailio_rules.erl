@@ -136,7 +136,10 @@ run_rules(Account, EmailId, Email, Body, [Rule | Rest], Applied) ->
     case mailio_filter:matches(Email, Body, Filter) of
         true ->
             Actions = to_actions(maps:get(<<"actions">>, Rule, [])),
-            ok = mailio_actions:apply(Account, EmailId, Actions),
+            case mailio_actions:apply(Account, EmailId, Actions) of
+                ok -> ok;
+                {error, Reason} -> error({rule_actions_failed, rule_id_of(Rule), Reason})
+            end,
             RuleId = rule_id_of(Rule),
             case maps:get(<<"stopProcessing">>, Rule, false) of
                 true -> [RuleId | Applied];

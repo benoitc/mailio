@@ -26,7 +26,7 @@ send_test_() ->
 
 setup() ->
     Dir = filename:join(
-        "/tmp", "mailio_send_" ++ integer_to_list(erlang:unique_integer([positive]))
+        "/tmp", "mailio_send_" ++ integer_to_list(erlang:system_time(microsecond))
     ),
     Acc = mailio_mcp_lib:acct(?ACC, "u", [{<<"me@example.test">>, <<"Me">>}], #{}),
     application:set_env(mailio_mcp, smtp_module, ?MODULE),
@@ -37,8 +37,9 @@ setup() ->
     ),
     Dir.
 
-cleanup(_Dir) ->
+cleanup(Dir) ->
     mailio_mcp_lib:stop_app(),
+    file:del_dir_r(Dir),
     application:unset_env(mailio_mcp, smtp_module),
     application:unset_env(mailio_mcp, test_smtp),
     application:unset_env(mailio_mcp, send_timeout),

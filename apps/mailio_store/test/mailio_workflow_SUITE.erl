@@ -19,7 +19,12 @@
     rule_auto_tag_and_move/1,
     rule_no_match_untouched/1,
     rule_effectively_once/1,
-    rule_stop_processing/1
+    rule_stop_processing/1,
+    slow_handler_does_not_block/1,
+    failed_handler_is_retried/1,
+    attempts_are_bounded/1,
+    failed_effect_fails_the_job/1,
+    flaky_effect/2
 ]).
 
 all() ->
@@ -30,7 +35,11 @@ all() ->
         rule_auto_tag_and_move,
         rule_no_match_untouched,
         rule_effectively_once,
-        rule_stop_processing
+        rule_stop_processing,
+        slow_handler_does_not_block,
+        failed_handler_is_retried,
+        attempts_are_bounded,
+        failed_effect_fails_the_job
     ].
 
 init_per_suite(Config) ->
@@ -203,6 +212,83 @@ rule_stop_processing(Config) ->
     {ok, _} = mailio_workflow_consumer:run(Pid),
     ?assert(has_kw(Account, Id, <<"first">>)),
     ?assertNot(has_kw(Account, Id, <<"second">>)).
+
+%%====================================================================
+%% Handler isolation and retries
+%%====================================================================
+
+consumer(Account, Name, Handler) ->
+    {ok, Pid} = mailio_workflow_consumer:start_link(#{
+        account_id => Account,
+        name => Name,
+        types => [email],
+        verbs => [created],
+        handler => Handler
+    }),
+    unlink(Pid),
+    Pid.
+
+slow_handler_does_not_block(Config) ->
+    Account = ?config(account, Config),
+    application:set_env(mailio_store, handler_timeout, 300),
+    Pid = consumer(Account, <<"slow">>, fun(_A, _E) -> timer:sleep(infinity) end),
+    {ok, _} = ingest(Account, <<"inbox">>, msg(<<"a@x">>, <<"one">>), []),
+    {Micros, {ok, 0}} = timer:tc(fun() -> mailio_workflow_consumer:run(Pid) end),
+    ?assert(Micros < 3000000),
+    ?assert(is_process_alive(Pid)),
+    application:unset_env(mailio_store, handler_timeout).
+
+failed_handler_is_retried(Config) ->
+    Account = ?config(account, Config),
+    Tab = ets:new(attempts, [public]),
+    Handler = fun(_A, _E) ->
+        case ets:update_counter(Tab, n, 1, {n, 0}) of
+            1 -> error(first_try_fails);
+            _ -> ok
+        end
+    end,
+    Pid = consumer(Account, <<"retry">>, Handler),
+    {ok, _} = ingest(Account, <<"inbox">>, msg(<<"a@x">>, <<"one">>), []),
+    ?assertEqual({ok, 0}, mailio_workflow_consumer:run(Pid)),
+    ?assertEqual({ok, 1}, mailio_workflow_consumer:run(Pid)),
+    %% done: never run again
+    ?assertEqual({ok, 0}, mailio_workflow_consumer:run(Pid)),
+    ?assertEqual(2, ets:lookup_element(Tab, n, 2)).
+
+attempts_are_bounded(Config) ->
+    Account = ?config(account, Config),
+    Tab = ets:new(attempts, [public]),
+    Handler = fun(_A, _E) ->
+        ets:update_counter(Tab, n, 1, {n, 0}),
+        error(always_fails)
+    end,
+    Pid = consumer(Account, <<"bounded">>, Handler),
+    {ok, _} = ingest(Account, <<"inbox">>, msg(<<"a@x">>, <<"one">>), []),
+    [{ok, 0} = mailio_workflow_consumer:run(Pid) || _ <- lists:seq(1, 8)],
+    ?assertEqual(3, ets:lookup_element(Tab, n, 2)).
+
+failed_effect_fails_the_job(Config) ->
+    Account = ?config(account, Config),
+    Tab = ets:new(attempts, [public]),
+    application:set_env(mailio_store, actions_call_allowlist, [?MODULE]),
+    application:set_env(mailio_store, effect_probe, Tab),
+    Handler = fun(A, #{object_id := Id}) ->
+        ok = mailio_actions:apply(A, Id, [{call, {?MODULE, flaky_effect}}])
+    end,
+    Pid = consumer(Account, <<"effects">>, Handler),
+    {ok, _} = ingest(Account, <<"inbox">>, msg(<<"a@x">>, <<"one">>), []),
+    ?assertEqual({ok, 0}, mailio_workflow_consumer:run(Pid)),
+    ?assertEqual({ok, 1}, mailio_workflow_consumer:run(Pid)),
+    application:unset_env(mailio_store, actions_call_allowlist),
+    application:unset_env(mailio_store, effect_probe).
+
+%% allowlisted effect used above: fails the first time
+flaky_effect(_Account, _EmailId) ->
+    {ok, Tab} = application:get_env(mailio_store, effect_probe),
+    case ets:update_counter(Tab, n, 1, {n, 0}) of
+        1 -> error(effect_failed);
+        _ -> ok
+    end.
 
 %%====================================================================
 %% Helpers

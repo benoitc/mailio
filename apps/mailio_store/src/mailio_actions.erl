@@ -28,25 +28,46 @@
 -type ctx() :: map().
 -export_type([action/0, ctx/0]).
 
--spec apply(binary(), binary(), [action()]) -> ok.
+-spec apply(binary(), binary(), [action()]) -> ok | {error, term()}.
 apply(Account, EmailId, Actions) ->
     apply(Account, EmailId, Actions, #{}).
 
--spec apply(binary(), binary(), [action()], ctx()) -> ok.
+%% @doc Apply actions. The patch goes through the writer first, then each side
+%% effect runs in its own process with a time limit (`action_timeout', default
+%% 30 s) so a crashing or hanging call cannot harm the caller. Every effect is
+%% attempted; if any failed, the result is `{error, {failed, Failures}}' so a
+%% caller that retries (the workflow consumer) knows the work is not finished.
+-spec apply(binary(), binary(), [action()], ctx()) -> ok | {error, term()}.
 apply(Account, EmailId, Actions, Ctx) ->
     {Patch, Effects} = lists:foldl(fun classify/2, {#{}, []}, Actions),
-    case map_size(Patch) of
-        0 ->
-            ok;
-        _ ->
-            _ = mailio_account_writer:patch(Account, EmailId, Patch),
-            ok
-    end,
-    lists:foreach(
-        fun(E) -> run_effect(Account, EmailId, E, Ctx) end,
+    PatchFailures =
+        case map_size(Patch) of
+            0 ->
+                [];
+            _ ->
+                case mailio_account_writer:patch(Account, EmailId, Patch) of
+                    {error, PatchReason} -> [{patch, PatchReason}];
+                    _ -> []
+                end
+        end,
+    EffectFailures = lists:filtermap(
+        fun(E) ->
+            case run_effect(Account, EmailId, E, Ctx) of
+                ok -> false;
+                {error, Reason} -> {true, {effect_kind(E), Reason}}
+            end
+        end,
         lists:reverse(Effects)
     ),
-    ok.
+    case PatchFailures ++ EffectFailures of
+        [] -> ok;
+        Failures -> {error, {failed, Failures}}
+    end.
+
+effect_kind(E) when is_tuple(E) -> element(1, E);
+effect_kind(E) -> E.
+
+action_timeout() -> mailio_config:get(action_timeout, 30000).
 
 %%====================================================================
 %% Classify actions into a batched patch + ordered side effects
@@ -102,20 +123,20 @@ run_effect(Account, EmailId, {notify, {topic, Topic}}, _Ctx) ->
 run_effect(Account, EmailId, {call, {Module, Fun}}, _Ctx) ->
     case is_allowed(Module) of
         true ->
-            try
-                Module:Fun(Account, EmailId)
-            catch
-                Class:Reason ->
+            case mailio_isolate:run(fun() -> Module:Fun(Account, EmailId) end, action_timeout()) of
+                {ok, _} ->
+                    ok;
+                {error, Reason} ->
                     ?LOG_WARNING(#{
                         what => action_call_failed,
                         module => Module,
                         fun_ => Fun,
-                        class => Class,
                         reason => Reason
                     }),
-                    ok
+                    {error, Reason}
             end;
         false ->
+            %% refused, not failed: running it again would not change that
             ?LOG_WARNING(#{what => action_call_blocked, module => Module}),
             ok
     end;
@@ -132,21 +153,16 @@ run_effect(_Account, _EmailId, _Other, _Ctx) ->
 %% The handler returns more actions, which are applied (one level, no
 %% recursion into further agent tasks to bound work).
 run_agent_task(Handler, Account, EmailId, Kind, Opts, Ctx) ->
-    try Handler:handle_task(Kind, Account, EmailId, Opts) of
-        {ok, Actions} when is_list(Actions) ->
+    Run = fun() -> Handler:handle_task(Kind, Account, EmailId, Opts) end,
+    case mailio_isolate:run(Run, action_timeout()) of
+        {ok, {ok, Actions}} when is_list(Actions) ->
             Safe = [A || A <- Actions, not is_agent_task(A)],
             apply(Account, EmailId, Safe, Ctx);
-        _ ->
-            ok
-    catch
-        Class:Reason ->
-            ?LOG_WARNING(#{
-                what => agent_task_failed,
-                kind => Kind,
-                class => Class,
-                reason => Reason
-            }),
-            ok
+        {ok, _} ->
+            ok;
+        {error, Reason} ->
+            ?LOG_WARNING(#{what => agent_task_failed, kind => Kind, reason => Reason}),
+            {error, Reason}
     end.
 
 is_agent_task({agent_task, _, _}) -> true;
