@@ -104,4 +104,4 @@ Leaves = mailio_mime:leaves(Part),             %% the parts that hold content
 ## Next
 
 - [Overview](overview.md): the public modules and the limits you can change.
-- `CONTRIBUTING.md` in the repository, if you want to change the library.
+- [CONTRIBUTING.md](https://github.com/benoitc/mailio/blob/main/CONTRIBUTING.md), if you want to change the library.

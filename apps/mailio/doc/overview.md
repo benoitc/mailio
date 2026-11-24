@@ -1,6 +1,6 @@
 # mailio
 
-mailio is an Erlang/OTP library that speaks the mail protocols and reads and writes messages: IMAP, POP3 and SMTP clients, RFC 5322 headers, MIME parsing and rendering, character sets and HTML to text. It needs OTP 28 or later and nothing else: no database, no other packages. You use it when you want to read or send mail from your own Erlang or Elixir code. If you want a ready-made service on top of it, see the sibling applications in the repository (`mailio_mcp` and `mailio_store`); they are not part of this package.
+mailio is an Erlang/OTP library that speaks the mail protocols and reads and writes messages: IMAP, POP3 and SMTP clients, RFC 5322 headers, MIME parsing and rendering, character sets and HTML to text. It needs OTP 28 or later and nothing else: no database, no other packages. You use it when you want to read or send mail from your own Erlang or Elixir code. If you want a ready-made service on top of it, see the sibling applications in the [repository](https://github.com/benoitc/mailio) (`mailio_mcp` and `mailio_store`); they are not part of this package.
 
 Start with the [usage guide](usage.md). This page tells you which modules you can rely on and what the library does to protect itself from a misbehaving server.
 
@@ -64,4 +64,4 @@ For SMTP the code decides whether a retry is safe: `smtp_transient` means nothin
 | SMTP | `mailio_smtp` | `mailio_smtp_tests`, `mailio_smtp_mailpit_SUITE` (real server) |
 | Messages | `mailio_mime*`, `mailio_rfc5322`, `mailio_html_text` | `mailio_mime_*_tests`, the corpus and property suites |
 
-If you want to change the library, read `AGENTS.md` and `CONTRIBUTING.md` in the repository first.
+If you want to change the library, read [CONTRIBUTING.md](https://github.com/benoitc/mailio/blob/main/CONTRIBUTING.md) and [AGENTS.md](https://github.com/benoitc/mailio/blob/main/AGENTS.md) in the repository first. [The architecture page](https://github.com/benoitc/mailio/blob/main/docs/architecture.md) explains how this library relates to the other applications.

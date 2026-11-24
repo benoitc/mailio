@@ -159,6 +159,9 @@ jobs:
         run: |
           mkdir /tmp/pkg && tar -xf _build/default/lib/mailio/hex/mailio-*[0-9].tar -C /tmp/pkg
           tar -tzf /tmp/pkg/contents.tar.gz | grep -x LICENSE
+          tar -tzf /tmp/pkg/contents.tar.gz | grep -x README.md
+          mkdir /tmp/docs && tar -xf _build/default/lib/mailio/hex/mailio-*-docs.tar -C /tmp/docs
+          test -f /tmp/docs/readme.html && test -f /tmp/docs/overview.html && test -f /tmp/docs/usage.html
           if tar -tzf /tmp/pkg/contents.tar.gz | grep -E "mailio_(store|mcp)"; then
             echo "the package holds another app"; exit 1
           fi
