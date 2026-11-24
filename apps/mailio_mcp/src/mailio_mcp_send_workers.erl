@@ -19,7 +19,7 @@ start_worker(Fun) when is_function(Fun, 0) ->
 
 %% @private
 run(Fun) ->
-    {ok, proc_lib:spawn_link(fun() -> Fun() end)}.
+    {ok, proc_lib:spawn_link(Fun)}.
 
 init([]) ->
     Child = #{
