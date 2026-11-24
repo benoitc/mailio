@@ -152,16 +152,28 @@ qresync_changes(Pid, MailboxId, Prev) ->
     case do_examine_qresync(Pid, MailboxId, UidValidity, ModSeq) of
         {ok, SelInfo, Vanished, Updated} ->
             New = sel_to_state(SelInfo),
-            case uidvalidity_changed(Prev, New) of
-                true ->
+            case {uidvalidity_changed(Prev, New), Vanished} of
+                {true, _} ->
                     {ok, [reset], encode(New), done};
-                false ->
+                {false, too_many} ->
+                    %% a report too long to list: start over rather than hold it
+                    {ok, [reset], encode(New), done};
+                {false, {ok, Uids}} ->
                     Added = fetch_added(Pid, maps:get(uidnext, Prev)),
-                    Removed = [{removed, U} || U <- Vanished],
+                    Removed = [{removed, U} || U <- Uids],
                     {ok, Added ++ Updated ++ Removed, encode(New), done}
             end;
         Other ->
             command_error(Other)
+    end.
+
+%% The most UIDs of one VANISHED report that are listed one by one.
+-define(MAX_VANISHED, 100000).
+
+vanished_uids(Ranges) ->
+    case mailio_imap_proto:expand_uid_ranges(Ranges, ?MAX_VANISHED) of
+        {ok, _} = Ok -> Ok;
+        {error, too_many} -> too_many
     end.
 
 do_examine_qresync(Pid, MailboxId, UidValidity, ModSeq) ->
@@ -171,7 +183,8 @@ do_examine_qresync(Pid, MailboxId, UidValidity, ModSeq) ->
     case run(Pid, Builder) of
         {ok, Untagged, {ok, _, _}} ->
             SelInfo = parse_select(Untagged),
-            Vanished = lists:append([Uids || {vanished, _Earlier, Uids} <- Untagged]),
+            Ranges = lists:append([R || {vanished, _Earlier, R} <- Untagged]),
+            Vanished = vanished_uids(Ranges),
             Updated = [
                 {updated, #{
                     uid => proplists:get_value(uid, I),

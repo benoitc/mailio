@@ -41,6 +41,11 @@
 
 -define(CONNECT_TIMEOUT, 30000).
 -define(CMD_TIMEOUT, 30000).
+%% What one command may collect in untagged responses before the connection
+%% is refused: how many, and how many bytes. Config: max_untagged and
+%% max_untagged_bytes.
+-define(MAX_UNTAGGED, 100000).
+-define(MAX_UNTAGGED_BYTES, 100663296).
 %% The state machine enforces every deadline itself; a caller's own wait is only
 %% a backstop for a machine that no longer exists.
 -define(CALL_CAP, 120000).
@@ -58,6 +63,12 @@
     stopper :: gen_statem:from() | undefined,
     %% absolute (monotonic ms) time by which the running command must be answered
     deadline :: integer() | undefined,
+    %% resume point of the framer for a line that is still arriving
+    scan = 0 :: non_neg_integer(),
+    %% what the running command has collected so far, and the size of the last frame
+    acc_count = 0 :: non_neg_integer(),
+    acc_bytes = 0 :: non_neg_integer(),
+    last_size = 0 :: non_neg_integer(),
     tag :: binary() | undefined,
     untagged = [] :: [term()],
     literal :: binary() | [binary()] | undefined,
@@ -258,8 +269,8 @@ greeting(info, {Tag, Sock, Bin}, #data{sock = Sock} = Data) when
             {next_state, backoff, Data2};
         {error, response_too_large} ->
             {next_state, response_too_large, Data1};
-        more ->
-            {keep_state, Data1}
+        {more, Data2} ->
+            {keep_state, Data2}
     end;
 greeting(info, Event, Data) ->
     handle_socket_closed(Event, Data);
@@ -514,8 +525,8 @@ handle_idle_responses(Data) ->
 
 handle_idle_responses(Data, Acts) ->
     case take_one(Data) of
-        more ->
-            {keep_state, Data, Acts};
+        {more, Data0} ->
+            {keep_state, Data0, Acts};
         {error, response_too_large} ->
             {next_state, response_too_large, Data, Acts};
         {ok, {continuation, _Text}, Data1} ->
@@ -572,8 +583,8 @@ process_until_tagged(Data0, Bin, Done) ->
 
 loop_responses(Data, Done) ->
     case take_one(Data) of
-        more ->
-            {keep_state, Data};
+        {more, Data0} ->
+            {keep_state, Data0};
         {error, response_too_large} ->
             {next_state, response_too_large, Data};
         {ok, {continuation, _Text}, Data1} ->
@@ -595,9 +606,20 @@ loop_responses(Data, Done) ->
         ->
             Done(Status, Code, Text, Data1);
         {ok, {untagged, Event}, Data1} ->
-            Data2 = Data1#data{untagged = [Event | Data1#data.untagged]},
-            Data3 = maybe_capture_caps(Data2, Event),
-            loop_responses(Data3, Done);
+            %% One command may not collect without end, whatever each answer weighs
+            Count = Data1#data.acc_count + 1,
+            Bytes = Data1#data.acc_bytes + Data1#data.last_size,
+            case Count > max_untagged(Data1) orelse Bytes > max_untagged_bytes(Data1) of
+                true ->
+                    {next_state, response_too_large, Data1};
+                false ->
+                    Data2 = Data1#data{
+                        untagged = [Event | Data1#data.untagged],
+                        acc_count = Count,
+                        acc_bytes = Bytes
+                    },
+                    loop_responses(maybe_capture_caps(Data2, Event), Done)
+            end;
         {ok, _Other, Data1} ->
             loop_responses(Data1, Done)
     end.
@@ -609,22 +631,24 @@ maybe_capture_caps(Data, _) -> Data.
 %% stray unsolicited data we are not actively collecting).
 drain_unsolicited(Data) ->
     case take_one(Data) of
-        more -> {ok, Data};
+        {more, Data1} -> {ok, Data1};
         {error, response_too_large} -> {error, response_too_large};
         {ok, _Resp, Data1} -> drain_unsolicited(Data1)
     end.
 
 %% Frame and parse a single response from the buffer.
-take_one(#data{buffer = Buf, config = Config} = Data) ->
-    case mailio_imap_proto:read_response(Buf, Config) of
-        more ->
-            more;
+take_one(#data{buffer = Buf, config = Config, scan = Scan} = Data) ->
+    case mailio_imap_proto:read_response(Buf, Config, Scan) of
+        {more, Next} ->
+            more_data(Data#data{scan = Next});
         {error, response_too_large} ->
             {error, response_too_large};
         {ok, Line, Rest} ->
             Resp = mailio_imap_proto:parse_response(Line),
-            {ok, Resp, Data#data{buffer = Rest}}
+            {ok, Resp, Data#data{buffer = Rest, scan = 0, last_size = byte_size(Line)}}
     end.
+
+more_data(Data) -> {more, Data}.
 
 %%====================================================================
 %% Socket helpers
@@ -653,7 +677,14 @@ send(#data{transport = Transport, sock = Sock} = Data, IoData) ->
 
 next_tag(#data{tagn = N} = Data) ->
     Tag = iolist_to_binary([$A, integer_to_binary(N + 1)]),
-    {Tag, Data#data{tagn = N + 1}}.
+    %% a new command starts with nothing collected
+    {Tag, Data#data{tagn = N + 1, acc_count = 0, acc_bytes = 0}}.
+
+max_untagged(#data{config = #{max_untagged := N}}) -> N;
+max_untagged(_) -> ?MAX_UNTAGGED.
+
+max_untagged_bytes(#data{config = #{max_untagged_bytes := N}}) -> N;
+max_untagged_bytes(_) -> ?MAX_UNTAGGED_BYTES.
 
 catch_close(gen_tcp, Sock) ->
     try
@@ -695,7 +726,9 @@ drop(#data{transport = T, sock = Sock} = Data, Replies, Why) ->
         end,
     {Cleared, Pending} = pending_replies(Data, Why),
     {next_state, backoff,
-        Cleared#data{sock = undefined, buffer = <<>>, tag = undefined, deadline = undefined},
+        Cleared#data{
+            sock = undefined, buffer = <<>>, scan = 0, tag = undefined, deadline = undefined
+        },
         Replies ++ Pending}.
 
 %% Replies owed to the caller of a command, an IDLE start or an IDLE stop.

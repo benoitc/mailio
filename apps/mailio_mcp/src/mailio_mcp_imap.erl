@@ -986,8 +986,15 @@ qresync_changes(C, Account, Box, #{uv := UV, modseq := ModSeq, flags := Old} = P
 
 qresync_result(_C, _Account, _Box, #{uv := PUV}, _Old, #{uv := UV}, _Events) when PUV =/= UV ->
     {error, checkpoint_expired};
-qresync_result(C, Account, Box, Prev, Old, #{exists := Exists} = Sel, Events) ->
-    Vanished = lists:append([Uids || {vanished, _Earlier, Uids} <- Events]),
+qresync_result(C, Account, Box, Prev, Old, Sel, Events) ->
+    Ranges = lists:append([R || {vanished, _Earlier, R} <- Events]),
+    case mailio_imap_proto:expand_uid_ranges(Ranges, 100000) of
+        {ok, Vanished} -> qresync_apply(C, Account, Box, Prev, Old, Sel, Events, Vanished);
+        %% a report too long to list: compare the whole mailbox instead
+        {error, too_many} -> fallback
+    end.
+
+qresync_apply(C, Account, Box, Prev, Old, #{exists := Exists} = Sel, Events, Vanished) ->
     Gone = lists:sort([U || U <- Vanished, is_map_key(U, Old)]),
     Changed = [
         {maps:get(uid, M), flag_bits(maps:get(flags, M, []))}

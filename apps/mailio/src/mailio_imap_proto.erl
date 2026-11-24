@@ -45,14 +45,14 @@
 ]).
 
 %% Response decoding
--export([read_response/1, read_response/2, parse_response/1]).
+-export([read_response/1, read_response/2, read_response/3, parse_response/1]).
 
 -define(MAX_LITERAL, 67108864).
 -define(MAX_LINE, 65536).
 -define(MAX_RESPONSE, 100663296).
 
 %% Helpers exposed for the FSM/adapter
--export([quote/1, format_seqset/1, parse_uid_set/1]).
+-export([quote/1, format_seqset/1, parse_uid_ranges/1, expand_uid_ranges/2, uid_count/1]).
 
 -export_type([response/0, token/0]).
 
@@ -241,14 +241,26 @@ read_response(Buffer) ->
 -spec read_response(binary(), map()) ->
     {ok, binary(), binary()} | more | {error, response_too_large}.
 read_response(Buffer, Opts) ->
+    case read_response(Buffer, Opts, 0) of
+        {more, _} -> more;
+        Other -> Other
+    end.
+
+%% @doc Like {@link read_response/2}, resuming a scan: when a line is not
+%% complete the answer is `{more, ScanFrom}', and passing that back with the
+%% longer buffer continues from there instead of from the first byte. A line
+%% that arrives in small pieces is then framed in linear work.
+-spec read_response(binary(), map(), non_neg_integer()) ->
+    {ok, binary(), binary()} | {more, non_neg_integer()} | {error, response_too_large}.
+read_response(Buffer, Opts, ScanFrom) ->
     Limits = #{
         literal => maps:get(max_literal, Opts, ?MAX_LITERAL),
         line => maps:get(max_line, Opts, ?MAX_LINE),
         response => maps:get(max_response, Opts, ?MAX_RESPONSE)
     },
-    case logical_length(Buffer, 0, Limits) of
-        more ->
-            more;
+    case logical_length(Buffer, 0, Limits, ScanFrom) of
+        {more, _} = More ->
+            More;
         {error, _} = Err ->
             Err;
         {ok, TotalLen, CrlfLen} ->
@@ -260,12 +272,15 @@ read_response(Buffer, Opts) ->
 %% Walk physical lines, jumping over literal payloads, until a CRLF that is
 %% not preceded by a literal spec. Returns the total length up to and
 %% including that terminating CRLF.
-logical_length(Buffer, Pos, Limits) ->
-    case find_crlf(Buffer, Pos) of
+logical_length(Buffer, Pos, Limits, Scan) ->
+    case find_crlf(Buffer, max(Pos, Scan)) of
         nomatch ->
             case byte_size(Buffer) - Pos > maps:get(line, Limits) of
                 true -> {error, response_too_large};
-                false -> more
+                %% The hint is only valid while the buffer holds no CRLF at all. A
+                %% CR at the very end may be the first half of one.
+                false when Pos =:= 0 -> {more, max(0, byte_size(Buffer) - 1)};
+                false -> {more, 0}
             end;
         CrlfPos when CrlfPos - Pos > map_get(line, Limits) ->
             {error, response_too_large};
@@ -277,8 +292,8 @@ logical_length(Buffer, Pos, Limits) ->
                     if
                         N > map_get(literal, Limits) -> {error, response_too_large};
                         DataEnd > map_get(response, Limits) -> {error, response_too_large};
-                        byte_size(Buffer) >= DataEnd -> logical_length(Buffer, DataEnd, Limits);
-                        true -> more
+                        byte_size(Buffer) >= DataEnd -> logical_length(Buffer, DataEnd, Limits, 0);
+                        true -> {more, 0}
                     end;
                 none ->
                     case CrlfPos + 2 > map_get(response, Limits) of
@@ -288,10 +303,10 @@ logical_length(Buffer, Pos, Limits) ->
             end
     end.
 
-find_crlf(Buffer, Pos) when Pos + 1 < byte_size(Buffer) ->
-    case Buffer of
-        <<_:Pos/binary, "\r\n", _/binary>> -> Pos;
-        _ -> find_crlf(Buffer, Pos + 1)
+find_crlf(Buffer, Pos) when Pos < byte_size(Buffer) ->
+    case binary:match(Buffer, <<"\r\n">>, [{scope, {Pos, byte_size(Buffer) - Pos}}]) of
+        {At, 2} -> At;
+        nomatch -> nomatch
     end;
 find_crlf(_Buffer, _Pos) ->
     nomatch.
@@ -436,8 +451,8 @@ parse_vanished(Bin) ->
             {vanished, false, uid_set_from_tokens(Toks)}
     end.
 
-uid_set_from_tokens([{atom, Set} | _]) -> parse_uid_set(Set);
-uid_set_from_tokens([{number, N} | _]) -> [N];
+uid_set_from_tokens([{atom, Set} | _]) -> parse_uid_ranges(Set);
+uid_set_from_tokens([{number, N} | _]) -> parse_uid_ranges(integer_to_binary(N));
 uid_set_from_tokens(_) -> [].
 
 %%====================================================================
@@ -631,17 +646,59 @@ format_seqset(Bin) when is_binary(Bin) -> Bin.
 to_set_bound('*') -> "*";
 to_set_bound(N) when is_integer(N) -> integer_to_binary(N).
 
-%% @doc Parse a uid-set ("1,3:5,9") into an expanded sorted list.
--spec parse_uid_set(binary()) -> [integer()].
-parse_uid_set(Bin) ->
+%% @doc Parse a uid-set ("1,3:5,9") into sorted, merged `{Lo, Hi}' ranges. Either
+%% end of `A:B' may come first (RFC 3501, section 9). Parts that are not
+%% numbers, or are larger than a 32-bit UID, are ignored. Nothing is expanded,
+%% so a short set cannot allocate a large list.
+-spec parse_uid_ranges(binary()) -> [{pos_integer(), pos_integer()}].
+parse_uid_ranges(Bin) ->
     Parts = binary:split(Bin, <<",">>, [global]),
-    lists:usort(lists:flatmap(fun parse_uid_range/1, Parts)).
+    merge_ranges(lists:sort(lists:filtermap(fun parse_uid_range/1, Parts))).
 
 parse_uid_range(Part) ->
     case binary:split(Part, <<":">>) of
-        [A, B] -> lists:seq(binary_to_integer(A), binary_to_integer(B));
-        [<<>>] -> [];
-        [Single] -> [binary_to_integer(Single)]
+        [A, B] ->
+            case {uid(A), uid(B)} of
+                {{ok, X}, {ok, Y}} -> {true, {min(X, Y), max(X, Y)}};
+                _ -> false
+            end;
+        [Single] ->
+            case uid(Single) of
+                {ok, X} -> {true, {X, X}};
+                error -> false
+            end
+    end.
+
+%% A UID is a number from 1 to 2^32-1.
+uid(Bin) when byte_size(Bin) > 0, byte_size(Bin) =< 10 ->
+    try binary_to_integer(Bin) of
+        N when N >= 1, N =< 4294967295 -> {ok, N};
+        _ -> error
+    catch
+        error:badarg -> error
+    end;
+uid(_) ->
+    error.
+
+merge_ranges([{A, B}, {C, D} | Rest]) when C =< B + 1 ->
+    merge_ranges([{A, max(B, D)} | Rest]);
+merge_ranges([R | Rest]) ->
+    [R | merge_ranges(Rest)];
+merge_ranges([]) ->
+    [].
+
+%% @doc How many UIDs the ranges stand for.
+-spec uid_count([{integer(), integer()}]) -> non_neg_integer().
+uid_count(Ranges) ->
+    lists:sum([Hi - Lo + 1 || {Lo, Hi} <- Ranges]).
+
+%% @doc The UIDs of the ranges as a list, unless there are more than `Max'.
+-spec expand_uid_ranges([{integer(), integer()}], non_neg_integer()) ->
+    {ok, [integer()]} | {error, too_many}.
+expand_uid_ranges(Ranges, Max) ->
+    case uid_count(Ranges) > Max of
+        true -> {error, too_many};
+        false -> {ok, lists:append([lists:seq(Lo, Hi) || {Lo, Hi} <- Ranges])}
     end.
 
 %%====================================================================

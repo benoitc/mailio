@@ -136,3 +136,50 @@ wait_state(Pid, Expected, Left) ->
             timer:sleep(10),
             wait_state(Pid, Expected, Left - 1)
     end.
+
+%% Many small untagged lines add up: one command may not collect without end.
+many_untagged_lines_are_capped_test() ->
+    {Port, _, L} = serve(fun(S, Tag) ->
+        [gen_tcp:send(S, <<"* 1 EXISTS\r\n">>) || _ <- lists:seq(1, 3000)],
+        gen_tcp:send(S, [Tag, <<" OK done\r\n">>])
+    end),
+    C = connect(Port, #{max_untagged => 1000}),
+    ?assertEqual({error, response_too_large}, noop(C)),
+    gen_tcp:close(L).
+
+untagged_bytes_are_capped_test() ->
+    {Port, _, L} = serve(fun(S, Tag) ->
+        Line = [<<"* OK ">>, binary:copy(<<"x">>, 500), <<"\r\n">>],
+        [gen_tcp:send(S, Line) || _ <- lists:seq(1, 100)],
+        gen_tcp:send(S, [Tag, <<" OK done\r\n">>])
+    end),
+    C = connect(Port, #{max_untagged_bytes => 10000}),
+    ?assertEqual({error, response_too_large}, noop(C)),
+    gen_tcp:close(L).
+
+untagged_under_the_caps_still_works_test() ->
+    {Port, _, L} = serve(fun(S, Tag) ->
+        [gen_tcp:send(S, <<"* 1 EXISTS\r\n">>) || _ <- lists:seq(1, 200)],
+        gen_tcp:send(S, [Tag, <<" OK done\r\n">>])
+    end),
+    C = connect(Port, #{max_untagged => 1000, max_untagged_bytes => 100000}),
+    ?assertMatch({ok, [_ | _], {ok, _, _}}, noop(C)),
+    mailio_imap_conn:close(C),
+    gen_tcp:close(L).
+
+%% One response that arrives in many pieces is put together and answered.
+a_response_in_small_pieces_is_framed_test() ->
+    {Port, _, L} = serve(fun(S, Tag) ->
+        Resp = [<<"* 5 EXISTS\r\n">>, Tag, <<" OK done\r\n">>],
+        [
+            begin
+                gen_tcp:send(S, <<B>>),
+                timer:sleep(1)
+            end
+         || B <- binary_to_list(iolist_to_binary(Resp))
+        ]
+    end),
+    C = connect(Port, #{}),
+    ?assertMatch({ok, [{exists, 5}], {ok, _, _}}, noop(C)),
+    mailio_imap_conn:close(C),
+    gen_tcp:close(L).

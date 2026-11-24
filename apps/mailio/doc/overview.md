@@ -38,6 +38,8 @@ Every size a server controls is bounded, so a broken or hostile server cannot ma
 | IMAP literal (one message body or part) | 64 MiB | `max_literal` | `{error, response_too_large}`, connection closed for good |
 | IMAP line outside a literal | 64 KiB | `max_line` | same |
 | IMAP whole response | 96 MiB | `max_response` | same |
+| IMAP responses one command collects | 100,000 of them and 96 MiB | `max_untagged`, `max_untagged_bytes` | same |
+| IMAP `VANISHED` report the adapter lists one by one | 100,000 UIDs | fixed | the adapter reports a reset and you resynchronise |
 | POP3 listing reply (LIST, UIDL, CAPA) | 32 MiB | `max_list_bytes` | `pop3_response_too_large`, connection closed |
 | POP3 TOP reply | 1 MiB | `max_top_bytes` | same |
 | POP3 RETR reply | the `MaxBytes` you pass, plus 64 KiB | argument | same |
@@ -47,7 +49,7 @@ Every size a server controls is bounded, so a broken or hostile server cannot ma
 | MIME parts per message | 1000 | application env `max_mime_parts` of `mailio` | the rest are dropped, the part gets a `too_many_parts` defect |
 | MIME nesting depth | 50 | fixed | the part is kept whole with a `max_depth_exceeded` defect |
 
-Timeouts are 30 seconds for connecting, for each IMAP command and for each POP3 and SMTP reply. TLS certificates and host names are verified unless you set `verify => verify_none`.
+Timeouts are 30 seconds for connecting, for each POP3 and SMTP reply and for the IMAP greeting, STARTTLS and login (`command_timeout`). An IMAP command has the deadline you give `run/3`, 30 seconds by default; when the server has not answered by then you get `{error, imap_timeout}` and the connection is dropped, because a late answer could no longer be matched to its command. Credential providers have 10 seconds (`credentials_timeout`). TLS certificates and host names are verified unless you set `verify => verify_none`.
 
 ## Errors
 

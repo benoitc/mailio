@@ -187,7 +187,7 @@ fetch_body_literal_test() ->
 vanished_test() ->
     {untagged, {vanished, true, Uids}} =
         ?P:parse_response(<<"* VANISHED (EARLIER) 41,43:45">>),
-    ?assertEqual([41, 43, 44, 45], Uids).
+    ?assertEqual([{41, 41}, {43, 45}], Uids).
 
 continuation_test() ->
     ?assertEqual(
@@ -196,7 +196,56 @@ continuation_test() ->
     ).
 
 uid_set_parse_test() ->
-    ?assertEqual([1, 3, 4, 5, 9], ?P:parse_uid_set(<<"1,3:5,9">>)).
+    ?assertEqual([{1, 1}, {3, 5}, {9, 9}], ?P:parse_uid_ranges(<<"1,3:5,9">>)),
+    ?assertEqual(
+        {ok, [1, 3, 4, 5, 9]}, ?P:expand_uid_ranges(?P:parse_uid_ranges(<<"1,3:5,9">>), 100)
+    ).
+
+%% RFC 3501: the two ends of a range may come in either order.
+uid_set_descending_range_test() ->
+    ?assertEqual([{3, 5}], ?P:parse_uid_ranges(<<"5:3">>)),
+    ?assertEqual({ok, [3, 4, 5]}, ?P:expand_uid_ranges(?P:parse_uid_ranges(<<"5:3">>), 10)).
+
+uid_set_is_normalised_test() ->
+    ?assertEqual([{1, 8}, {10, 10}], ?P:parse_uid_ranges(<<"10,3:8,1:5">>)).
+
+%% A short set must not be able to allocate a huge list.
+uid_set_expansion_is_bounded_test() ->
+    Ranges = ?P:parse_uid_ranges(<<"1:4294967295">>),
+    ?assertEqual([{1, 4294967295}], Ranges),
+    ?assertEqual({error, too_many}, ?P:expand_uid_ranges(Ranges, 100000)),
+    ?assertEqual(4294967295, ?P:uid_count(Ranges)),
+    %% the parser itself stays small too
+    {untagged, {vanished, false, R}} = ?P:parse_response(<<"* VANISHED 1:4294967295">>),
+    ?assertEqual([{1, 4294967295}], R).
+
+uid_set_garbage_does_not_crash_test() ->
+    ?assertEqual([{7, 7}], ?P:parse_uid_ranges(<<"abc,1:x,7,:,,99999999999999">>)),
+    ?assertEqual([], ?P:parse_uid_ranges(<<>>)).
+
+%% A line that arrives in small pieces is framed in linear work: each call
+%% resumes where the last one stopped.
+fragmented_line_is_framed_in_linear_work_test() ->
+    N = 20000,
+    Line = binary:copy(<<"x">>, N),
+    {reductions, R0} = process_info(self(), reductions),
+    Result = feed(Line, <<>>, 0, 1),
+    {reductions, R1} = process_info(self(), reductions),
+    ?assertEqual(done, Result),
+    %% a rescan from the start each time would cost about N*N/2 steps
+    ?assert(R1 - R0 < N * 60).
+
+feed(<<>>, Buf, _Scan, _Step) ->
+    case ?P:read_response(<<Buf/binary, "\r\n">>, #{max_line => 100000}, 0) of
+        {ok, _, <<>>} -> done;
+        Other -> Other
+    end;
+feed(<<B, Rest/binary>>, Buf, Scan, Step) ->
+    Buf1 = <<Buf/binary, B>>,
+    case ?P:read_response(Buf1, #{max_line => 100000}, Scan) of
+        {more, Scan1} -> feed(Rest, Buf1, Scan1, Step);
+        Other -> Other
+    end.
 
 %% A section key that carries a field list stays in one piece, and the data
 %% lands under it, also with other literals in the same response.
