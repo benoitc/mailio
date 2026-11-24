@@ -187,15 +187,36 @@ Each becomes a short guide pointing at real files.
 4. Supervision tree of `mailio_store` and `mailio_mcp` (both changed recently and are not written down anywhere).
 5. A worked example of a handle and a cursor (what is inside, what binds it to a caller).
 
-## Questions for the maintainer
+## Decisions from the maintainer (2026-11-24)
 
-1. Is `mailio_store` the future backend of `mailio_mcp`, a separate product (a local index and agent API), or a leftover? This decides the whole of `architecture.md`.
-2. Should the two permission models (`mailio_grant` and `mailio_mcp_authz`) converge?
-3. Should `mailio_events` and `mailio_registry` move to the store, or stay in the library for a reason I cannot see?
-4. Is `mailio_barrel_spike_SUITE` a guard or a record?
-5. Will the library be published to Hex separately? That decides how public the module docs and the limits table must be, and whether `ex_doc` pages are built.
-6. Is JMAP still the next adapter, and on which contract (store or MCP)?
-7. Which of M1 to M4 do you want before the release, if any? My view: none block it. A1 should be answered before the docs are written, and the cost numbers in `capabilities.md` should be re-measured before a release.
+1. `mailio_store` is a separate product, a sibling of `mailio_mcp`, not its future backend and not a leftover. Any convergence is a later, separate decision. Recorded in `docs/architecture.md`.
+2. Only `mailio` is published on Hex for this release; `mailio_mcp` and `mailio_store` are not. Before publishing it needs: a defined public API, public module docs, a limits table, ExDoc and package metadata, and a standalone usage guide.
+3. None of M1 to M4 and N1 to N4 blocks the release. Required before it: re-measure `capabilities.md`, write the architecture page, finish the library overview and limits table, document and configure a persistent `request_state_key`, and run the release validation matrix.
+
+Status of the required items:
+
+| Item | Status |
+|---|---|
+| Re-measure `capabilities.md` | done (numbers unchanged within a few bytes) |
+| `docs/architecture.md` | done |
+| Library overview, limits table, usage guide, public API tiers | done: `apps/mailio/doc/overview.md`, `usage.md` |
+| ExDoc and package metadata | done: `apps/mailio/rebar.config`, `mailio.app.src`; `rebar3 hex build` builds package and docs |
+| Persistent `request_state_key` | done: `request_state_key` secret reference in the `mailio_mcp` config, documented in `client-setup.md` |
+| Validation matrix | see the release notes of the branch |
+
+Still open before publishing `mailio`:
+
+- There is no `LICENSE` file in the repository, and `mailio.app.src` declares Apache-2.0. Hex needs the text; add it.
+- `{links, []}` in `mailio.app.src` is empty: give the repository URL.
+- The version is still `0.1.0`. Bumping it and writing the release section of the CHANGELOG is the release step and was not done.
+- Maintainers are not listed in the package metadata.
+
+Remaining questions, not blocking:
+
+1. Should the two permission models (`mailio_grant` and `mailio_mcp_authz`) converge? Not now, per decision 1.
+2. Should `mailio_events` and `mailio_registry` move to the store? They are now documented as store support.
+3. Is `mailio_barrel_spike_SUITE` a guard or a record?
+4. Is JMAP still the next adapter, and on which contract (store or MCP)?
 
 ## Suggested order
 
