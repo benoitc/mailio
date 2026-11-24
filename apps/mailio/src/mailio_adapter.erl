@@ -3,7 +3,7 @@
 %%% Normalizes IMAP (now), JMAP and POP3 (later) into one callback contract
 %%% the sync engine drives. All ids on this boundary are protocol-native
 %%% opaque terms; the mapping to immutable JMAP email ids happens in the
-%%% sync engine, which persists the IMAP uid<->emailId map.
+%%% sync engine, which persists the IMAP uid to emailId map.
 %%%
 %%% The key idea is that adapters are dumb: they translate protocol to these
 %%% calls and report changes since an opaque cursor. All cursoring, dedup,

@@ -8,7 +8,7 @@
 %%% A credential is one of:
 %%% <ul>
 %%%   <li>`{password, User, Pass}' - plain SASL PLAIN/LOGIN</li>
-%%%   <li>`{oauth2, User, AccessToken}' - XOAUTH2 / OAUTHBEARER bearer token</li>
+%%%   <li>`{oauth2, User, AccessToken}' - XOAUTH2 bearer token (OAUTHBEARER is not implemented)</li>
 %%%   <li>`{token_fun, Fun}' - lazy/refreshable; Fun/0 yields one of the above</li>
 %%% </ul>
 -module(mailio_credentials).

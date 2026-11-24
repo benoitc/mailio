@@ -9,7 +9,7 @@
 %%%    into a structured term.
 %%%
 %%% The connection FSM owns all sockets and timing; this module only knows
-%%% bytes <-> terms.
+%%% bytes and terms.
 -module(mailio_imap_proto).
 
 %% Command encoders

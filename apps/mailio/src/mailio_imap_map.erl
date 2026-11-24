@@ -1,9 +1,9 @@
-%%% @doc IMAP <-> JMAP mapping (pure).
+%%% @doc IMAP to JMAP mapping (pure).
 %%%
 %%% Translates between IMAP wire concepts and Mailio's JMAP-shaped model:
-%%% system flags <-> keywords, folder attributes/names <-> mailbox roles,
+%%% system flags and keywords, folder attributes and names and mailbox roles,
 %%% and the per-mailbox sync cursor `{uidvalidity, highestmodseq, uidnext}'
-%%% <-> an opaque adapter `remote_state' binary.
+%%% and an opaque adapter `remote_state' binary.
 -module(mailio_imap_map).
 
 -include("mailio.hrl").

@@ -4,7 +4,7 @@
 %%% normalized domain events to subscriber processes. Dispatch uses plain
 %%% message sends and never blocks on a slow subscriber; delivery is
 %%% best-effort. Subscribers needing at-least-once semantics resume from
-%%% the `seq' carried on every envelope via {@link mailio_changes:since/3}.
+%%% the `seq' carried on every envelope via `mailio_changes:since/3' in the store.
 %%%
 %%% Subscribers are monitored and their subscriptions are removed on exit.
 -module(mailio_events).

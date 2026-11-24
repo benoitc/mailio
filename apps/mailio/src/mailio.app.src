@@ -1,5 +1,5 @@
 {application, mailio, [
-    {description, "Mail protocol and MIME library: IMAP, MIME, RFC 5322. No database."},
+    {description, "IMAP, POP3 and SMTP clients, MIME and RFC 5322. OTP only, no database."},
     {vsn, "0.1.0"},
     {registered, []},
     {applications, [
@@ -11,5 +11,7 @@
     ]},
     {env, []},
     {modules, []},
-    {licenses, ["Apache-2.0"]}
+    {pkg_name, mailio},
+    {licenses, ["Apache-2.0"]},
+    {links, []}
 ]}.
