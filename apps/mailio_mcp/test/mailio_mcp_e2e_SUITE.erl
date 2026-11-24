@@ -1,3 +1,6 @@
+%%% Copyright (c) 2026 Benoit Chesneau
+%%% Apache License 2.0
+%%%
 %%% End-to-end tests: a real MCP client (barrel_mcp_client over Streamable
 %%% HTTP, plus one stdio run) against the service, with GreenMail as the
 %%% disposable mail server. Start it first: (cd test && docker compose up -d).

@@ -1,3 +1,6 @@
+%%% Copyright (c) 2026 Benoit Chesneau
+%%% Apache License 2.0
+%%%
 %%% @doc Account and principal configuration.
 %%%
 %%% Configuration lives in the `mailio_mcp' application env.

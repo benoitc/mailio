@@ -1,3 +1,6 @@
+%%% Copyright (c) 2026 Benoit Chesneau
+%%% Apache License 2.0
+%%%
 %%% @doc Pure IMAP4rev1 protocol codec (no I/O).
 %%%
 %%% Two halves, both side-effect free and exhaustively unit-testable:

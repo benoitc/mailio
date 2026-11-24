@@ -1,3 +1,6 @@
+%%% Copyright (c) 2026 Benoit Chesneau
+%%% Apache License 2.0
+%%%
 %%% @doc Durable workflow consumer.
 %%%
 %%% A consumer tails the account changes feed for a set of entity types,

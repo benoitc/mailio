@@ -1,3 +1,6 @@
+%%% Copyright (c) 2026 Benoit Chesneau
+%%% Apache License 2.0
+%%%
 %%% @doc Run a function in its own process with a time limit.
 %%%
 %%% Used for code that is not ours (rule handlers, allowlisted calls, agent

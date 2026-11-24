@@ -1,3 +1,6 @@
+%%% Copyright (c) 2026 Benoit Chesneau
+%%% Apache License 2.0
+%%%
 %%% @doc Shapes internal message maps into compact tool output and builds
 %%% the signed handles that name a message occurrence.
 -module(mailio_mcp_view).

@@ -1,3 +1,6 @@
+%%% Copyright (c) 2026 Benoit Chesneau
+%%% Apache License 2.0
+%%%
 %%% @doc POP3 client (RFC 1939, with CAPA, UIDL, TOP, STLS and the XOAUTH2
 %%% SASL mechanism).
 %%%

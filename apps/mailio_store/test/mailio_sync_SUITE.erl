@@ -1,3 +1,6 @@
+%%% Copyright (c) 2026 Benoit Chesneau
+%%% Apache License 2.0
+%%%
 %%% @doc M5 sync-engine vertical slice (against the scripted fake server).
 %%%
 %%% Proves the full chain: a configured IMAP account discovers mailboxes,

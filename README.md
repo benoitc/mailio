@@ -48,3 +48,7 @@ Every app is formatted with erlfmt and linted with elvis: `rebar3 fmt --check`, 
 
 - `mailio` and `mailio_mcp` do not depend on `barrel_docdb`.
 - TLS certificates and host names are verified by default in every client; set `verify => verify_none` to turn it off for a test server.
+
+## License
+
+Apache License 2.0, see [LICENSE](LICENSE).

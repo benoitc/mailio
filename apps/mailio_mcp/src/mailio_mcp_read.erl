@@ -1,3 +1,6 @@
+%%% Copyright (c) 2026 Benoit Chesneau
+%%% Apache License 2.0
+%%%
 %%% @doc mail_read: open a message, a thread timeline or one MIME part from
 %%% a typed handle. Content is bounded and marked as untrusted data.
 -module(mailio_mcp_read).

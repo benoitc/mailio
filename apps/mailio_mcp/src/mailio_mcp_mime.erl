@@ -1,3 +1,6 @@
+%%% Copyright (c) 2026 Benoit Chesneau
+%%% Apache License 2.0
+%%%
 %%% @doc MIME helpers for the MCP tools: header lookup, address lists,
 %%% text extraction, quoted-history handling and paging. Decoding of
 %%% transfer encodings, charsets and RFC 2047 words is done by the mailio

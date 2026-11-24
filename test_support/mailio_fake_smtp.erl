@@ -1,3 +1,6 @@
+%%% Copyright (c) 2026 Benoit Chesneau
+%%% Apache License 2.0
+%%%
 %%% A scriptable SMTP server for tests. Options:
 %%%   mode: ok | drop_after_data | reject_data | defer_data | reject_mail_from
 %%%         | defer_mail_from | auth_fail

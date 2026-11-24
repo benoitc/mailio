@@ -1,3 +1,6 @@
+%%% Copyright (c) 2026 Benoit Chesneau
+%%% Apache License 2.0
+%%%
 %%% Shared definitions for mailio_store.
 
 -include_lib("mailio/include/mailio.hrl").

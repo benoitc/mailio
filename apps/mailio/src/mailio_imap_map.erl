@@ -1,3 +1,6 @@
+%%% Copyright (c) 2026 Benoit Chesneau
+%%% Apache License 2.0
+%%%
 %%% @doc IMAP to JMAP mapping (pure).
 %%%
 %%% Translates between IMAP wire concepts and Mailio's JMAP-shaped model:

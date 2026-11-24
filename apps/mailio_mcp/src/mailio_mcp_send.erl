@@ -1,3 +1,6 @@
+%%% Copyright (c) 2026 Benoit Chesneau
+%%% Apache License 2.0
+%%%
 %%% @doc Idempotent send. A send is bound to (account, draft revision,
 %%% payload) by an idempotency key. A repeated or concurrent call returns
 %%% the recorded status; a changed payload under the same key is refused;

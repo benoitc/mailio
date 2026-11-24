@@ -1,3 +1,6 @@
+%%% Copyright (c) 2026 Benoit Chesneau
+%%% Apache License 2.0
+%%%
 %%% @doc Action executor for rules and agents.
 %%%
 %%% A single audited vocabulary that both the rules engine and AI handlers

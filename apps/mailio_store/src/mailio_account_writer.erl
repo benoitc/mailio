@@ -1,3 +1,6 @@
+%%% Copyright (c) 2026 Benoit Chesneau
+%%% Apache License 2.0
+%%%
 %%% @doc Per-account sole writer.
 %%%
 %%% Every mutation to an account's database flows through this one process,

@@ -1,3 +1,6 @@
+%%% Copyright (c) 2026 Benoit Chesneau
+%%% Apache License 2.0
+%%%
 %%% @doc Process registry (via-compatible).
 %%%
 %%% A tiny name registry backed by a public ETS table, usable as a `{via,

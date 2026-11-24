@@ -1,3 +1,6 @@
+%%% Copyright (c) 2026 Benoit Chesneau
+%%% Apache License 2.0
+%%%
 %%% @doc Credential provider behaviour and facade.
 %%%
 %%% Account documents never store secrets; they reference a provider as

@@ -1,3 +1,6 @@
+%%% Copyright (c) 2026 Benoit Chesneau
+%%% Apache License 2.0
+%%%
 %%% Test helpers: GreenMail seeding, a flaky SMTP server, app start/stop and
 %%% an MCP client wrapper that records tool calls, response bytes and
 %%% backend requests.

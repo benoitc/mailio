@@ -1,3 +1,6 @@
+%%% Copyright (c) 2026 Benoit Chesneau
+%%% Apache License 2.0
+%%%
 %%% @doc Content-addressed blob files.
 %%%
 %%% The bytes of a raw message live in `<Root>/<Scope>/<aa>/<sha256hex>', where

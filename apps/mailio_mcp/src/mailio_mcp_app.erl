@@ -1,3 +1,6 @@
+%%% Copyright (c) 2026 Benoit Chesneau
+%%% Apache License 2.0
+%%%
 %%% @doc Application callback: loads configuration, starts the supervisor
 %%% and registers the MCP tools.
 -module(mailio_mcp_app).

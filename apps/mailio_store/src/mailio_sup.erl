@@ -1,3 +1,6 @@
+%%% Copyright (c) 2026 Benoit Chesneau
+%%% Apache License 2.0
+%%%
 %%% @doc Root supervisor.
 %%%
 %%% Strategy is `rest_for_one' in start order: the registry owns the name

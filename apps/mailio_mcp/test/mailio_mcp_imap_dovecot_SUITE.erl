@@ -1,3 +1,6 @@
+%%% Copyright (c) 2026 Benoit Chesneau
+%%% Apache License 2.0
+%%%
 %%% The IMAP adapter against a real server (Dovecot), for what GreenMail and the
 %%% fake server cannot show: QRESYNC, STARTTLS, implicit TLS, UTF-8 search and
 %%% UTF-7 mailbox names. Start it first:

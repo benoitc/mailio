@@ -1,3 +1,6 @@
+%%% Copyright (c) 2026 Benoit Chesneau
+%%% Apache License 2.0
+%%%
 %%% @doc Result budget. A search result is serialized once; if it exceeds
 %%% the byte budget, long strings are cut first and then trailing hits are
 %%% dropped, with truncation and continuation info returned.

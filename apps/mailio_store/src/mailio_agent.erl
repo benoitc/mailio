@@ -1,3 +1,6 @@
+%%% Copyright (c) 2026 Benoit Chesneau
+%%% Apache License 2.0
+%%%
 %%% @doc Capability-scoped surface for AI agents.
 %%%
 %%% Gives an agent controlled, high-level access to mail without exposing

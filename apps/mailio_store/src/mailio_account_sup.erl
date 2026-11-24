@@ -1,3 +1,6 @@
+%%% Copyright (c) 2026 Benoit Chesneau
+%%% Apache License 2.0
+%%%
 %%% @doc Per-account supervision subtree.
 %%%
 %%% Holds the processes for one account: the account process, its sole

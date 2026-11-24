@@ -1,3 +1,6 @@
+%%% Copyright (c) 2026 Benoit Chesneau
+%%% Apache License 2.0
+%%%
 %%% @doc M8 mutations, actions, and rules-engine suite.
 -module(mailio_workflow_SUITE).
 

@@ -1,3 +1,6 @@
+%%% Copyright (c) 2026 Benoit Chesneau
+%%% Apache License 2.0
+%%%
 -module(mailio_mcp_sup).
 -behaviour(supervisor).
 -export([start_link/0, init/1]).

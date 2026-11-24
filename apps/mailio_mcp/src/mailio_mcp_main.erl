@@ -1,3 +1,6 @@
+%%% Copyright (c) 2026 Benoit Chesneau
+%%% Apache License 2.0
+%%%
 %%% @doc Entry point for running the service as an MCP server.
 %%%
 %%% stdio: `bin/mailio-mcp' (default). The protocol owns stdout, so

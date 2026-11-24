@@ -1,3 +1,6 @@
+%%% Copyright (c) 2026 Benoit Chesneau
+%%% Apache License 2.0
+%%%
 %%% @doc Corpus-driven compliance suite (M2).
 %%%
 %%% Each case loads a real `.eml' fixture from the data directory and

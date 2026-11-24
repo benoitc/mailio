@@ -1,3 +1,6 @@
+%%% Copyright (c) 2026 Benoit Chesneau
+%%% Apache License 2.0
+%%%
 %%% @doc mail_changes: additions, updates and removals since an opaque
 %%% checkpoint. The checkpoint names stored per-mailbox snapshots, so a
 %%% replay after a restart compares against the same state and an unchanged

@@ -1,3 +1,6 @@
+%%% Copyright (c) 2026 Benoit Chesneau
+%%% Apache License 2.0
+%%%
 %%% @doc M6 durability and consistency suite.
 %%%
 %%% Exercises the recovery and repair machinery: persistence across a store

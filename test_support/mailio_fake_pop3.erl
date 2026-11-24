@@ -1,3 +1,6 @@
+%%% Copyright (c) 2026 Benoit Chesneau
+%%% Apache License 2.0
+%%%
 %%% A scriptable POP3 server for tests. Options:
 %%%   messages: [{Uidl, Raw}] in message-number order
 %%%   caps:     [binary()] advertised by CAPA, e.g. [<<"UIDL">>, <<"TOP">>, <<"STLS">>]

@@ -1,3 +1,6 @@
+%%% Copyright (c) 2026 Benoit Chesneau
+%%% Apache License 2.0
+%%%
 %%% @doc MIME tree parser (pure, total).
 %%%
 %%% Parses raw RFC 5322 bytes into a tree of parts. A leaf part carries a

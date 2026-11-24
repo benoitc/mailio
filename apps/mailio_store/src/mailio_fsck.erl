@@ -1,3 +1,6 @@
+%%% Copyright (c) 2026 Benoit Chesneau
+%%% Apache License 2.0
+%%%
 %%% @doc Consistency check and repair for an account database.
 %%%
 %%% Mailbox `totalEmails'/`unreadEmails' counters are maintained

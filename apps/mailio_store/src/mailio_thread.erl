@@ -1,3 +1,6 @@
+%%% Copyright (c) 2026 Benoit Chesneau
+%%% Apache License 2.0
+%%%
 %%% @doc JMAP Thread facade.
 %%%
 %%% A Thread (RFC 8621 s3) is just `{id, emailIds}'; Mailio keeps a few

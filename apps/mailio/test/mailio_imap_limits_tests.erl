@@ -1,3 +1,6 @@
+%%% Copyright (c) 2026 Benoit Chesneau
+%%% Apache License 2.0
+%%%
 %%% Hostile or broken IMAP servers must not make the client buffer without bound.
 -module(mailio_imap_limits_tests).
 -include_lib("eunit/include/eunit.hrl").

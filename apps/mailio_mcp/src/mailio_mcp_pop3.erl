@@ -1,3 +1,6 @@
+%%% Copyright (c) 2026 Benoit Chesneau
+%%% Apache License 2.0
+%%%
 %%% @doc POP3 adapter. Mail stays on the server (no DELE is ever sent).
 %%% POP3 has no flags, folders or search, so the adapter keeps a local
 %%% metadata index built from UIDL and TOP and searches that index. Filters

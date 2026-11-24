@@ -1,3 +1,6 @@
+%%% Copyright (c) 2026 Benoit Chesneau
+%%% Apache License 2.0
+%%%
 %%% @doc Conversation threading (pure logic + reads).
 %%%
 %%% Assigns an email to a thread using its Message-ID references first

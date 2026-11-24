@@ -1,3 +1,6 @@
+%%% Copyright (c) 2026 Benoit Chesneau
+%%% Apache License 2.0
+%%%
 %%% @doc Byte-safe ASCII helpers (pure, total).
 %%%
 %%% The `string' module interprets its input as Unicode and raises on

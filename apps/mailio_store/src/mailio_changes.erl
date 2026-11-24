@@ -1,3 +1,6 @@
+%%% Copyright (c) 2026 Benoit Chesneau
+%%% Apache License 2.0
+%%%
 %%% @doc Durable changes-feed API.
 %%%
 %%% Reads the barrel changes feed for an account and normalizes each raw

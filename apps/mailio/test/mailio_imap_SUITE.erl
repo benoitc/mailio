@@ -1,3 +1,6 @@
+%%% Copyright (c) 2026 Benoit Chesneau
+%%% Apache License 2.0
+%%%
 %%% @doc IMAP adapter integration suite (against the scripted fake server).
 -module(mailio_imap_SUITE).
 

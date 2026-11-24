@@ -1,3 +1,6 @@
+%%% Copyright (c) 2026 Benoit Chesneau
+%%% Apache License 2.0
+%%%
 %%% @doc SMTP submission client (RFC 6409, RFC 5321).
 %%%
 %%% One call submits one message. The result tells the caller exactly where

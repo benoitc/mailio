@@ -1,3 +1,6 @@
+%%% Copyright (c) 2026 Benoit Chesneau
+%%% Apache License 2.0
+%%%
 %%% @doc M7 JMAP Email/query, get, changes and search suite.
 -module(mailio_query_SUITE).
 

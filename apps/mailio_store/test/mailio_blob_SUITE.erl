@@ -1,3 +1,7 @@
+%%% Copyright (c) 2026 Benoit Chesneau
+%%% Apache License 2.0
+%%%
+
 -module(mailio_blob_SUITE).
 -include_lib("common_test/include/ct.hrl").
 -include_lib("stdlib/include/assert.hrl").

@@ -1,3 +1,6 @@
+%%% Copyright (c) 2026 Benoit Chesneau
+%%% Apache License 2.0
+%%%
 %%% @doc Thin helper over barrel_docdb.
 %%%
 %%% This is deliberately not an abstraction layer: it normalizes return

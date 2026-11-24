@@ -1,3 +1,6 @@
+%%% Copyright (c) 2026 Benoit Chesneau
+%%% Apache License 2.0
+%%%
 %%% @doc Email model and JMAP Email facade.
 %%%
 %%% An email document mirrors JMAP Email (RFC 8621 s4): immutable

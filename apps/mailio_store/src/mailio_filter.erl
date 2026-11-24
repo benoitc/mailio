@@ -1,3 +1,6 @@
+%%% Copyright (c) 2026 Benoit Chesneau
+%%% Apache License 2.0
+%%%
 %%% @doc JMAP Email/query filter evaluation (pure).
 %%%
 %%% Evaluates a JMAP FilterCondition / FilterOperator tree against an email

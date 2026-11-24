@@ -1,3 +1,6 @@
+%%% Copyright (c) 2026 Benoit Chesneau
+%%% Apache License 2.0
+%%%
 %%% mail_changes on IMAP against mailio_fake_imap, which implements
 %%% CONDSTORE and QRESYNC. The server's command log shows which path ran.
 -module(mailio_mcp_imap_changes_tests).

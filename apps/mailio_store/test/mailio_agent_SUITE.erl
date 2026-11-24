@@ -1,3 +1,6 @@
+%%% Copyright (c) 2026 Benoit Chesneau
+%%% Apache License 2.0
+%%%
 %%% @doc M8 agent surface suite: grants, scope/mailbox enforcement, search,
 %%% context window, tag/mark + audit.
 -module(mailio_agent_SUITE).

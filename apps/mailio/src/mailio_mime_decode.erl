@@ -1,3 +1,6 @@
+%%% Copyright (c) 2026 Benoit Chesneau
+%%% Apache License 2.0
+%%%
 %%% @doc Low-level MIME decoders (pure, total).
 %%%
 %%% Transfer decodings (quoted-printable, base64), RFC 2047 encoded-words,

@@ -1,3 +1,6 @@
+%%% Copyright (c) 2026 Benoit Chesneau
+%%% Apache License 2.0
+%%%
 %%% @doc Adapter behaviour and dispatch. Each protocol module implements
 %%% the same functions over an account map. Jmap and API-based adapters can
 %%% be added behind this module without changing the tools.

@@ -1,3 +1,6 @@
+%%% Copyright (c) 2026 Benoit Chesneau
+%%% Apache License 2.0
+%%%
 %%% mailio_smtp against a real SMTP server (Mailpit). The unit tests use a
 %%% scripted fake server; this suite checks that what a real server received
 %%% is what we meant to send. Start it first:

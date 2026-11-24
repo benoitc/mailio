@@ -1,3 +1,6 @@
+%%% Copyright (c) 2026 Benoit Chesneau
+%%% Apache License 2.0
+%%%
 %%% Shared definitions for the mailio library.
 
 -ifndef(MAILIO_HRL).

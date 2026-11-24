@@ -1,3 +1,6 @@
+%%% Copyright (c) 2026 Benoit Chesneau
+%%% Apache License 2.0
+%%%
 %%% @doc Durable state: occurrences, sync checkpoints, drafts, send records
 %%% and the signing secret. Backed by dets under the data directory. It is
 %%% independent of the evictable cache in mailio_mcp_cache.

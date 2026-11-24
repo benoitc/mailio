@@ -1,3 +1,6 @@
+%%% Copyright (c) 2026 Benoit Chesneau
+%%% Apache License 2.0
+%%%
 %%% @doc Rule storage and evaluation.
 %%%
 %%% Rules are data, not code: a rule is a stored document with a `when'

@@ -1,3 +1,6 @@
+%%% Copyright (c) 2026 Benoit Chesneau
+%%% Apache License 2.0
+%%%
 %%% @doc M3 end-to-end ingestion suite.
 %%%
 %%% Exercises the no-network pipeline: feed raw RFC 5322 bytes through the

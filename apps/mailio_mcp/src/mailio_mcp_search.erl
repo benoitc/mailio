@@ -1,3 +1,6 @@
+%%% Copyright (c) 2026 Benoit Chesneau
+%%% Apache License 2.0
+%%%
 %%% @doc mail_search: scope check, parallel per-account search, exact time
 %%% filtering, stable merge, copy grouping, cursor paging and the result
 %%% budget.

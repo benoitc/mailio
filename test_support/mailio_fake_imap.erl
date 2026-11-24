@@ -1,3 +1,6 @@
+%%% Copyright (c) 2026 Benoit Chesneau
+%%% Apache License 2.0
+%%%
 %%% @doc Scripted fake IMAP server for adapter and sync tests.
 %%%
 %%% Implements enough of IMAP4rev1 + CONDSTORE/QRESYNC + IDLE to drive the

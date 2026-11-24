@@ -1,3 +1,6 @@
+%%% Copyright (c) 2026 Benoit Chesneau
+%%% Apache License 2.0
+%%%
 %%% @doc Supervisor for submission workers. One short-lived process per send,
 %%% never restarted: a send that died is reported as outcome_unknown by
 %%% {@link mailio_mcp_send}, not run a second time.

@@ -1,3 +1,6 @@
+%%% Copyright (c) 2026 Benoit Chesneau
+%%% Apache License 2.0
+%%%
 %%% @doc Static credential provider.
 %%%
 %%% ProviderArgs is a map keyed by `{AccountId, Service}' (or `AccountId'

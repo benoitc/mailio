@@ -1,3 +1,6 @@
+%%% Copyright (c) 2026 Benoit Chesneau
+%%% Apache License 2.0
+%%%
 %%% @doc Per-account session process and account helpers.
 %%%
 %%% In M3 this is intentionally small: it resolves the account's database

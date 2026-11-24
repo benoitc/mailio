@@ -1,3 +1,6 @@
+%%% Copyright (c) 2026 Benoit Chesneau
+%%% Apache License 2.0
+%%%
 %%% @doc Behaviour for AI-assisted processing handlers.
 %%%
 %%% An agent handler turns an `{agent_task, Kind, Opts}' action (raised by a

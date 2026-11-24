@@ -1,3 +1,6 @@
+%%% Copyright (c) 2026 Benoit Chesneau
+%%% Apache License 2.0
+%%%
 %%% @doc IMAP adapter. Mailboxes are opened read-only (EXAMINE) and content
 %%% is fetched with BODY.PEEK, so reading or searching never changes the
 %%% unread flag. Identity of a message is mailbox + UIDVALIDITY + UID.

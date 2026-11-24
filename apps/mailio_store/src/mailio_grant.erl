@@ -1,3 +1,6 @@
+%%% Copyright (c) 2026 Benoit Chesneau
+%%% Apache License 2.0
+%%%
 %%% @doc Agent capability grants.
 %%%
 %%% A grant authorizes an AI agent to use a set of accounts with specific

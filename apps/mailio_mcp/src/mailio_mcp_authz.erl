@@ -1,3 +1,6 @@
+%%% Copyright (c) 2026 Benoit Chesneau
+%%% Apache License 2.0
+%%%
 %%% @doc Permission checks. Every search, read, resource fetch and write
 %%% goes through here. An unknown account and an account the caller may not
 %%% see produce the same error, so the response never reveals which exists.

@@ -1,3 +1,6 @@
+%%% Copyright (c) 2026 Benoit Chesneau
+%%% Apache License 2.0
+%%%
 %%% @doc Live event registry and fan-out.
 %%%
 %%% A single gen_server holds subscriptions in an ETS table and dispatches

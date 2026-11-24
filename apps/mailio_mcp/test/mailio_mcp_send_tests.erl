@@ -1,3 +1,6 @@
+%%% Copyright (c) 2026 Benoit Chesneau
+%%% Apache License 2.0
+%%%
 %%% Send workers: crash, timeout and concurrency cap, with a fake SMTP module.
 -module(mailio_mcp_send_tests).
 -include_lib("eunit/include/eunit.hrl").

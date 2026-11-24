@@ -1,3 +1,6 @@
+%%% Copyright (c) 2026 Benoit Chesneau
+%%% Apache License 2.0
+%%%
 %%% @doc Barrel_docdb spike suite (M1).
 %%%
 %%% This suite is not a unit test of Mailio; it pins down the behaviour of

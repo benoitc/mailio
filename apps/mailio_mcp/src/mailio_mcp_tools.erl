@@ -1,3 +1,6 @@
+%%% Copyright (c) 2026 Benoit Chesneau
+%%% Apache License 2.0
+%%%
 %%% @doc MCP tool definitions and handlers. Seven tools, short schemas,
 %%% accurate read/write annotations. Handlers are thin: they identify the
 %%% caller and delegate.

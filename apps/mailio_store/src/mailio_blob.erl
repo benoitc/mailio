@@ -1,3 +1,6 @@
+%%% Copyright (c) 2026 Benoit Chesneau
+%%% Apache License 2.0
+%%%
 %%% @doc Content-addressed blob storage over barrel attachments.
 %%%
 %%% A blob is stored as a document `blob/<sha256hex>' with metadata, plus a

@@ -1,3 +1,6 @@
+%%% Copyright (c) 2026 Benoit Chesneau
+%%% Apache License 2.0
+%%%
 %%% @doc HTML to plain text extraction (pure, total).
 %%%
 %%% Used to derive indexable text and previews from text/html parts. This

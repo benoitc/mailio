@@ -1,3 +1,6 @@
+%%% Copyright (c) 2026 Benoit Chesneau
+%%% Apache License 2.0
+%%%
 %%% @doc Static capability table per protocol, and the effective
 %%% capabilities shown for an account (protocol facts plus the caller's role).
 -module(mailio_mcp_caps).

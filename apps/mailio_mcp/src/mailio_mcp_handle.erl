@@ -1,3 +1,6 @@
+%%% Copyright (c) 2026 Benoit Chesneau
+%%% Apache License 2.0
+%%%
 %%% @doc Signed opaque tokens for message handles, part handles, cursors and
 %%% checkpoints. A token binds the caller, so a handle or cursor is useless
 %%% to anybody else, and is checked again on every use.

@@ -1,3 +1,6 @@
+%%% Copyright (c) 2026 Benoit Chesneau
+%%% Apache License 2.0
+%%%
 %%% @doc Opaque per-account state tokens (JMAP-style).
 %%%
 %%% Wraps a barrel HLC changes cursor in a versioned, base64url-encoded

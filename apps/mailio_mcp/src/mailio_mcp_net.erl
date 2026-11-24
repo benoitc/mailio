@@ -1,3 +1,6 @@
+%%% Copyright (c) 2026 Benoit Chesneau
+%%% Apache License 2.0
+%%%
 %%% @doc Converts an account's incoming or outgoing settings into the
 %%% connection config the mailio protocol clients take. Secrets are resolved
 %%% when the connection is made, never stored.

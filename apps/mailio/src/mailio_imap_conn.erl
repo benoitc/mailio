@@ -1,3 +1,6 @@
+%%% Copyright (c) 2026 Benoit Chesneau
+%%% Apache License 2.0
+%%%
 %%% @doc IMAP connection FSM (gen_statem).
 %%%
 %%% Owns one TCP/TLS socket and serializes commands over it. The core

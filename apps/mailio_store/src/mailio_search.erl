@@ -1,3 +1,6 @@
+%%% Copyright (c) 2026 Benoit Chesneau
+%%% Apache License 2.0
+%%%
 %%% @doc Full-text search convenience over the JMAP Email/query facade.
 %%%
 %%% v1 is a substring search across subject, addresses, and extracted body

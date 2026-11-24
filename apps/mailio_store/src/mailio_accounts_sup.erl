@@ -1,3 +1,6 @@
+%%% Copyright (c) 2026 Benoit Chesneau
+%%% Apache License 2.0
+%%%
 %%% @doc Dynamic supervisor for per-account session subtrees.
 %%%
 %%% Uses the modern dynamic-child pattern: a regular `one_for_one'

@@ -1,3 +1,6 @@
+%%% Copyright (c) 2026 Benoit Chesneau
+%%% Apache License 2.0
+%%%
 %%% @doc Mailbox model (pure).
 %%%
 %%% A mailbox document mirrors JMAP Mailbox (RFC 8621 s2) with Mailio

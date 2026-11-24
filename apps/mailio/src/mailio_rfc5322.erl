@@ -1,3 +1,6 @@
+%%% Copyright (c) 2026 Benoit Chesneau
+%%% Apache License 2.0
+%%%
 %%% @doc RFC 5322 / 2045 header parsing (pure, total).
 %%%
 %%% Splits a message into headers and body, unfolds header field bodies,

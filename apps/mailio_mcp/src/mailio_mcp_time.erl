@@ -1,3 +1,6 @@
+%%% Copyright (c) 2026 Benoit Chesneau
+%%% Apache License 2.0
+%%%
 %%% @doc Time handling: RFC 3339 instants, date-only bounds in an IANA time
 %%% zone, and the zone rules themselves (read from the system TZif files,
 %%% including the POSIX rule that covers dates after the last stored

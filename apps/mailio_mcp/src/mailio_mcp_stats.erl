@@ -1,3 +1,6 @@
+%%% Copyright (c) 2026 Benoit Chesneau
+%%% Apache License 2.0
+%%%
 %%% @doc Counters for backend requests and bytes per account. Used to
 %%% show the network cost of a tool call. Holds no mail content.
 -module(mailio_mcp_stats).

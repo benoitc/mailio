@@ -1,3 +1,6 @@
+%%% Copyright (c) 2026 Benoit Chesneau
+%%% Apache License 2.0
+%%%
 %%% @doc Randomized property / fuzz suite for the MIME stack (M2).
 %%%
 %%% Uses a seeded PRNG (no external property-testing dependency) so runs are

@@ -1,3 +1,6 @@
+%%% Copyright (c) 2026 Benoit Chesneau
+%%% Apache License 2.0
+%%%
 %%% @doc Supervisor for one account's sync engine.
 %%%
 %%% Exists so that a sync engine that keeps crashing exhausts its own restart

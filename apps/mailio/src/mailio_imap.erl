@@ -1,3 +1,6 @@
+%%% Copyright (c) 2026 Benoit Chesneau
+%%% Apache License 2.0
+%%%
 %%% @doc IMAP protocol adapter.
 %%%
 %%% Implements {@link mailio_adapter} on top of {@link mailio_imap_conn},

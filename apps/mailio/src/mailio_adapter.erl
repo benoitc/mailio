@@ -1,3 +1,6 @@
+%%% Copyright (c) 2026 Benoit Chesneau
+%%% Apache License 2.0
+%%%
 %%% @doc Protocol adapter behaviour.
 %%%
 %%% Normalizes IMAP (now), JMAP and POP3 (later) into one callback contract

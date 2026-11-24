@@ -1,3 +1,6 @@
+%%% Copyright (c) 2026 Benoit Chesneau
+%%% Apache License 2.0
+%%%
 %%% @doc Evictable metadata and body cache. Entries are scoped by
 %%% account, capped by count and age, and invalidated per account when mail
 %%% changes. Nothing here is the source of truth: durable state is in

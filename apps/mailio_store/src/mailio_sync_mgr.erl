@@ -1,3 +1,6 @@
+%%% Copyright (c) 2026 Benoit Chesneau
+%%% Apache License 2.0
+%%%
 %%% @doc Per-account sync engine.
 %%%
 %%% Owns the protocol adapter connection for an account, discovers and maps

@@ -1,3 +1,6 @@
+%%% Copyright (c) 2026 Benoit Chesneau
+%%% Apache License 2.0
+%%%
 %%% @doc Submission bridge: maps an account's outgoing settings to the
 %%% `mailio_smtp' client and its result to the shape the send state machine
 %%% records. The protocol itself lives in the mailio library.

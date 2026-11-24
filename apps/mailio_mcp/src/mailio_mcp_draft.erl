@@ -1,3 +1,6 @@
+%%% Copyright (c) 2026 Benoit Chesneau
+%%% Apache License 2.0
+%%%
 %%% @doc Drafts. A draft belongs to one account and one permitted From
 %%% identity. Each save creates a new revision; sending binds to a
 %%% revision. Drafts are kept locally in the durable store.

@@ -1,3 +1,6 @@
+%%% Copyright (c) 2026 Benoit Chesneau
+%%% Apache License 2.0
+%%%
 %%% @doc Application callback for Mailio.
 -module(mailio_app).
 -behaviour(application).

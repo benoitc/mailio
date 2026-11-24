@@ -1,3 +1,6 @@
+%%% Copyright (c) 2026 Benoit Chesneau
+%%% Apache License 2.0
+%%%
 %%% @doc IMAP connection for the adapter: one `mailio_imap_conn' (the mailio
 %%% library's connection process, which owns TLS, authentication and the wire
 %%% format) per tool call. This module builds commands from the adapter's parts
