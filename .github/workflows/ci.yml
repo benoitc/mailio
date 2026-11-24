@@ -81,16 +81,21 @@ jobs:
       # the interop job below runs them against real servers.
       - run: rebar3 ct --dir apps/mailio/test
       - run: rebar3 ct --dir apps/mailio_store/test
+      - run: rebar3 ct --dir apps/mailio_mcp/test
 
   interop:
-    name: Real servers (Dovecot, GreenMail, Mailpit, Stalwart)
+    name: Real servers (Dovecot, GreenMail, Mailpit, Stalwart), OTP ${{ matrix.otp }}
     runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        otp: ['28', '29']
     steps:
       - uses: actions/checkout@v4
 
       - uses: erlef/setup-beam@v1
         with:
-          otp-version: '28'
+          otp-version: ${{ matrix.otp }}
           rebar3-version: 'nightly'
 
       - uses: actions/cache@v4
@@ -98,8 +103,8 @@ jobs:
           path: |
             _build
             ~/.cache/rebar3
-          key: ${{ runner.os }}-interop-${{ hashFiles('apps/*/rebar.config', 'rebar.config') }}
-          restore-keys: ${{ runner.os }}-interop-
+          key: ${{ runner.os }}-interop-otp-${{ matrix.otp }}-${{ hashFiles('apps/*/rebar.config', 'rebar.config') }}
+          restore-keys: ${{ runner.os }}-interop-otp-${{ matrix.otp }}-
 
       # the stdio test starts bin/mailio-mcp, which loads the default build
       - run: rebar3 compile
@@ -128,6 +133,8 @@ jobs:
           rebar3 ct --suite apps/mailio/test/mailio_interop_SUITE
           rebar3 ct --suite apps/mailio/test/mailio_smtp_mailpit_SUITE
 
+      # mailio_store has no real-server suite yet: its suites in the tests job
+      # use scripted servers. These two run the mailio_mcp app.
       - name: MCP server end to end
         run: |
           rebar3 ct --suite apps/mailio_mcp/test/mailio_mcp_e2e_SUITE
