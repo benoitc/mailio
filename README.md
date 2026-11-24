@@ -1,6 +1,6 @@
 # mailio
 
-An Erlang/OTP umbrella for working with mail. This page tells you which app to use and how to run the checks.
+An Erlang/OTP umbrella for working with mail. This page tells you which app to use and how to run the checks. To see how the apps fit together and why, read [the architecture](docs/architecture.md).
 
 | App | What it is | Depends on |
 |---|---|---|
