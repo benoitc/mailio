@@ -31,7 +31,7 @@ start_account(AccountId, Opts) when is_binary(AccountId), is_map(Opts) ->
     Spec = #{
         id => {account, AccountId},
         start => {mailio_account_sup, start_link, [AccountId, Opts]},
-        restart => transient,
+        restart => permanent,
         shutdown => infinity,
         type => supervisor,
         modules => [mailio_account_sup]

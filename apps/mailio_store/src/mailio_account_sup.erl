@@ -3,8 +3,9 @@
 %%% Holds the processes for one account: the account process, its sole
 %%% writer, and (when `imap' config is supplied) the sync engine. The
 %%% adapter, parser, and submission workers join here in later milestones.
-%%% `one_for_one' so the writer, account, and sync engine fail independently
-%%% — a sync/adapter crash must not lose the writer's in-memory cursor work.
+%%% `one_for_one' so the writer, account, and sync engine fail independently.
+%%% The sync engine sits under its own supervisor, so a sync crash loop ends
+%%% there and cannot take the account and writer down with it.
 -module(mailio_account_sup).
 -behaviour(supervisor).
 
@@ -53,16 +54,17 @@ sync_child(AccountId, #{imap := AdapterConfig} = Opts) ->
         account_id => AccountId,
         adapter => maps:get(adapter, Opts, mailio_imap),
         adapter_config => AdapterConfig,
-        watch_mailbox => maps:get(watch_mailbox, Opts, <<"INBOX">>)
+        watch_mailbox => maps:get(watch_mailbox, Opts, <<"INBOX">>),
+        connect_retry_ms => maps:get(connect_retry_ms, Opts, 1000)
     },
     [
         #{
-            id => sync,
-            start => {mailio_sync_mgr, start_link, [Args]},
-            restart => transient,
-            shutdown => 5000,
-            type => worker,
-            modules => [mailio_sync_mgr]
+            id => sync_sup,
+            start => {mailio_sync_sup, start_link, [Args]},
+            restart => permanent,
+            shutdown => infinity,
+            type => supervisor,
+            modules => [mailio_sync_sup]
         }
     ];
 sync_child(_AccountId, _Opts) ->

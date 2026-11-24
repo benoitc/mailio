@@ -25,6 +25,9 @@
 ]).
 -export([init/1, handle_call/3, handle_cast/2, handle_info/2, terminate/2]).
 
+-define(RETRY_MIN, 1000).
+-define(RETRY_MAX, 300000).
+
 -record(state, {
     account_id :: binary(),
     db :: binary(),
@@ -35,7 +38,12 @@
     %% imap mailbox name -> local mailbox id
     mailbox_map = #{} :: #{binary() => binary()},
     watch :: term() | undefined,
-    watch_mailbox :: binary() | undefined
+    watch_mailbox :: binary() | undefined,
+    %% reconnect schedule while the server is unreachable
+    retry_min = ?RETRY_MIN :: pos_integer(),
+    retry_max = ?RETRY_MAX :: pos_integer(),
+    retry_ms = ?RETRY_MIN :: pos_integer(),
+    retry_timer :: reference() | undefined
 }).
 
 %%====================================================================
@@ -91,13 +99,21 @@ init(Args) ->
         db = Db,
         adapter = Adapter,
         adapter_config = Config,
-        watch_mailbox = maps:get(watch_mailbox, Args, <<"INBOX">>)
+        watch_mailbox = maps:get(watch_mailbox, Args, <<"INBOX">>),
+        retry_min = maps:get(connect_retry_ms, Args, ?RETRY_MIN),
+        retry_ms = maps:get(connect_retry_ms, Args, ?RETRY_MIN)
     },
-    case connect(State0) of
-        {ok, State1} -> {ok, State1};
-        {error, Reason} -> {stop, Reason}
-    end.
+    %% An unreachable server is not a reason to fail: the account stays up and
+    %% the connection is retried with a growing delay.
+    {ok, try_connect(State0)}.
 
+handle_call(Req, _From, #state{conn = undefined} = State) when
+    Req =:= sync_all;
+    element(1, Req) =:= sync_mailbox;
+    element(1, Req) =:= reconcile_mailbox;
+    Req =:= watch_inbox
+->
+    {reply, {error, not_connected}, State};
 handle_call(sync_all, _From, State) ->
     {Result, State1} = do_sync_all(State),
     {reply, Result, State1};
@@ -121,6 +137,10 @@ handle_cast(_Msg, State) ->
 %% IDLE nudge: something changed in the watched mailbox. The watch holds the
 %% only connection in IDLE, which cannot also run commands, so stop the
 %% watch, resync, and resume watching.
+handle_info(reconnect, State) ->
+    {noreply, try_connect(State#state{retry_timer = undefined})};
+handle_info({imap_idle_event, _Pid, _Event}, #state{conn = undefined} = State) ->
+    {noreply, State};
 handle_info({imap_idle_event, _Pid, _Event}, State) ->
     State1 = stop_watch(State),
     {_Result, State2} = do_sync_mailbox(State1#state.watch_mailbox, State1),
@@ -143,14 +163,36 @@ terminate(_Reason, _State) ->
 %% Connection and mailbox discovery
 %%====================================================================
 
+%% Connect now; on failure schedule another attempt, doubling the delay.
+try_connect(State) ->
+    case connect(State) of
+        {ok, State1} ->
+            State1#state{retry_ms = State1#state.retry_min};
+        {error, Reason} ->
+            logger:warning(#{
+                msg => "mail server unreachable, will retry",
+                account => State#state.account_id,
+                reason => Reason,
+                retry_in_ms => State#state.retry_ms
+            }),
+            Timer = erlang:send_after(State#state.retry_ms, self(), reconnect),
+            State#state{
+                conn = undefined,
+                retry_timer = Timer,
+                retry_ms = min(State#state.retry_ms * 2, State#state.retry_max)
+            }
+    end.
+
 connect(#state{adapter = Adapter, adapter_config = Config} = State) ->
-    case Adapter:connect(Config) of
+    try Adapter:connect(Config) of
         {ok, Conn} ->
             Caps = Adapter:capabilities(Conn),
             State1 = State#state{conn = Conn, caps = Caps},
             {ok, discover_mailboxes(State1)};
         {error, Reason} ->
             {error, Reason}
+    catch
+        Class:Reason -> {error, {Class, Reason}}
     end.
 
 discover_mailboxes(#state{adapter = Adapter, conn = Conn, db = Db} = State) ->

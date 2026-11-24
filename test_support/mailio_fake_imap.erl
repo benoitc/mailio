@@ -35,7 +35,7 @@ msg(Id, Subject) ->
 start() -> start(#{}).
 
 start(Opts) ->
-    {ok, LSock} = gen_tcp:listen(0, [
+    {ok, LSock} = gen_tcp:listen(maps:get(port, Opts, 0), [
         binary,
         {active, false},
         {packet, line},
