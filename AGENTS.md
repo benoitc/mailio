@@ -211,12 +211,8 @@ text updates the citations and the table, with no CHANGELOG entry.
 
 ### Known gaps in the safety check
 
-These are bugs under the rules above; fix them as such, one pull request each,
-with a test that drives a hostile server.
-
-- The IMAP client does not bound the size of a literal or a response line, so a
-  server can make it buffer without limit.
-- `mailio_pop3` accumulates a multi-line reply with no bound, and relies on the
-  size the server reported in `LIST`.
-- `mailio_smtp` does not bound a reply line or the number of lines.
-- `mailio_mime` bounds nesting depth but not the number of parts.
+None known. The limits that bound what a peer can make us hold are
+configurable: IMAP `max_literal`, `max_line` and `max_response`; POP3
+`max_list_bytes` and `max_top_bytes`; MIME `max_mime_parts`. SMTP reply limits
+are fixed. When you find a new gap, list it here as a bug under the rules above,
+fix it in its own pull request, and test it with a server that misbehaves.

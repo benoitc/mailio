@@ -67,7 +67,13 @@ init_per_suite(Config) ->
                 undefined ->
                     {skip, "run apps/mailio/test/mailpit/gen-certs.sh and restart Dovecot"};
                 CA ->
-                    [{ca, CA}, {holder, Holder} | Config]
+                    case wait_ready(120) of
+                        ok ->
+                            [{ca, CA}, {holder, Holder} | Config];
+                        timeout ->
+                            Holder ! stop,
+                            {skip, "Dovecot is running but does not accept logins after 60 seconds"}
+                    end
             end
     end.
 
@@ -81,7 +87,6 @@ end_per_suite(Config) ->
     end.
 
 init_per_testcase(_, Config) ->
-    wait_ready(),
     purge(<<"INBOX">>),
     mailio_mcp_stats:reset(),
     Config.
@@ -122,13 +127,15 @@ account(Over) ->
     }.
 
 %% Dovecot answers "waiting for authentication" for a few seconds after start.
-wait_ready() -> wait_ready(30).
+%% Wait for Dovecot to accept a login, once for the whole suite: a cold
+%% container takes a while, and one skip is clearer than every case failing.
 wait_ready(0) ->
-    ct:fail(dovecot_not_ready);
+    timeout;
 wait_ready(N) ->
     case mailio_mcp_imap_io:open(account()) of
         {ok, C} ->
-            mailio_mcp_imap_io:close(C);
+            mailio_mcp_imap_io:close(C),
+            ok;
         {error, _} ->
             timer:sleep(500),
             wait_ready(N - 1)
