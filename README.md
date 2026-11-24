@@ -42,7 +42,7 @@ apps/mailio/test/mailpit/gen-certs.sh
 rebar3 ct --suite apps/mailio_mcp/test/mailio_mcp_imap_dovecot_SUITE
 ```
 
-Formatting and lint rules apply to `apps/mailio_mcp` only: `rebar3 fmt --check`, `rebar3 lint`. See `apps/mailio_mcp/AGENTS.md` for the full list of checks.
+Every app is formatted with erlfmt and linted with elvis: `rebar3 fmt --check`, `rebar3 lint`. [CONTRIBUTING.md](CONTRIBUTING.md) lists the checks to run before a commit, and [AGENTS.md](AGENTS.md) is for AI coding agents.
 
 ## Notes
 
