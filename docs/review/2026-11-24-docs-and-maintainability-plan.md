@@ -202,7 +202,9 @@ Status of the required items:
 | Library overview, limits table, usage guide, public API tiers | done: `apps/mailio/doc/overview.md`, `usage.md` |
 | ExDoc and package metadata | done: `apps/mailio/rebar.config`, `mailio.app.src`; `rebar3 hex build` builds package and docs |
 | Persistent `request_state_key` | done: `request_state_key` secret reference in the `mailio_mcp` config, documented in `client-setup.md` |
-| Validation matrix | see the release notes of the branch |
+| Validation matrix | done, see below |
+
+Validation matrix on this branch: erlfmt clean; compile with no warnings; eunit 265 pass; elvis clean; xref clean; Dialyzer 4 warnings, all in old code (`mailio_imap` twice, `mailio_rfc5322`, `mailio_account_writer`) and accepted; library CT 27 pass (includes Mailpit); store CT 70 pass; mcp CT 23 pass (9 GreenMail end-to-end, 14 Dovecot); `rebar3 tree` shows `mailio_mcp` and `mailio` free of `mailio_store` and `barrel_docdb`; `rebar3 hex build` builds the package and docs for `mailio`.
 
 Still open before publishing `mailio`:
 
