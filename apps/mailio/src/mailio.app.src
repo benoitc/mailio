@@ -1,0 +1,15 @@
+{application, mailio, [
+    {description, "Mail protocol and MIME library: IMAP, MIME, RFC 5322. No database."},
+    {vsn, "0.1.0"},
+    {registered, []},
+    {applications, [
+        kernel,
+        stdlib,
+        crypto,
+        public_key,
+        ssl
+    ]},
+    {env, []},
+    {modules, []},
+    {licenses, ["Apache-2.0"]}
+]}.

@@ -1,0 +1,22 @@
+# A real SMTP server for the mailio_smtp tests: Mailpit captures every message
+# and exposes it over an HTTP API, so a test can check what actually arrived.
+#   SMTP 11025 (STARTTLS offered, authentication required: testuser / testpass)
+#   API  18025
+# These are not the Mailpit defaults (1025 and 8025): 1025 is the default port of
+# several local mail tools, such as Proton Mail Bridge, and a test must never
+# talk to one of those.
+# Run ./gen-certs.sh once, then: docker compose up -d
+services:
+  mailpit:
+    image: axllent/mailpit:latest
+    ports:
+      - "11025:1025"
+      - "18025:8025"
+    volumes:
+      - ./certs:/certs:ro
+    environment:
+      MP_SMTP_AUTH: "testuser:testpass"
+      MP_SMTP_AUTH_ALLOW_INSECURE: "1"
+      MP_SMTP_TLS_CERT: /certs/mailpit.pem
+      MP_SMTP_TLS_KEY: /certs/mailpit.key
+      MP_MAX_MESSAGES: "500"

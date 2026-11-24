@@ -1,0 +1,21 @@
+{application, mailio_store, [
+    {description, "Mail store, sync, rules and agent surface on top of mailio"},
+    {vsn, "0.1.0"},
+    {registered, [mailio_sup]},
+    {mod, {mailio_app, []}},
+    {applications, [
+        kernel,
+        stdlib,
+        crypto,
+        public_key,
+        ssl,
+        mailio,
+        barrel_docdb
+    ]},
+    {env, [
+        {data_dir, "data/mailio"},
+        {system_db, <<"mailio_system">>}
+    ]},
+    {modules, []},
+    {licenses, ["Apache-2.0"]}
+]}.
