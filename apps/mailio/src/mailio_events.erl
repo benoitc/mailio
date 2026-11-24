@@ -24,7 +24,10 @@
     types :: [atom()] | all
 }).
 
--record(state, {monitors = #{} :: #{reference() => pid()}}).
+-record(state, {
+    monitors = #{} :: #{reference() => reference()},
+    by_ref = #{} :: #{reference() => reference()}
+}).
 
 %%====================================================================
 %% API
@@ -89,10 +92,20 @@ handle_call({subscribe, Topic, Pid}, _From, State) ->
     ets:insert(?TABLE, Sub),
     MRef = erlang:monitor(process, Pid),
     Monitors = maps:put(MRef, Ref, State#state.monitors),
-    {reply, {ok, Ref}, State#state{monitors = Monitors}};
+    ByRef = maps:put(Ref, MRef, State#state.by_ref),
+    {reply, {ok, Ref}, State#state{monitors = Monitors, by_ref = ByRef}};
 handle_call({unsubscribe, Ref}, _From, State) ->
     ets:delete(?TABLE, Ref),
-    {reply, ok, State};
+    case maps:take(Ref, State#state.by_ref) of
+        {MRef, ByRef} ->
+            erlang:demonitor(MRef, [flush]),
+            {reply, ok, State#state{
+                monitors = maps:remove(MRef, State#state.monitors),
+                by_ref = ByRef
+            }};
+        error ->
+            {reply, ok, State}
+    end;
 handle_call(_Req, _From, State) ->
     {reply, {error, unknown_request}, State}.
 
@@ -103,7 +116,10 @@ handle_info({'DOWN', MRef, process, _Pid, _Reason}, State) ->
     case maps:take(MRef, State#state.monitors) of
         {Ref, Monitors} ->
             ets:delete(?TABLE, Ref),
-            {noreply, State#state{monitors = Monitors}};
+            {noreply, State#state{
+                monitors = Monitors,
+                by_ref = maps:remove(Ref, State#state.by_ref)
+            }};
         error ->
             {noreply, State}
     end;
