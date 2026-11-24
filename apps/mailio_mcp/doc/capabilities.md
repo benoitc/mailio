@@ -24,9 +24,10 @@ IMAP commands are the ones the adapter sends; the login and logout around them a
 |---|---|---|---|
 | IMAP search, read, thread, mailboxes | yes | yes | Read-only open and `BODY.PEEK`; the unread flag is checked after searching and reading |
 | IMAP changes (added, updated, removed) | yes | yes | Without QRESYNC, a comparison of every message's flags with the snapshot, tested against GreenMail |
-| IMAP changes with QRESYNC | yes | yes | The server reports only what changed since the checkpoint and the mailbox stays read-only. Tested against a fake server that implements QRESYNC (GreenMail does not), including the fallback to the full comparison. Not yet run against a real QRESYNC server |
+| IMAP changes with QRESYNC | yes | yes | The server reports only what changed since the checkpoint and the mailbox stays read-only. Tested against a real Dovecot (baseline, unchanged, flag change, new message, expunge, a chain of checkpoints) and a fake server, including the fallback to the full comparison. The adapter enables CONDSTORE first, because a server reports the mod-sequence only to a client that asked for it |
 | IMAP IDLE | no | no | Deferred; the mailio library has it, see "Next" |
-| IMAP implicit TLS and STARTTLS | yes | yes | The adapter uses the mailio IMAP connection. Certificates and host names are verified by default; a wrong CA, a wrong host name and a server that refuses STARTTLS are all refused, and the password is never sent before TLS |
+| IMAP implicit TLS and STARTTLS | yes | yes | The adapter uses the mailio IMAP connection. Certificates and host names are verified by default; a wrong CA, a wrong host name and a server that refuses STARTTLS are all refused, and the password is never sent before TLS. Tested against Dovecot in both modes, and against scripted servers for the refusals |
+| IMAP search with non-ASCII text, UTF-7 mailbox names | yes | yes | Non-ASCII search text is sent as a literal; folder names are encoded as modified UTF-7. Tested against Dovecot |
 | POP3 with UIDL and TOP, local index | yes | yes | Mail stays on the server; no `DELE` is ever sent |
 | POP3 without UIDL or TOP | yes | partly | The library fallbacks are tested; the adapter's header-hash identity is not |
 | POP3 filters it cannot do (`unread`, `received_at`) | yes | yes | Reported as `unsupported` per account, not ignored |
@@ -51,6 +52,5 @@ IMAP commands are the ones the adapter sends; the login and logout around them a
 ## Next
 
 - IDLE for push-style `mail_changes`.
-- Run the QRESYNC path against a real server such as Dovecot.
 - Write drafts to the server Drafts folder.
 - A JMAP adapter.

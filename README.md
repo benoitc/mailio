@@ -34,6 +34,14 @@ rebar3 ct --suite apps/mailio/test/mailio_smtp_mailpit_SUITE
 
 It listens on ports 11025 and 18025, not the Mailpit defaults, because 1025 is also the default port of local mail tools such as Proton Mail Bridge.
 
+The IMAP adapter is tested against a real Dovecot, which has QRESYNC, STARTTLS and implicit TLS (GreenMail has none of them). It reuses the certificate from the Mailpit setup:
+
+```bash
+apps/mailio/test/mailpit/gen-certs.sh
+(cd apps/mailio_mcp/test/dovecot && docker compose up -d --build)
+rebar3 ct --suite apps/mailio_mcp/test/mailio_mcp_imap_dovecot_SUITE
+```
+
 Formatting and lint rules apply to `apps/mailio_mcp` only: `rebar3 fmt --check`, `rebar3 lint`. See `apps/mailio_mcp/AGENTS.md` for the full list of checks.
 
 ## Notes

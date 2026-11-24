@@ -63,7 +63,7 @@ rebar3 dialyzer             # Type checking must pass
 rebar3 xref                 # Cross-reference analysis must pass
 ```
 
-End-to-end tests need disposable mail servers. GreenMail serves IMAP, POP3 and SMTP; the SMTP client is also tested against Mailpit (see the README at the umbrella root):
+End-to-end tests need disposable mail servers. A real Dovecot checks the IMAP adapter (see the README at the umbrella root). GreenMail serves IMAP, POP3 and SMTP; the SMTP client is also tested against Mailpit (see the README at the umbrella root):
 
 ```bash
 (cd apps/mailio_mcp/test && docker compose up -d)

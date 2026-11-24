@@ -834,21 +834,32 @@ fingerprint(Account, #{mailbox := Box, uv := UV, uid := Uid}, MaxBytes) ->
 %% first baseline. Returns the observable additions, updates and removals
 %% and the new snapshot.
 -spec changes(map(), binary(), map() | undefined) -> {ok, map()} | {error, term()}.
-changes(Account, Box, Prev) ->
+changes(#{id := Id} = Account, Box, Prev) ->
     with_conn(Account, fun(C) ->
         case qresync_usable(C, Prev) of
             true ->
                 case qresync_changes(C, Account, Box, Prev) of
-                    fallback -> plain_changes(C, Account, Box, Prev);
-                    Result -> Result
+                    fallback -> counted(Id, changes_full, plain_changes(C, Account, Box, Prev));
+                    Result -> counted(Id, changes_qresync, Result)
                 end;
             false ->
-                plain_changes(C, Account, Box, Prev)
+                counted(Id, changes_full, plain_changes(C, Account, Box, Prev))
         end
     end).
 
+%% Which way a call to mail_changes was answered, for the stats counters.
+counted(Id, Kind, {ok, _} = Result) ->
+    mailio_mcp_stats:bump(Id, Kind, 1, 0),
+    Result;
+counted(_Id, _Kind, Other) ->
+    Other.
+
 %% Without QRESYNC: compare the flags of every message with the snapshot.
 plain_changes(C, Account, Box, Prev) ->
+    %% A server reports the mod-sequence of a mailbox only to a client that
+    %% enabled CONDSTORE, so ask first: the snapshot needs it, and the next
+    %% call can then use QRESYNC.
+    _ = enable_modseq(C),
     (fun() ->
         case examine(C, Box) of
             {ok, #{uv := UV} = Sel} ->
@@ -877,6 +888,17 @@ plain_changes(C, Account, Box, Prev) ->
                 E
         end
     end)().
+
+enable_modseq(C) ->
+    case mailio_mcp_imap_io:has_cap(C, <<"QRESYNC">>) of
+        true ->
+            mailio_mcp_imap_io:cmd(C, [<<"ENABLE QRESYNC">>]);
+        false ->
+            case mailio_mcp_imap_io:has_cap(C, <<"CONDSTORE">>) of
+                true -> mailio_mcp_imap_io:cmd(C, [<<"ENABLE CONDSTORE">>]);
+                false -> ok
+            end
+    end.
 
 %% QRESYNC (RFC 7162): the server reports what changed since the checkpoint's
 %% mod-sequence (flag changes, new messages, and the expunged UIDs), so no
