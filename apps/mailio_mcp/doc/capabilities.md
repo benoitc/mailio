@@ -8,13 +8,13 @@ This page lists what mailio_mcp does today and how much of it a test covers. You
 
 ## Measured cost
 
-Measured by the end-to-end suite against GreenMail, one account, one local day, text filter and attachment filter:
+Measured on 2026-11-24, after mailboxes were opened with EXAMINE for every read, by the end-to-end suite against GreenMail, one account, one local day, text filter and attachment filter:
 
 | Call | Response | IMAP commands | Wire bytes to and from the server |
 |---|---|---|---|
-| Cold search | 396 bytes | 4 | 1,885 |
-| Warm search (cache) | 456 bytes | 0 | 0 |
-| Unchanged poll (`mail_changes`) | 83 bytes | 3 | 699 |
+| Cold search | 395 bytes | 4 | 1,878 |
+| Warm search (cache) | 455 bytes | 0 | 0 |
+| Unchanged poll (`mail_changes`) | 83 bytes | 3 | 697 |
 
 IMAP commands are the ones the adapter sends; the login and logout around them are not counted, and neither is a connection attempt that never reached a server. GreenMail has no CONDSTORE, so the unchanged poll compares the flags of every message. With QRESYNC the server reports only what changed, so an unchanged poll lists no flags at all.
 

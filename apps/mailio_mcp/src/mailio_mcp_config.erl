@@ -8,6 +8,7 @@
 
 -export([
     load_env_file/0,
+    apply_request_state_key/0,
     accounts/0,
     account/1,
     principal/1,
@@ -36,6 +37,28 @@ load_env_file() ->
                 end,
                 Terms
             )
+    end.
+
+%% @doc Give barrel_mcp its request-state signing key from the secret
+%% reference `request_state_key' in the mailio_mcp config (`{env, _}',
+%% `{file, _}' or `{cmd, _}'), so the key is not written in the config file.
+%% Without one barrel_mcp makes a key per start: fine for one stdio process,
+%% wrong for HTTP behind more than one node or across restarts. A key shorter
+%% than 32 bytes is refused.
+-spec apply_request_state_key() -> ok | {error, term()}.
+apply_request_state_key() ->
+    case application:get_env(?APP, request_state_key) of
+        undefined ->
+            ok;
+        {ok, Ref} ->
+            case resolve_secret(Ref) of
+                {ok, Key} when byte_size(Key) >= 32 ->
+                    application:set_env(barrel_mcp, request_state_key, Key);
+                {ok, _} ->
+                    {error, request_state_key_too_short};
+                {error, _} = E ->
+                    E
+            end
     end.
 
 %% @doc All configured accounts, normalized.

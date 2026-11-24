@@ -97,6 +97,24 @@ MAILIO_MCP_CONFIG=/path/to/mail.config apps/mailio_mcp/bin/mailio-mcp http
 
 The `sub` claim of the bearer token must equal a principal `id` from your `principals` list. The server listens on 127.0.0.1 by default; put TLS in front of it or use barrel_mcp's `ssl` option before exposing it. The end-to-end tests run this transport with a verifier function; the other `barrel_mcp_auth_bearer` options are barrel_mcp's, see its authentication guide.
 
+## Set a persistent request-state key (HTTP deployments)
+
+Some MCP requests are answered in two steps, and the second step carries a signed token from the first. Without a configured key, barrel_mcp makes a new one on every start, so a retry after a restart, or one that lands on another node, is refused. Over stdio with a single process you can skip this. For a shared HTTP deployment, point `request_state_key` at a secret of at least 32 bytes:
+
+```erlang
+{mailio_mcp, [
+    {request_state_key, {env, "MAILIO_MCP_STATE_KEY"}}
+]}.
+```
+
+Generate the value once and keep it in your secret store, the same way as the account passwords:
+
+```bash
+export MAILIO_MCP_STATE_KEY="$(openssl rand -base64 48)"
+```
+
+`{file, Path}` and `{cmd, Command}` work as well. The server refuses to start if the reference cannot be read or the key is shorter than 32 bytes. Use the same key on every node.
+
 ## Check that it works
 
 Ask your agent to list the accounts, or call the tools directly. A search for one local day:

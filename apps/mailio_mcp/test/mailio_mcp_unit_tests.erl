@@ -278,3 +278,31 @@ authz_test_() ->
                 )
             ]
         end}.
+
+request_state_key_test_() ->
+    Cleanup = fun(_) ->
+        application:unset_env(mailio_mcp, request_state_key),
+        application:unset_env(barrel_mcp, request_state_key)
+    end,
+    {setup, fun() -> ok end, Cleanup, [
+        fun() ->
+            ?assertEqual(ok, mailio_mcp_config:apply_request_state_key()),
+            ?assertEqual(undefined, application:get_env(barrel_mcp, request_state_key, undefined))
+        end,
+        fun() ->
+            Key = binary:copy(<<"k">>, 40),
+            application:set_env(mailio_mcp, request_state_key, {value, Key}),
+            ?assertEqual(ok, mailio_mcp_config:apply_request_state_key()),
+            ?assertEqual({ok, Key}, application:get_env(barrel_mcp, request_state_key))
+        end,
+        fun() ->
+            application:set_env(mailio_mcp, request_state_key, {value, <<"short">>}),
+            ?assertEqual(
+                {error, request_state_key_too_short}, mailio_mcp_config:apply_request_state_key()
+            )
+        end,
+        fun() ->
+            application:set_env(mailio_mcp, request_state_key, {env, "MAILIO_NO_SUCH_VAR_XYZ"}),
+            ?assertMatch({error, {missing_env, _}}, mailio_mcp_config:apply_request_state_key())
+        end
+    ]}.

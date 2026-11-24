@@ -13,6 +13,7 @@ run([]) -> run_mode(stdio).
 run_mode(Mode) ->
     ok = to_stderr(),
     ok = mailio_mcp_config:load_env_file(),
+    ok = mailio_mcp_config:apply_request_state_key(),
     {ok, _} = application:ensure_all_started(mailio_mcp),
     ok = barrel_mcp_registry:wait_for_ready(),
     case Mode of
