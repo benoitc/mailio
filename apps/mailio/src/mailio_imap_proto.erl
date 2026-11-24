@@ -41,7 +41,11 @@
 ]).
 
 %% Response decoding
--export([read_response/1, parse_response/1]).
+-export([read_response/1, read_response/2, parse_response/1]).
+
+-define(MAX_LITERAL, 67108864).
+-define(MAX_LINE, 65536).
+-define(MAX_RESPONSE, 100663296).
 
 %% Helpers exposed for the FSM/adapter
 -export([quote/1, format_seqset/1, parse_uid_set/1]).
@@ -211,12 +215,29 @@ idle_done() -> "DONE\r\n".
 
 %% @doc Frame one complete logical response from the buffer. Returns the
 %% response bytes (including embedded literal data, excluding the final
-%% CRLF) and the remaining buffer, or `more' if incomplete.
--spec read_response(binary()) -> {ok, binary(), binary()} | more.
+%% CRLF) and the remaining buffer, or `more' if incomplete. Uses the default
+%% limits, see {@link read_response/2}.
+-spec read_response(binary()) -> {ok, binary(), binary()} | more | {error, response_too_large}.
 read_response(Buffer) ->
-    case logical_length(Buffer, 0) of
+    read_response(Buffer, #{}).
+
+%% @doc Like {@link read_response/1} with explicit limits: `max_literal'
+%% (one literal), `max_line' (one line outside literals) and `max_response'
+%% (a whole logical response). A peer that announces or sends more gets
+%% `{error, response_too_large}' before the data is buffered.
+-spec read_response(binary(), map()) ->
+    {ok, binary(), binary()} | more | {error, response_too_large}.
+read_response(Buffer, Opts) ->
+    Limits = #{
+        literal => maps:get(max_literal, Opts, ?MAX_LITERAL),
+        line => maps:get(max_line, Opts, ?MAX_LINE),
+        response => maps:get(max_response, Opts, ?MAX_RESPONSE)
+    },
+    case logical_length(Buffer, 0, Limits) of
         more ->
             more;
+        {error, _} = Err ->
+            Err;
         {ok, TotalLen, CrlfLen} ->
             Line = binary:part(Buffer, 0, TotalLen - CrlfLen),
             Rest = binary:part(Buffer, TotalLen, byte_size(Buffer) - TotalLen),
@@ -226,21 +247,31 @@ read_response(Buffer) ->
 %% Walk physical lines, jumping over literal payloads, until a CRLF that is
 %% not preceded by a literal spec. Returns the total length up to and
 %% including that terminating CRLF.
-logical_length(Buffer, Pos) ->
+logical_length(Buffer, Pos, Limits) ->
     case find_crlf(Buffer, Pos) of
         nomatch ->
-            more;
+            case byte_size(Buffer) - Pos > maps:get(line, Limits) of
+                true -> {error, response_too_large};
+                false -> more
+            end;
+        CrlfPos when CrlfPos - Pos > map_get(line, Limits) ->
+            {error, response_too_large};
         CrlfPos ->
             case literal_before(Buffer, Pos, CrlfPos) of
                 {literal, N} ->
                     DataStart = CrlfPos + 2,
                     DataEnd = DataStart + N,
-                    case byte_size(Buffer) >= DataEnd of
-                        true -> logical_length(Buffer, DataEnd);
-                        false -> more
+                    if
+                        N > map_get(literal, Limits) -> {error, response_too_large};
+                        DataEnd > map_get(response, Limits) -> {error, response_too_large};
+                        byte_size(Buffer) >= DataEnd -> logical_length(Buffer, DataEnd, Limits);
+                        true -> more
                     end;
                 none ->
-                    {ok, CrlfPos + 2, 2}
+                    case CrlfPos + 2 > map_get(response, Limits) of
+                        true -> {error, response_too_large};
+                        false -> {ok, CrlfPos + 2, 2}
+                    end
             end
     end.
 

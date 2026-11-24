@@ -29,6 +29,7 @@
     auth/3,
     auth_failed/3,
     tls_failed/3,
+    response_too_large/3,
     ready/3,
     running/3,
     idle/3,
@@ -217,6 +218,8 @@ greeting(info, {Tag, Sock, Bin}, #data{sock = Sock} = Data) when
             {next_state, ready, Data2};
         {ok, _Other, Data2} ->
             {next_state, backoff, Data2};
+        {error, response_too_large} ->
+            {next_state, response_too_large, Data1};
         more ->
             {keep_state, Data1}
     end;
@@ -330,6 +333,27 @@ tls_failed(_Type, _Event, Data) ->
     {keep_state, Data}.
 
 %%====================================================================
+%% State: response_too_large (terminal: the server sent more than allowed)
+%%====================================================================
+
+response_too_large(enter, _Old, #data{transport = T, sock = Sock, from = From} = Data) ->
+    _ =
+        case Sock of
+            undefined -> ok;
+            _ -> catch_close(T, Sock)
+        end,
+    Replies =
+        case From of
+            undefined -> [];
+            _ -> [{reply, From, {error, response_too_large}}]
+        end,
+    {keep_state, Data#data{sock = undefined, buffer = <<>>, from = undefined}, Replies};
+response_too_large({call, From}, _Req, Data) ->
+    {keep_state, Data, [{reply, From, {error, response_too_large}}]};
+response_too_large(_Type, _Event, Data) ->
+    {keep_state, Data}.
+
+%%====================================================================
 %% State: ready
 %%====================================================================
 
@@ -406,6 +430,8 @@ handle_idle_responses(Data, Acts) ->
     case take_one(Data) of
         more ->
             {keep_state, Data, Acts};
+        {error, response_too_large} ->
+            {next_state, response_too_large, Data, Acts};
         {ok, {continuation, _Text}, Data1} ->
             %% Server accepted IDLE: acknowledge the idle_start caller now,
             %% while staying in the idle state.
@@ -458,6 +484,8 @@ loop_responses(Data, Done) ->
     case take_one(Data) of
         more ->
             {keep_state, Data};
+        {error, response_too_large} ->
+            {next_state, response_too_large, Data};
         {ok, {continuation, _Text}, Data1} ->
             case Data1#data.literal of
                 undefined ->
@@ -492,14 +520,17 @@ maybe_capture_caps(Data, _) -> Data.
 drain_unsolicited(Data) ->
     case take_one(Data) of
         more -> Data;
+        {error, response_too_large} -> Data#data{buffer = <<>>};
         {ok, _Resp, Data1} -> drain_unsolicited(Data1)
     end.
 
 %% Frame and parse a single response from the buffer.
-take_one(#data{buffer = Buf} = Data) ->
-    case mailio_imap_proto:read_response(Buf) of
+take_one(#data{buffer = Buf, config = Config} = Data) ->
+    case mailio_imap_proto:read_response(Buf, Config) of
         more ->
             more;
+        {error, response_too_large} ->
+            {error, response_too_large};
         {ok, Line, Rest} ->
             Resp = mailio_imap_proto:parse_response(Line),
             {ok, Resp, Data#data{buffer = Rest}}
