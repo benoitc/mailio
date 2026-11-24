@@ -17,7 +17,9 @@
     list_mailboxes/1,
     fetch_changes_initial/1,
     fetch_message/1,
-    set_keywords/1
+    set_keywords/1,
+    reads_open_read_only/1,
+    writes_open_read_write/1
 ]).
 
 all() ->
@@ -26,7 +28,9 @@ all() ->
         list_mailboxes,
         fetch_changes_initial,
         fetch_message,
-        set_keywords
+        set_keywords,
+        reads_open_read_only,
+        writes_open_read_write
     ].
 
 init_per_suite(Config) ->
@@ -122,3 +126,23 @@ set_keywords(Config) ->
     ok = mailio_imap:set_keywords(Conn, <<"INBOX">>, 101, [?KW_FLAGGED], []),
     Flags = mailio_fake_imap:last_flags(Srv, 101),
     ?assert(lists:member(<<"\\Flagged">>, Flags)).
+
+%% Opening a mailbox to read it must not take write access.
+reads_open_read_only(Config) ->
+    Conn = ?config(conn, Config),
+    Srv = ?config(srv, Config),
+    {ok, _, State, done} = mailio_imap:fetch_changes_since(Conn, <<"INBOX">>, initial, #{}),
+    %% the QRESYNC path as well
+    {ok, _, _, done} = mailio_imap:fetch_changes_since(Conn, <<"INBOX">>, State, #{}),
+    {ok, _} = mailio_imap:fetch_message(Conn, <<"INBOX">>, 100, fun(_) -> ok end),
+    {ok, _} = mailio_imap:list_uids(Conn, <<"INBOX">>),
+    Cmds = mailio_fake_imap:commands(Srv),
+    ?assertEqual([], [C || C <- Cmds, binary:match(C, <<"SELECT ">>) =/= nomatch]),
+    ?assertNotEqual([], [C || C <- Cmds, binary:match(C, <<"EXAMINE ">>) =/= nomatch]).
+
+writes_open_read_write(Config) ->
+    Conn = ?config(conn, Config),
+    Srv = ?config(srv, Config),
+    ok = mailio_imap:set_keywords(Conn, <<"INBOX">>, 101, [?KW_FLAGGED], []),
+    Cmds = mailio_fake_imap:commands(Srv),
+    ?assertNotEqual([], [C || C <- Cmds, binary:match(C, <<"SELECT ">>) =/= nomatch]).

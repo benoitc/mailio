@@ -20,6 +20,7 @@
     logout/1,
     enable/2,
     select_qresync/4,
+    examine_qresync/4,
     select/2,
     examine/2,
     list/3,
@@ -111,9 +112,18 @@ select(Tag, Mailbox) -> [Tag, " SELECT ", quote(Mailbox), "\r\n"].
 %% the given mod-sequence.
 -spec select_qresync(binary(), binary(), non_neg_integer(), non_neg_integer()) -> iodata().
 select_qresync(Tag, Mailbox, UidValidity, ModSeq) ->
+    qresync_open(Tag, " SELECT ", Mailbox, UidValidity, ModSeq).
+
+%% The same, read-only (EXAMINE): for reading changes without being able to
+%% alter the mailbox.
+-spec examine_qresync(binary(), binary(), non_neg_integer(), non_neg_integer()) -> iodata().
+examine_qresync(Tag, Mailbox, UidValidity, ModSeq) ->
+    qresync_open(Tag, " EXAMINE ", Mailbox, UidValidity, ModSeq).
+
+qresync_open(Tag, Verb, Mailbox, UidValidity, ModSeq) ->
     [
         Tag,
-        " SELECT ",
+        Verb,
         quote(Mailbox),
         " (QRESYNC (",
         integer_to_binary(UidValidity),

@@ -124,7 +124,7 @@ use_qresync(Caps, Prev) ->
 %% Plain / CONDSTORE path: SELECT, then UID-FETCH for new and (if CONDSTORE)
 %% CHANGEDSINCE for flag updates. Removals are not detected here.
 plain_changes(Pid, Caps, MailboxId, Prev) ->
-    case do_select(Pid, MailboxId) of
+    case do_examine(Pid, MailboxId) of
         {ok, SelInfo} ->
             New = sel_to_state(SelInfo),
             case uidvalidity_changed(Prev, New) of
@@ -146,7 +146,7 @@ plain_changes(Pid, Caps, MailboxId, Prev) ->
 qresync_changes(Pid, MailboxId, Prev) ->
     UidValidity = maps:get(uidvalidity, Prev),
     ModSeq = maps:get(highestmodseq, Prev),
-    case do_select_qresync(Pid, MailboxId, UidValidity, ModSeq) of
+    case do_examine_qresync(Pid, MailboxId, UidValidity, ModSeq) of
         {ok, SelInfo, Vanished, Updated} ->
             New = sel_to_state(SelInfo),
             case uidvalidity_changed(Prev, New) of
@@ -161,9 +161,9 @@ qresync_changes(Pid, MailboxId, Prev) ->
             command_error(Other)
     end.
 
-do_select_qresync(Pid, MailboxId, UidValidity, ModSeq) ->
+do_examine_qresync(Pid, MailboxId, UidValidity, ModSeq) ->
     Builder = fun(T) ->
-        {mailio_imap_proto:select_qresync(T, MailboxId, UidValidity, ModSeq), undefined}
+        {mailio_imap_proto:examine_qresync(T, MailboxId, UidValidity, ModSeq), undefined}
     end,
     case run(Pid, Builder) of
         {ok, Untagged, {ok, _, _}} ->
@@ -251,7 +251,7 @@ fetch_updated(Pid, Caps, PrevModSeq) ->
 -spec fetch_message(conn(), binary(), term(), mailio_adapter:fetch_sink()) ->
     {ok, #{size := non_neg_integer()}} | {error, term()}.
 fetch_message(#{pid := Pid}, MailboxId, Uid, Sink) ->
-    case do_select(Pid, MailboxId) of
+    case do_examine(Pid, MailboxId) of
         {ok, _} ->
             Items = [<<"BODY.PEEK[]">>],
             case run(Pid, fun(T) -> {mailio_imap_proto:uid_fetch(T, Uid, Items), undefined} end) of
@@ -413,7 +413,7 @@ watch(#{pid := Pid, caps := Caps}, MailboxId, NotifyPid) ->
         false ->
             {error, not_supported};
         true ->
-            case do_select(Pid, MailboxId) of
+            case do_examine(Pid, MailboxId) of
                 {ok, _} ->
                     case mailio_imap_conn:idle_start(Pid, NotifyPid) of
                         ok -> {ok, {idle, Pid}};
@@ -433,7 +433,7 @@ unwatch(_Conn, _Ref) ->
 %% List all uids currently present (UID SEARCH ALL).
 -spec list_uids(conn(), binary()) -> {ok, [integer()]} | {error, term()}.
 list_uids(#{pid := Pid}, MailboxId) ->
-    case do_select(Pid, MailboxId) of
+    case do_examine(Pid, MailboxId) of
         {ok, _} ->
             case run(Pid, fun(T) -> {mailio_imap_proto:uid_search(T, <<"ALL">>), undefined} end) of
                 {ok, Untagged, {ok, _, _}} ->
@@ -450,8 +450,16 @@ list_uids(#{pid := Pid}, MailboxId) ->
 %% Selection and cursor helpers
 %%====================================================================
 
+%% Read-write: only for commands that change the mailbox.
 do_select(Pid, MailboxId) ->
-    case run(Pid, fun(T) -> {mailio_imap_proto:select(T, MailboxId), undefined} end) of
+    open_mailbox(Pid, fun(T) -> mailio_imap_proto:select(T, MailboxId) end).
+
+%% Read-only (EXAMINE): for everything that only reads.
+do_examine(Pid, MailboxId) ->
+    open_mailbox(Pid, fun(T) -> mailio_imap_proto:examine(T, MailboxId) end).
+
+open_mailbox(Pid, Cmd) ->
+    case run(Pid, fun(T) -> {Cmd(T), undefined} end) of
         {ok, Untagged, {ok, _Code, _Text}} ->
             {ok, parse_select(Untagged)};
         Other ->
