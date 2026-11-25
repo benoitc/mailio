@@ -31,6 +31,7 @@
 -define(MAX_REPLY_BYTES, 65536).
 -define(TIMEOUT, 30000).
 -define(TRACKED, mailio_smtp_submit).
+-define(BODY_SENT, mailio_smtp_body_sent).
 
 -type config() :: map().
 -type result() :: #{
@@ -55,9 +56,28 @@ submit(Config, From, Rcpts, Data) ->
         throw:{mailio_smtp, Error} ->
             Error;
         error:{badmatch, {Code, Text}} when is_integer(Code) ->
-            transient(unexpected_reply, #{code => Code, reply => bin(Text)})
+            unexpected(#{code => Code, reply => bin(Text)});
+        Class:_Reason ->
+            %% Whatever else goes wrong is an error value too, and says only what
+            %% kind it was: no detail of the server's data goes into it
+            unexpected(#{class => Class})
     after
+        erase(?BODY_SENT),
         release()
+    end.
+
+%% After the message was sent a lost answer means the outcome is unknown; before
+%% it nothing was submitted, so a retry is safe.
+unexpected(Detail) ->
+    case get(?BODY_SENT) of
+        true ->
+            unknown(Detail);
+        _ ->
+            try
+                transient(unexpected_reply, Detail)
+            catch
+                throw:{mailio_smtp, Error} -> Error
+            end
     end.
 
 %% The newest connection of a submission in progress. Whatever ends the call,
@@ -260,14 +280,29 @@ session(C, From, Rcpts, Data) ->
     case Accepted of
         [] ->
             _ = cmd_quiet(C, [<<"QUIT">>]),
-            throw(
-                {mailio_smtp,
-                    mailio_error:new(
-                        smtp_rejected,
-                        <<"every recipient was refused">>,
-                        #{stage => rcpt_to, rejected => Rejected}
-                    )}
-            );
+            %% Every recipient answered 4yz: the server asks for a retry (RFC 5321,
+            %% section 4.2.1), and nothing was submitted. Only refusals that are all
+            %% permanent are a rejection.
+            case lists:all(fun(#{code := Cd}) -> Cd >= 400 andalso Cd < 500 end, Rejected) of
+                true ->
+                    throw(
+                        {mailio_smtp,
+                            mailio_error:new(
+                                smtp_transient,
+                                <<"the server deferred every recipient">>,
+                                #{stage => rcpt_to, rejected => Rejected}
+                            )}
+                    );
+                false ->
+                    throw(
+                        {mailio_smtp,
+                            mailio_error:new(
+                                smtp_rejected,
+                                <<"every recipient was refused">>,
+                                #{stage => rcpt_to, rejected => Rejected}
+                            )}
+                    )
+            end;
         _ ->
             ok
     end,
@@ -276,6 +311,7 @@ session(C, From, Rcpts, Data) ->
         {DC, DT} -> rejected_or_transient(C, data, DC, DT, Rejected)
     end,
     %% From here on a lost reply means the outcome is unknown.
+    put(?BODY_SENT, true),
     Body = stuff(iolist_to_binary(Data)),
     case send(C, [Body, <<".\r\n">>]) of
         ok -> ok;

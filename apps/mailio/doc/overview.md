@@ -62,6 +62,8 @@ These affect code that calls `mailio_imap_proto` directly, which is public API.
 | `parse_uid_set/1` returned every UID of a set as a list | `parse_uid_ranges/1` returns sorted, merged `{Lo, Hi}` ranges (either end may come first). `expand_uid_ranges(Ranges, Max)` returns `{ok, List}` or `{error, too_many}`, and `uid_count/1` counts them |
 | `{vanished, Earlier, [Uid]}` | `{vanished, Earlier, [{Lo, Hi}]}` |
 | `read_response/3` took a byte offset | it takes `start`, then the state it returned in `{more, State}` |
+| An IMAP connection without a `tls` option used plain text | the default is `starttls`, as for POP3 and SMTP. Plain text needs `tls => false`. A server that greets with PREAUTH on a connection that has to be protected is refused with `tls_failed` |
+| `build/1` left out the Date header | it adds one (now, or the `date` you give in seconds since the epoch) unless you pass a `Date` header |
 
 The sync adapter (`mailio_adapter`) reports more than before:
 

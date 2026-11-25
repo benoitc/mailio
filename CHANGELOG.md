@@ -25,6 +25,12 @@
 - The sync adapter reports one more kind of change, telling the caller to read
   the whole mailbox again, for a server report that is too long to list.
 
+- Breaking: an IMAP connection now defaults to STARTTLS, like POP3 and SMTP.
+  Before, leaving out the TLS setting sent the password in plain text. Plain
+  text needs an explicit setting to turn TLS off. A server that greets as
+  already logged in is refused on a connection that has to be protected.
+- Messages built by the library now carry a Date header unless you give one.
+
 ### Fixed
 
 - A POP3 or SMTP connection that fails while it is being set up is now closed.
@@ -186,6 +192,13 @@
   server refuses to list flags, and its saved snapshot never grows past the
   configured size.
 - Mappings written by the intermediate build of this branch are still found.
+- When every recipient answers with a temporary failure, sending now reports a
+  temporary failure that can be retried, not a refusal. An unexpected answer
+  from the SMTP server while connecting is reported as an error, not raised.
+- Generated mail follows the format rules: encoded words in subjects and names
+  are at most 75 characters and long ones are folded, quoted-printable lines
+  are at most 76 characters, and a space or tab at the end of a line is
+  escaped.
 - A full read now checks the number of messages it listed against the number
   the server holds before it removes anything it did not list. A read that
   missed messages is made again, and after a few tries the sync stops with an

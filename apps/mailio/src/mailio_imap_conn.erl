@@ -82,7 +82,7 @@
 %% API
 %%====================================================================
 
-%% Config: #{host, port, tls => true | starttls | false, notify => pid(),
+%% Config: #{host, port, tls => true | starttls (the default) | false, notify => pid(),
 %%           io_hook => fun((sent | received, non_neg_integer()) -> term()),
 %%           credentials => mailio_credentials:cred(),
 %%           verify => verify_peer | verify_none, cacerts | cacertfile}.
@@ -156,9 +156,11 @@ close(Pid) ->
 
 callback_mode() -> [state_functions, state_enter].
 
-init(Config) ->
+init(Config0) ->
+    %% like POP3 and SMTP: the connection is protected unless it is said not to be
+    Config = maps:merge(#{tls => starttls}, Config0),
     Transport =
-        case maps:get(tls, Config, false) of
+        case maps:get(tls, Config) of
             true -> ssl;
             _ -> gen_tcp
         end,
@@ -263,6 +265,11 @@ greeting(info, {Tag, Sock, Bin}, #data{sock = Sock} = Data) when
     case take_one(Data1) of
         {ok, {untagged, {status_resp, ok, _Code, _Text}}, Data2} ->
             {next_state, after_greeting(Data2), Data2};
+        {ok, {untagged, {status_resp, preauth, _, _}}, #data{config = #{tls := starttls}} = Data2} ->
+            %% A server that is already logged in has nothing for us to protect
+            %% with STARTTLS, and this connection was to be protected: it is not
+            %% used (RFC 9051, section 7.1.4)
+            {next_state, tls_failed, Data2};
         {ok, {untagged, {status_resp, preauth, _, _}}, Data2} ->
             {next_state, ready, Data2};
         {ok, _Other, Data2} ->

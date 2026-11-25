@@ -51,6 +51,37 @@ partial_recipients_test() ->
         ?assertEqual(1, mailio_fake_smtp:data_count(Srv))
     end).
 
+%% Every recipient answered 4yz: a retry is what the server asks for, and nothing
+%% was submitted (RFC 5321, section 4.2.1).
+all_recipients_deferred_is_transient_test() ->
+    with(#{}, fun(Srv) ->
+        E = mailio_smtp:submit(cfg(Srv), <<"a@x">>, [<<"defer1@y">>, <<"defer2@y">>], ?MSG),
+        ?assertEqual(smtp_transient, code(E)),
+        ?assert(retryable(E)),
+        ?assertEqual(0, mailio_fake_smtp:data_count(Srv))
+    end).
+
+%% A mix of a deferral and a refusal is not a retry: one recipient will never take it.
+deferred_and_refused_recipients_are_rejected_test() ->
+    with(#{}, fun(Srv) ->
+        E = mailio_smtp:submit(cfg(Srv), <<"a@x">>, [<<"defer1@y">>, <<"bad1@y">>], ?MSG),
+        ?assertEqual(smtp_rejected, code(E))
+    end).
+
+%% A greeting or an EHLO answer that is not what the protocol says is an error
+%% value, never an exception out of submit.
+an_unexpected_greeting_is_an_error_value_test() ->
+    with(#{mode => bad_greeting}, fun(Srv) ->
+        E = mailio_smtp:submit(cfg(Srv), <<"a@x">>, [<<"b@y">>], ?MSG),
+        ?assertEqual(smtp_transient, code(E))
+    end).
+
+an_unexpected_ehlo_answer_is_an_error_value_test() ->
+    with(#{mode => bad_ehlo}, fun(Srv) ->
+        E = mailio_smtp:submit(cfg(Srv), <<"a@x">>, [<<"b@y">>], ?MSG),
+        ?assertEqual(smtp_transient, code(E))
+    end).
+
 all_recipients_refused_test() ->
     with(#{}, fun(Srv) ->
         E = mailio_smtp:submit(cfg(Srv), <<"a@x">>, [<<"bad1@y">>, <<"bad2@y">>], ?MSG),
