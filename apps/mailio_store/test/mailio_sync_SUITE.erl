@@ -43,6 +43,10 @@
     a_retry_after_an_expunge_removes_the_first_message/1,
     a_retry_after_flags_were_cleared_updates_the_first_message/1,
     a_full_read_beyond_the_listing_limit_stops/1,
+    a_full_resync_removes_more_than_one_chunk_of_mappings/1,
+    reconcile_removes_more_than_one_chunk_of_mappings/1,
+    a_reset_is_remembered_across_a_failed_retry_and_a_restart/1,
+    a_streamed_read_applies_flag_updates_in_order/1,
     an_unreliable_listing_does_not_remove_local_mail/1,
     a_repeated_cursor_ends_the_sync/1,
     an_endless_listing_is_bounded/1,
@@ -73,6 +77,10 @@ all() ->
         a_retry_after_an_expunge_removes_the_first_message,
         a_retry_after_flags_were_cleared_updates_the_first_message,
         a_full_read_beyond_the_listing_limit_stops,
+        a_full_resync_removes_more_than_one_chunk_of_mappings,
+        reconcile_removes_more_than_one_chunk_of_mappings,
+        a_reset_is_remembered_across_a_failed_retry_and_a_restart,
+        a_streamed_read_applies_flag_updates_in_order,
         an_unreliable_listing_does_not_remove_local_mail,
         a_repeated_cursor_ends_the_sync,
         an_endless_listing_is_bounded,
@@ -639,6 +647,128 @@ a_full_read_beyond_the_listing_limit_stops(Config) ->
     ?assertEqual(none, cursor_or_none(Db, LocalId)),
     {ok, _} = mailio_sync_mgr:sync_mailbox(Account, <<"INBOX">>),
     ?assertEqual(2, length(all_emails(Db))).
+
+%% More local UIDs than the database returns in one answer.
+many_local_mails(Config, N) ->
+    Account = ?config(account, Config),
+    {ok, LocalId} = ensure_inbox(Account),
+    [
+        {ok, _} = mailio_account_writer:ingest(
+            Account,
+            LocalId,
+            iolist_to_binary([
+                <<"From: a@x\r\nTo: b@y\r\nSubject: bulk ">>,
+                integer_to_binary(U),
+                <<"\r\nMessage-ID: <b">>,
+                integer_to_binary(U),
+                <<"@x>\r\n\r\nbody ">>,
+                integer_to_binary(U),
+                <<"\r\n">>
+            ]),
+            #{uid => U, uidvalidity => 1}
+        )
+     || U <- lists:seq(1000, 999 + N)
+    ],
+    LocalId.
+
+a_full_resync_removes_more_than_one_chunk_of_mappings(Config) ->
+    Account = ?config(account, Config),
+    Db = mailio_account:db_name(Account),
+    restart_with(Config, #{}, mailio_failing_adapter),
+    LocalId = many_local_mails(Config, 1201),
+    ?assertEqual({1201, 1201}, mailbox_counts(Account, LocalId)),
+    %% the server has nothing
+    application:set_env(mailio_store, script, fun(_) -> {ok, [], state(1, 5000), done} end),
+    try
+        {ok, S} = mailio_sync_mgr:sync_mailbox(Account, <<"INBOX">>),
+        ?assertEqual(1201, maps:get(removed, S))
+    after
+        application:unset_env(mailio_store, script)
+    end,
+    ?assertEqual(0, length(all_emails(Db))),
+    ?assertEqual({0, 0}, mailbox_counts(Account, LocalId)),
+    {ok, Left} = mailio_db:by_id_prefix(Db, <<?ID_UIDMAP, LocalId/binary, "/">>),
+    ?assertEqual([], Left),
+    ?assertNotEqual(none, cursor_or_none(Db, LocalId)).
+
+reconcile_removes_more_than_one_chunk_of_mappings(Config) ->
+    Account = ?config(account, Config),
+    Db = mailio_account:db_name(Account),
+    LocalId = many_local_mails(Config, 1201),
+    {ok, S} = mailio_sync_mgr:reconcile_mailbox(Account, <<"INBOX">>),
+    ?assertEqual(1201, maps:get(removed, S)),
+    ?assertEqual(0, length(all_emails(Db))),
+    ?assertEqual({0, 0}, mailbox_counts(Account, LocalId)).
+
+%% A reset seen once must not be forgotten if the read that followed it failed:
+%% what is held under the reused UIDs is replaced until a full read succeeds,
+%% also after the sync process was restarted.
+a_reset_is_remembered_across_a_failed_retry_and_a_restart(Config) ->
+    Account = ?config(account, Config),
+    Db = mailio_account:db_name(Account),
+    Srv = ?config(srv, Config),
+    restart_with(Config, #{}, mailio_failing_adapter),
+    {ok, _} = mailio_sync_mgr:sync_mailbox(Account, <<"INBOX">>),
+    ?assertEqual(2, length(all_emails(Db))),
+    ok = mailio_fake_imap:new_validity(Srv, [<<"Reborn one">>, <<"Reborn two">>]),
+    Plain = fun(Uid) -> {added, #{uid => Uid, keywords => []}} end,
+    Calls = counters:new(1, []),
+    %% first try: a page, then a reset, then the read that restarts fails
+    application:set_env(mailio_store, script, fun
+        (<<"p1">>) ->
+            {ok, [reset], <<"p2">>, more};
+        (initial) ->
+            counters:add(Calls, 1, 1),
+            case counters:get(Calls, 1) of
+                1 -> {ok, [Plain(100)], <<"p1">>, more};
+                _ -> {error, simulated_failure}
+            end;
+        (S) ->
+            {ok, [resync], S, done}
+    end),
+    try
+        ?assertMatch({error, _}, mailio_sync_mgr:sync_mailbox(Account, <<"INBOX">>))
+    after
+        application:unset_env(mailio_store, script)
+    end,
+    %% the sync process starts again, knowing nothing of what happened
+    restart_with(Config, #{}, mailio_failing_adapter),
+    application:set_env(mailio_store, script, fun
+        (initial) -> {ok, [Plain(100), Plain(101)], state(2, 102), done};
+        (S) -> {ok, [resync], S, done}
+    end),
+    try
+        {ok, _} = mailio_sync_mgr:sync_mailbox(Account, <<"INBOX">>)
+    after
+        application:unset_env(mailio_store, script)
+    end,
+    ?assertEqual([<<"Reborn one">>, <<"Reborn two">>], subjects(Account)).
+
+%% Pages of a full read are applied in the order they come, so an update on a
+%% later page is not lost.
+a_streamed_read_applies_flag_updates_in_order(Config) ->
+    Account = ?config(account, Config),
+    Db = mailio_account:db_name(Account),
+    restart_with(Config, #{}, mailio_failing_adapter),
+    {ok, LocalId} = ensure_inbox(Account),
+    Plain = fun(Uid) -> {added, #{uid => Uid, uidvalidity => 1, keywords => []}} end,
+    application:set_env(mailio_store, script, fun
+        (initial) ->
+            {ok, [Plain(100), Plain(101)], <<"page2">>, more};
+        (<<"page2">>) ->
+            {ok, [{updated, #{uid => 100, keywords => [<<"$seen">>]}}], state(1, 102), done};
+        (S) ->
+            {ok, [], S, done}
+    end),
+    try
+        {ok, _} = mailio_sync_mgr:sync_mailbox(Account, <<"INBOX">>)
+    after
+        application:unset_env(mailio_store, script)
+    end,
+    ?assertEqual(2, length(all_emails(Db))),
+    ?assert(mailio_email:is_seen(email_by_subject(Db, <<"First message">>))),
+    ?assertNot(mailio_email:is_seen(email_by_subject(Db, <<"Second message">>))),
+    ?assertEqual({2, 1}, mailbox_counts(Account, LocalId)).
 
 %% A listing that does not say what is there is not a listing of nothing.
 an_unreliable_listing_does_not_remove_local_mail(Config) ->

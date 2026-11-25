@@ -477,3 +477,24 @@ search_answer_is_read_whole_test() ->
     ?assertMatch(
         {untagged, {other, <<"SEARCH", _/binary>>}}, ?P:parse_response(<<"* SEARCH 5 abc 7">>)
     ).
+
+%% What a SEARCH answer may hold: numbers, and with CONDSTORE a closing (MODSEQ n).
+search_answer_with_brackets_is_not_read_test() ->
+    [
+        ?assertMatch({untagged, {other, <<"SEARCH", _/binary>>}}, ?P:parse_response(Wire))
+     || Wire <- [
+            <<"* SEARCH )">>,
+            <<"* SEARCH 5 ) 7">>,
+            <<"* SEARCH (5)">>,
+            <<"* SEARCH 5 (MODSEQ)">>,
+            <<"* SEARCH 5 (MODSEQ 9) 7">>,
+            <<"* SEARCH 01">>,
+            <<"* SEARCH 0">>
+        ]
+    ].
+
+search_answer_with_modseq_is_read_test() ->
+    ?assertEqual(
+        {untagged, {search, [5, 7]}}, ?P:parse_response(<<"* SEARCH 5 7 (MODSEQ 917162500)">>)
+    ),
+    ?assertEqual({untagged, {search, []}}, ?P:parse_response(<<"* SEARCH (MODSEQ 9)">>)).

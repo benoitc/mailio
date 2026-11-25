@@ -40,6 +40,10 @@
     a_search_answer_with_junk_is_an_error/1,
     an_explicit_empty_search_is_a_listing_of_nothing/1,
     a_mailbox_of_unknown_size_is_not_an_empty_one/1,
+    search_answers_that_are_not_valid_are_errors/1,
+    a_search_answer_outside_the_window_is_an_error/1,
+    a_search_answer_with_modseq_is_accepted/1,
+    a_uidnext_of_zero_is_not_trusted/1,
     writes_open_read_write/1
 ]).
 
@@ -69,6 +73,10 @@ all() ->
         a_search_answer_with_junk_is_an_error,
         an_explicit_empty_search_is_a_listing_of_nothing,
         a_mailbox_of_unknown_size_is_not_an_empty_one,
+        search_answers_that_are_not_valid_are_errors,
+        a_search_answer_outside_the_window_is_an_error,
+        a_search_answer_with_modseq_is_accepted,
+        a_uidnext_of_zero_is_not_trusted,
         writes_open_read_write
     ].
 
@@ -418,3 +426,37 @@ a_mailbox_of_unknown_size_is_not_an_empty_one(Config) ->
     Conn = conn_with(Config, #{}),
     ?assertMatch({error, _}, mailio_imap:list_uids(Conn, <<"INBOX">>)),
     ?assertMatch({error, _}, mailio_imap:fetch_changes_since(Conn, <<"INBOX">>, initial, #{})).
+
+search_answers_that_are_not_valid_are_errors(Config) ->
+    Srv = ?config(srv, Config),
+    Conn = conn_with(Config, #{}),
+    [
+        begin
+            ok = mailio_fake_imap:set_search(Srv, Mode),
+            ?assertMatch({error, _}, mailio_imap:list_uids(Conn, <<"INBOX">>))
+        end
+     || Mode <- [bracket, bracket_between, junk, none]
+    ].
+
+%% A number the window did not ask for is not an answer about the window.
+a_search_answer_outside_the_window_is_an_error(Config) ->
+    Srv = ?config(srv, Config),
+    ok = mailio_fake_imap:set_search(Srv, outside),
+    Conn = conn_with(Config, #{}),
+    ?assertMatch({error, _}, mailio_imap:list_uids(Conn, <<"INBOX">>)).
+
+%% The CONDSTORE form of the answer is a valid one.
+a_search_answer_with_modseq_is_accepted(Config) ->
+    Srv = ?config(srv, Config),
+    ok = mailio_fake_imap:set_search(Srv, modseq),
+    Conn = conn_with(Config, #{}),
+    ?assertEqual({ok, [100, 101]}, mailio_imap:list_uids(Conn, <<"INBOX">>)).
+
+%% UIDNEXT is a number from 1: 0 is not a value, so the highest UID is asked for.
+a_uidnext_of_zero_is_not_trusted(Config) ->
+    Srv = ?config(srv, Config),
+    ok = mailio_fake_imap:set_uidnext(Srv, 0),
+    Conn = conn_with(Config, #{}),
+    ?assertEqual({ok, [100, 101]}, mailio_imap:list_uids(Conn, <<"INBOX">>)),
+    {ok, Changes, _, done} = mailio_imap:fetch_changes_since(Conn, <<"INBOX">>, initial, #{}),
+    ?assertEqual([100, 101], [U || {added, #{uid := U}} <- Changes]).

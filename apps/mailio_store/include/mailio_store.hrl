@@ -20,6 +20,8 @@
 -define(ID_IDENTITY, "identity/").
 -define(ID_SUBMISSION, "submission/").
 -define(ID_SYNC_IMAP, "sync/imap/").
+%% Present while a mailbox that was recreated has not been read in full again.
+-define(ID_SYNC_RESET, "sync/reset/").
 -define(ID_UIDMAP, "uidmap/").
 -define(ID_RULE, "rule/").
 -define(ID_JOB, "job/").

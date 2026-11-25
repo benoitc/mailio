@@ -677,17 +677,17 @@ list_uid_windows(Pid, From, Upto, Window, AccRev) ->
             %% The server must have answered: an OK with no SEARCH line, or one
             %% that is not all numbers, says nothing about the mailbox. Only an
             %% explicit, empty `* SEARCH' is a window with no mail in it.
-            case
-                {[Us || {search, Us} <- Untagged], [
-                    R
-                 || {other, <<"SEARCH", _/binary>> = R} <- Untagged
-                ]}
-            of
-                {[_ | _] = Answers, []} ->
-                    Uids = [U || U <- lists:append(Answers), U >= From, U =< To],
+            Answers = [Us || {search, Us} <- Untagged],
+            Unreadable = [R || {other, <<"SEARCH", _/binary>> = R} <- Untagged],
+            Uids = lists:append(Answers),
+            InWindow = lists:all(fun(U) -> U >= From andalso U =< To end, Uids),
+            case {Answers, Unreadable, InWindow} of
+                {[_ | _], [], true} ->
                     list_uid_windows(Pid, To + 1, Upto, Window, [Uids | AccRev]);
                 _ ->
-                    command_error({error, search_answer_incomplete})
+                    %% a UID outside the window was not asked for: the answer is
+                    %% not about this window
+                    command_error({error, search_answer_invalid})
             end;
         Other ->
             command_error(Other)
@@ -775,7 +775,7 @@ select_field({flags, F}, Acc) ->
     Acc#{flags => F};
 select_field({status_resp, ok, {<<"UIDVALIDITY">>, [{number, V}]}, _}, Acc) ->
     Acc#{uidvalidity => V};
-select_field({status_resp, ok, {<<"UIDNEXT">>, [{number, V}]}, _}, Acc) ->
+select_field({status_resp, ok, {<<"UIDNEXT">>, [{number, V}]}, _}, Acc) when V >= 1 ->
     Acc#{uidnext => V};
 select_field({status_resp, ok, {<<"HIGHESTMODSEQ">>, [{number, V}]}, _}, Acc) ->
     Acc#{highestmodseq => V};

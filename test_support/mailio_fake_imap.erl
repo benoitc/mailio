@@ -91,8 +91,18 @@ set_option(Srv, Option, Bool) when
     call(Srv, {set_option, Option, Bool}, ok).
 
 %% @doc How UID SEARCH answers: `normal', `none' (tagged OK and no SEARCH line)
-%% or `junk' (a SEARCH line with a number that is not one).
-set_search(Srv, Mode) when Mode =:= normal; Mode =:= none; Mode =:= junk ->
+%% `junk' (a SEARCH line with a number that is not one), `outside' (a UID that was
+%% not asked for), `bracket' (`* SEARCH )'), `bracket_between' (`* SEARCH 5 ) 7') or
+%% `modseq' (the CONDSTORE form: the UIDs, then `(MODSEQ n)').
+set_search(Srv, Mode) when
+    Mode =:= normal;
+    Mode =:= none;
+    Mode =:= junk;
+    Mode =:= outside;
+    Mode =:= bracket;
+    Mode =:= bracket_between;
+    Mode =:= modseq
+->
     call(Srv, {set_search, Mode}, ok).
 
 %% @doc The UIDNEXT the server reports, for a mailbox whose UIDs are far apart.
@@ -576,7 +586,11 @@ handle_uid_search(Sock, Tag, Rest, #{messages := Ms} = State) ->
     case maps:get(search_mode, State, normal) of
         normal -> send(Sock, [<<"* SEARCH ">>, Uids, <<"\r\n">>]);
         none -> ok;
-        junk -> send(Sock, [<<"* SEARCH 5 abc 7\r\n">>])
+        junk -> send(Sock, [<<"* SEARCH 5 abc 7\r\n">>]);
+        outside -> send(Sock, <<"* SEARCH 99999\r\n">>);
+        bracket -> send(Sock, <<"* SEARCH )\r\n">>);
+        bracket_between -> send(Sock, <<"* SEARCH 5 ) 7\r\n">>);
+        modseq -> send(Sock, [<<"* SEARCH ">>, Uids, <<" (MODSEQ 9)\r\n">>])
     end,
     tagged(Sock, Tag, <<"OK UID SEARCH done">>),
     {continue, State}.

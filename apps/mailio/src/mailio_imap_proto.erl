@@ -416,10 +416,9 @@ keyword_response(<<"LSUB">>, Rest) ->
 keyword_response(<<"STATUS">>, Rest) ->
     parse_status(Rest);
 keyword_response(<<"SEARCH">>, Rest) ->
-    %% numbers only: an answer with anything else in it is not read in part
-    case [T || T <- tokenize(Rest), not is_number_token(T)] of
-        [] -> {search, [N || {number, N} <- tokenize(Rest)]};
-        _ -> {other, <<"SEARCH ", Rest/binary>>}
+    case parse_search(Rest) of
+        {ok, Numbers} -> {search, Numbers};
+        error -> {other, <<"SEARCH ", Rest/binary>>}
     end;
 keyword_response(<<"VANISHED">>, Rest) ->
     parse_vanished(Rest);
@@ -507,8 +506,50 @@ vanished_report(Earlier, Whole, Rest) ->
             {other, <<"VANISHED ", Whole/binary>>}
     end.
 
-is_number_token({number, _}) -> true;
-is_number_token(_) -> false.
+%% `* SEARCH' and numbers, with (MODSEQ n) after them when CONDSTORE is in use
+%% (RFC 7162, section 3.1.6). Nothing else is part of an answer, and one that
+%% holds anything else is not read in part.
+parse_search(Rest) ->
+    {Numbers, Tail} =
+        case binary:match(Rest, <<"(">>) of
+            nomatch -> {Rest, <<>>};
+            {At, _} -> {binary:part(Rest, 0, At), binary:part(Rest, At, byte_size(Rest) - At)}
+        end,
+    case search_modseq(mailio_ascii:trim(Tail)) of
+        ok -> search_numbers(binary:split(Numbers, [<<" ">>, <<"\t">>], [global, trim_all]), []);
+        error -> error
+    end.
+
+search_modseq(<<>>) ->
+    ok;
+search_modseq(<<"(", Rest/binary>>) ->
+    case binary:split(Rest, <<")">>) of
+        [Inner, <<>>] ->
+            case binary:split(Inner, <<" ">>, [global]) of
+                [Name, Value] ->
+                    case {string:uppercase(Name), digits(Value)} of
+                        {<<"MODSEQ">>, true} -> ok;
+                        _ -> error
+                    end;
+                _ ->
+                    error
+            end;
+        _ ->
+            error
+    end;
+search_modseq(_) ->
+    error.
+
+digits(<<>>) -> false;
+digits(Bin) -> lists:all(fun(C) -> C >= $0 andalso C =< $9 end, binary_to_list(Bin)).
+
+search_numbers([], Acc) ->
+    {ok, lists:reverse(Acc)};
+search_numbers([Word | Rest], Acc) ->
+    case uid(Word) of
+        {ok, N} -> search_numbers(Rest, [N | Acc]);
+        error -> error
+    end.
 
 %%====================================================================
 %% resp-text and codes:  "[CODE args] human text"

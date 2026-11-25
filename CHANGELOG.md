@@ -92,6 +92,21 @@
 - A search for the UIDs of a mailbox that is not answered in full is now an
   error, and so is a mailbox whose size the server does not give: neither is
   taken for an empty mailbox, and local mail is not removed on their account.
+- Listing the mail the store holds for a mailbox now reaches the last one.
+  Before, it stopped after the first thousand, so a full read or a clean-up of
+  a larger mailbox left mail behind and still kept the new position. This also
+  corrects every other place that listed a collection by its identifier.
+- A reply to a UID search that is not valid, for example one with a closing
+  bracket or a number outside the range asked for, is now an error. The form a
+  server uses with change tracking, with the modification number after the
+  numbers, is accepted. A "next UID" of zero is not trusted.
+- The store now applies flag updates that arrive on later pages of a full read,
+  and counts distinct numbers when it limits how many it keeps, in whatever
+  order they come.
+- When a mailbox is found to have been recreated, the store writes that down.
+  If the read that follows fails, or the process restarts, the next read still
+  replaces what it holds, even for an adapter that does not say which identity a
+  message was listed under.
 - A report of vanished messages without a list of numbers, or with one that is
   not well formed, is no longer acted on in part. Both the store and the MCP
   server compare the whole mailbox instead.

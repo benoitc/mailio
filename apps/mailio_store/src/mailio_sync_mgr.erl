@@ -276,13 +276,16 @@ run_sync(
     LocalId,
     #state{adapter = Adapter, conn = Conn, db = Db} = State
 ) ->
-    case load_cursor(Db, LocalId) of
-        initial ->
+    Stored = load_cursor(Db, LocalId),
+    case Stored =:= initial orelse reset_pending(Db, LocalId) of
+        true ->
             %% A first read is a full read, and it also brings in line what an
             %% earlier one that failed halfway left behind: what was stored then
-            %% may have changed on the server since.
+            %% may have changed on the server since. So is a read that must
+            %% replace the UIDs held because the mailbox was recreated.
             full_sync(resync, ImapName, LocalId, State);
-        RemoteState ->
+        false ->
+            RemoteState = Stored,
             Fetch = fun(Cursor) -> Adapter:fetch_changes_since(Conn, ImapName, Cursor, #{}) end,
             %% Each page is applied, and only then is the cursor it leads to kept: a
             %% page that cannot be applied leaves the cursor where it was, so it is
@@ -331,9 +334,11 @@ resync_mode(Changes) ->
 %% The mailbox is read in full and brought in line, and only then is the cursor
 %% it leads to kept: a failure is retried, not skipped.
 full_sync(Mode, ImapName, LocalId, #state{db = Db} = State) ->
+    Mode =:= reset andalso mark_reset(Db, LocalId),
     case full_resync(Mode, ImapName, LocalId, State) of
         {ok, Stats, FullState} ->
             store_cursor(Db, LocalId, FullState),
+            clear_reset(Db, LocalId),
             {{ok, Stats}, State};
         {error, Reason} ->
             {{error, Reason}, State}
@@ -346,7 +351,10 @@ full_sync(Mode, ImapName, LocalId, #state{db = Db} = State) ->
 %% and, from then on, every UID held is replaced: nothing from two generations is
 %% mixed, whatever the adapter said about identities.
 full_resync(Mode, ImapName, LocalId, State) ->
-    full_resync(Mode, ImapName, LocalId, State, 3, Mode =:= reset).
+    %% UIDs are replaced when the mailbox is known to have been recreated, now or
+    %% in an earlier try that did not finish.
+    Replace = Mode =:= reset orelse reset_pending(State#state.db, LocalId),
+    full_resync(Mode, ImapName, LocalId, State, 3, Replace).
 
 full_resync(_Mode, _ImapName, _LocalId, _State, 0, _Replace) ->
     {error, mailbox_keeps_changing};
@@ -365,6 +373,8 @@ full_resync(Mode, ImapName, LocalId, State, Attempts, Replace) ->
         {ok, #{seen := Seen, stats := Stats}, Final} ->
             finish_resync(State, LocalId, Seen, Stats, Final);
         {stopped, {signal, Signal}} ->
+            %% remembered on disk: a restart of this process must not forget it
+            Signal =:= reset andalso mark_reset(State#state.db, LocalId),
             full_resync(
                 Mode, ImapName, LocalId, State, Attempts - 1, Replace orelse Signal =:= reset
             );
@@ -375,11 +385,13 @@ full_resync(Mode, ImapName, LocalId, State, Attempts, Replace) ->
     end.
 
 resync_page(State, ImapName, LocalId, Replace, Changes, #{seen := Seen, stats := Stats} = Acc) ->
-    resync_page(State, ImapName, LocalId, Replace, [I || {added, I} <- Changes], Seen, Stats, Acc).
+    resync_page(State, ImapName, LocalId, Replace, Changes, Seen, Stats, Acc).
 
+%% The changes of a page in the order they came: an update for a message listed
+%% before it (on this page or an earlier one) must land after it.
 resync_page(_State, _ImapName, _LocalId, _Replace, [], Seen, Stats, Acc) ->
     {ok, Acc#{seen := Seen, stats := Stats}};
-resync_page(State, ImapName, LocalId, Replace, [Info | Rest], Seen, Stats, Acc) ->
+resync_page(State, ImapName, LocalId, Replace, [{added, Info} | Rest], Seen, Stats, Acc) ->
     case mailio_uid_set:add(maps:get(uid, Info), Seen) of
         {error, too_many} ->
             {stop, {error, mailbox_too_large_to_resync}};
@@ -392,18 +404,47 @@ resync_page(State, ImapName, LocalId, Replace, [Info | Rest], Seen, Stats, Acc) 
                         State, ImapName, LocalId, Replace, Rest, Seen1, bump(Stats, Done), Acc
                     )
             end
-    end.
+    end;
+resync_page(State, ImapName, LocalId, Replace, [{updated, Info} | Rest], Seen, Stats, Acc) ->
+    #state{account_id = AccountId} = State,
+    Uid = maps:get(uid, Info),
+    case mailio_account_writer:lookup_uid(AccountId, LocalId, Uid) of
+        {ok, EmailId} ->
+            case
+                mailio_account_writer:apply_flags(
+                    AccountId, LocalId, EmailId, maps:get(keywords, Info, [])
+                )
+            of
+                ok ->
+                    resync_page(
+                        State, ImapName, LocalId, Replace, Rest, Seen, bump(Stats, updated), Acc
+                    );
+                {error, Why} ->
+                    {stop, {error, {resync_incomplete, Why}}}
+            end;
+        {error, not_found} ->
+            resync_page(State, ImapName, LocalId, Replace, Rest, Seen, Stats, Acc)
+    end;
+resync_page(State, ImapName, LocalId, Replace, [_Other | Rest], Seen, Stats, Acc) ->
+    resync_page(State, ImapName, LocalId, Replace, Rest, Seen, Stats, Acc).
 
 %% What the server listed is in line. What is held and was not listed is gone.
 finish_resync(State, LocalId, Seen, Stats, Final) ->
-    #state{account_id = AccountId, db = Db} = State,
-    maybe
-        {ok, Local} ?= local_uidmaps(Db, LocalId),
-        Listed = mailio_uid_set:to_lookup(Seen),
-        Gone = [Uid || {Uid, _EmailId, _DocId} <- Local, not mailio_uid_set:member(Uid, Listed)],
-        Removed = length([ok || Uid <- Gone, remove_local_uid(AccountId, LocalId, Uid) =:= ok]),
-        {ok, Stats#{removed => Removed, reset => 1}, Final}
+    Listed = mailio_uid_set:to_lookup(Seen),
+    case remove_unlisted(State, LocalId, Listed) of
+        {ok, Removed} -> {ok, Stats#{removed => Removed, reset => 1}, Final};
+        {error, _} = Error -> Error
     end.
+
+%% Remove every local UID that is not in `Listed', walking the local ones batch
+%% by batch to the last, so that a mailbox of any size is cleaned and not its first
+%% thousand. The cursor is only kept when this has reached the end.
+remove_unlisted(#state{account_id = AccountId, db = Db}, LocalId, Listed) ->
+    Fun = fun(Maps, N) ->
+        Gone = [Uid || {Uid, _, _} <- Maps, not mailio_uid_set:member(Uid, Listed)],
+        {ok, N + length([ok || Uid <- Gone, remove_local_uid(AccountId, LocalId, Uid) =:= ok])}
+    end,
+    fold_local_uidmaps(Db, LocalId, Fun, 0).
 
 remove_local_uid(AccountId, LocalId, Uid) ->
     case mailio_account_writer:remove_uid(AccountId, LocalId, Uid) of
@@ -558,34 +599,61 @@ run_reconcile(
         true ->
             maybe
                 {ok, ServerUids} ?= Adapter:list_uids(Conn, ImapName),
-                {ok, Local} ?= local_uidmaps(Db, LocalId),
-                ServerSet = sets:from_list(ServerUids),
-                Removed = length([
-                    ok
-                 || {Uid, _EmailId, _DocId} <- Local,
-                    not sets:is_element(Uid, ServerSet),
-                    remove_local_uid(AccountId, LocalId, Uid) =:= ok
-                ]),
+                {ok, Listed} ?= uid_lookup(ServerUids),
+                {ok, Removed} ?= remove_unlisted(State, LocalId, Listed),
                 {{ok, #{removed => Removed}}, State}
             else
                 {error, Reason} -> {{error, Reason}, State}
             end
     end.
 
-%% All {Uid, EmailId, UidmapDocId} the store knows for a local mailbox,
-%% enumerated by the `uidmap/<mailbox>/' id namespace. A listing that fails is an
-%% error, never an empty list: an empty list would read as "everything is gone".
-local_uidmaps(Db, LocalId) ->
-    Prefix = <<?ID_UIDMAP, LocalId/binary, "/">>,
-    case mailio_db:by_id_prefix(Db, Prefix) of
-        {ok, Docs} ->
-            {ok, [
-                {maps:get(<<"uid">>, D), maps:get(<<"emailId">>, D), maps:get(<<"id">>, D)}
-             || D <- Docs, maps:is_key(<<"uid">>, D)
-            ]};
-        {error, _} = Error ->
-            Error
+uid_lookup(Uids) ->
+    Limit = mailio_config:get(sync_max_listed_uids, 10000000),
+    Add = fun
+        (U, {ok, Set}) -> mailio_uid_set:add(U, Set);
+        (_, Error) -> Error
+    end,
+    case lists:foldl(Add, {ok, mailio_uid_set:new(Limit)}, Uids) of
+        {ok, Set} -> {ok, mailio_uid_set:to_lookup(Set)};
+        {error, too_many} -> {error, mailbox_too_large_to_resync}
     end.
+
+%% The {Uid, EmailId, UidmapDocId} the store knows for a local mailbox,
+%% enumerated by the `uidmap/<mailbox>/' id namespace, a batch at a time. A
+%% listing that fails is an error, never an empty one: an empty one would read as
+%% "everything is gone".
+fold_local_uidmaps(Db, LocalId, Fun, Acc) ->
+    Prefix = <<?ID_UIDMAP, LocalId/binary, "/">>,
+    Batch = fun(Docs, A) ->
+        Maps = [
+            {maps:get(<<"uid">>, D), maps:get(<<"emailId">>, D), maps:get(<<"id">>, D)}
+         || D <- Docs, maps:is_key(<<"uid">>, D)
+        ],
+        Fun(Maps, A)
+    end,
+    mailio_db:fold_id_prefix(Db, Prefix, 500, Batch, Acc).
+
+%% The marker that the UIDs held for a mailbox may mean other messages: it stays
+%% until a full read has replaced them, whatever happens in between.
+mark_reset(Db, LocalId) ->
+    Id = <<?ID_SYNC_RESET, LocalId/binary>>,
+    case mailio_db:get(Db, Id) of
+        {ok, _} ->
+            ok;
+        {error, not_found} ->
+            {ok, _, _} = mailio_db:put(Db, #{<<"id">> => Id}),
+            ok
+    end.
+
+reset_pending(Db, LocalId) ->
+    case mailio_db:get(Db, <<?ID_SYNC_RESET, LocalId/binary>>) of
+        {ok, _} -> true;
+        {error, not_found} -> false
+    end.
+
+clear_reset(Db, LocalId) ->
+    _ = mailio_db:delete(Db, <<?ID_SYNC_RESET, LocalId/binary>>),
+    ok.
 
 fetch_raw(Adapter, Conn, ImapName, Uid, Validity) ->
     Self = self(),
