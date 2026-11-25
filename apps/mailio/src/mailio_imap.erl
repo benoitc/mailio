@@ -25,7 +25,8 @@
     expunge/3,
     watch/3,
     unwatch/2,
-    list_uids/2
+    list_uids/2,
+    list_uids/3
 ]).
 
 %% A connection handle: the FSM pid plus cached capabilities.
@@ -58,6 +59,7 @@
 %% The connection's own defaults (see mailio_imap_conn), for sizing a window.
 -define(CONN_MAX_UNTAGGED, 100000).
 -define(CONN_MAX_LINE, 65536).
+-define(LISTING_ATTEMPTS, 3).
 
 -spec connect(map()) -> {ok, conn()} | {error, mailio_error:error_map()}.
 connect(Config) ->
@@ -660,16 +662,43 @@ unwatch(_Conn, _Ref) ->
 
 %% List all uids currently present (UID SEARCH ALL).
 -spec list_uids(conn(), binary()) -> {ok, [integer()]} | {error, term()}.
-list_uids(#{pid := Pid} = Conn, MailboxId) ->
+list_uids(Conn, MailboxId) ->
+    list_uids(Conn, MailboxId, #{}).
+
+%% A listing is only an inventory if it agrees with the mailbox: the number of
+%% UIDs found must be the number of messages the server said it holds when it
+%% was opened. When they differ the mailbox may have changed while it was read,
+%% so it is read again, a few times; after that it is an error, and whoever asked
+%% keeps what it has. `max' stops a listing that grows past it as it is read.
+-spec list_uids(conn(), binary(), #{max => pos_integer()}) ->
+    {ok, [integer()]} | {error, term()}.
+list_uids(Conn, MailboxId, Opts) ->
+    list_uids(Conn, MailboxId, Opts, ?LISTING_ATTEMPTS).
+
+list_uids(#{pid := Pid} = Conn, MailboxId, Opts, Attempts) ->
     case examine_listing(Pid, MailboxId) of
         {ok, #{uidvalidity := undefined}} ->
             command_error({error, uidvalidity_invalid});
-        {ok, #{uidnext := UidNext}} ->
+        {ok, #{exists := Exists}} when not is_integer(Exists) ->
+            command_error({error, mailbox_size_unknown});
+        {ok, #{uidnext := UidNext, exists := Exists}} ->
             Upto = UidNext - 1,
             Window = search_window(Conn),
             case windows(1, Upto, Window) > maps:get(max_list_commands, Conn, ?MAX_LIST_COMMANDS) of
-                true -> {error, listing_too_sparse_error()};
-                false -> list_uid_windows(Pid, 1, Upto, Window, [])
+                true ->
+                    {error, listing_too_sparse_error()};
+                false ->
+                    Max = maps:get(max, Opts, infinity),
+                    case list_uid_windows(Pid, 1, Upto, Window, Max, 0, []) of
+                        {ok, Uids} when length(Uids) =:= Exists ->
+                            {ok, Uids};
+                        {ok, _} when Attempts > 1 ->
+                            list_uids(Conn, MailboxId, Opts, Attempts - 1);
+                        {ok, _} ->
+                            command_error({error, listing_inconsistent});
+                        Other ->
+                            Other
+                    end
             end;
         Other ->
             command_error(Other)
@@ -677,9 +706,9 @@ list_uids(#{pid := Pid} = Conn, MailboxId) ->
 
 %% UID SEARCH answers one line of numbers: a mailbox is listed in windows, so
 %% that no line is longer than the connection allows.
-list_uid_windows(_Pid, From, Upto, _Window, AccRev) when From > Upto ->
+list_uid_windows(_Pid, From, Upto, _Window, _Max, _Count, AccRev) when From > Upto ->
     {ok, lists:usort(lists:append(AccRev))};
-list_uid_windows(Pid, From, Upto, Window, AccRev) ->
+list_uid_windows(Pid, From, Upto, Window, Max, Count, AccRev) ->
     To = min(Upto, From + Window - 1),
     Criteria = [<<"UID ">>, integer_to_binary(From), <<":">>, integer_to_binary(To)],
     case run(Pid, fun(T) -> {mailio_imap_proto:uid_search(T, Criteria), undefined} end) of
@@ -692,8 +721,13 @@ list_uid_windows(Pid, From, Upto, Window, AccRev) ->
             Uids = lists:append(Answers),
             InWindow = lists:all(fun(U) -> U >= From andalso U =< To end, Uids),
             case {Answers, Unreadable, InWindow} of
+                {[_ | _], [], true} when Max =/= infinity, Count + length(Uids) > Max ->
+                    %% a mailbox with more than the caller accepts is not read on
+                    command_error({error, mailbox_too_large_to_resync});
                 {[_ | _], [], true} ->
-                    list_uid_windows(Pid, To + 1, Upto, Window, [Uids | AccRev]);
+                    list_uid_windows(
+                        Pid, To + 1, Upto, Window, Max, Count + length(Uids), [Uids | AccRev]
+                    );
                 _ ->
                     %% a UID outside the window was not asked for: the answer is
                     %% not about this window

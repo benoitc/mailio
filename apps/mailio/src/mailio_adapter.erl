@@ -152,6 +152,11 @@
 -callback list_uids(conn(), MailboxId :: binary()) ->
     {ok, [term()]} | {error, mailio_error:error_map()}.
 
+%% Like list_uids/2, and it stops with an error once the mailbox holds more than
+%% `max' messages, as they are read.
+-callback list_uids(conn(), MailboxId :: binary(), #{max => pos_integer()}) ->
+    {ok, [term()]} | {error, mailio_error:error_map()}.
+
 -optional_callbacks([
-    watch/3, unwatch/2, append/4, move/4, expunge/3, list_uids/2, fetch_message/5
+    watch/3, unwatch/2, append/4, move/4, expunge/3, list_uids/2, list_uids/3, fetch_message/5
 ]).

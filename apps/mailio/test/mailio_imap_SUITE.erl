@@ -53,6 +53,8 @@
     a_uidnext_below_exists_is_an_error/1,
     an_update_does_not_hide_an_invalid_highest_uid/1,
     a_saved_cursor_with_nothing_known_is_reset/1,
+    a_listing_that_misses_messages_is_an_error/1,
+    a_listing_beyond_the_limit_stops/1,
     writes_open_read_write/1
 ]).
 
@@ -95,6 +97,8 @@ all() ->
         a_uidnext_below_exists_is_an_error,
         an_update_does_not_hide_an_invalid_highest_uid,
         a_saved_cursor_with_nothing_known_is_reset,
+        a_listing_that_misses_messages_is_an_error,
+        a_listing_beyond_the_limit_stops,
         writes_open_read_write
     ].
 
@@ -566,3 +570,17 @@ a_saved_cursor_with_nothing_known_is_reset(Config) ->
         {ok, [{added, _} | _], _, done},
         mailio_imap:fetch_changes_since(Conn, <<"INBOX">>, initial, #{})
     ).
+
+%% The server says two messages and the search finds none: the listing does not
+%% agree with the mailbox, and is not an inventory of it.
+a_listing_that_misses_messages_is_an_error(Config) ->
+    Srv = ?config(srv, Config),
+    ok = mailio_fake_imap:set_search(Srv, empty),
+    Conn = conn_with(Config, #{}),
+    ?assertMatch({error, _}, mailio_imap:list_uids(Conn, <<"INBOX">>)).
+
+%% A mailbox with more messages than the caller accepts is refused as it is read.
+a_listing_beyond_the_limit_stops(Config) ->
+    Conn = conn_with(Config, #{}),
+    ?assertMatch({ok, [100, 101]}, mailio_imap:list_uids(Conn, <<"INBOX">>, #{max => 2})),
+    ?assertMatch({error, _}, mailio_imap:list_uids(Conn, <<"INBOX">>, #{max => 1})).

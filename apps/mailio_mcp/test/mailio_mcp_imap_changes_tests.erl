@@ -219,3 +219,30 @@ an_unreadable_vanished_report_falls_back_to_a_full_comparison_test() ->
         {ok, R} = changes(Acc, Snap),
         ?assertEqual([100], maps:get(removed, R))
     end).
+
+%% A flag listing that the server refuses is an error: it must not read as a
+%% mailbox with nothing in it, which would report every known message removed.
+a_failed_flag_listing_is_an_error_not_an_empty_mailbox_test() ->
+    with(fun(Srv, Acc) ->
+        Snap = baseline(Acc),
+        ok = mailio_fake_imap:set_option(Srv, fail_flags_fetch, true),
+        ?assertMatch({error, _}, changes(Acc, Snap#{modseq := undefined}))
+    end).
+
+%% A snapshot never holds more than `max_snapshot' entries, however the change
+%% was found: one more delivery does not make it one bigger.
+a_snapshot_stays_within_its_limit_test() ->
+    with(fun(Srv, Acc) ->
+        application:set_env(mailio_mcp, limits, #{max_snapshot => 2}),
+        try
+            Snap = baseline(Acc),
+            ?assertEqual(2, maps:size(maps:get(flags, Snap))),
+            ok = mailio_fake_imap:deliver(Srv, <<"Third message">>),
+            {ok, R} = changes(Acc, Snap),
+            Snap2 = maps:get(snapshot, R),
+            ?assert(maps:size(maps:get(flags, Snap2)) =< 2),
+            ?assert(maps:get(partial, Snap2))
+        after
+            application:unset_env(mailio_mcp, limits)
+        end
+    end).

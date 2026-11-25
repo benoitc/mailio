@@ -119,13 +119,13 @@ handle_call(Req, _From, #state{conn = undefined} = State) when
     {reply, {error, not_connected}, State};
 handle_call(sync_all, _From, State) ->
     {Result, State1} = do_sync_all(State),
-    {reply, Result, State1};
+    {reply, Result, retire_dead_connection(Result, State1)};
 handle_call({sync_mailbox, ImapName}, _From, State) ->
     {Result, State1} = do_sync_mailbox(ImapName, State),
-    {reply, Result, State1};
+    {reply, Result, retire_dead_connection(Result, State1)};
 handle_call({reconcile_mailbox, ImapName}, _From, State) ->
     {Result, State1} = do_reconcile(ImapName, State),
-    {reply, Result, State1};
+    {reply, Result, retire_dead_connection(Result, State1)};
 handle_call(mailboxes, _From, State) ->
     {reply, {ok, maps:keys(State#state.mailbox_map)}, State};
 handle_call(watch_inbox, _From, State) ->
@@ -165,6 +165,32 @@ terminate(_Reason, _State) ->
 %%====================================================================
 %% Connection and mailbox discovery
 %%====================================================================
+
+%% A connection that gave up for good (the server sent more than it may) answers
+%% the same error to every later call. It is closed and a new one is made, so the
+%% next sync is not refused for as long as the account lives.
+retire_dead_connection(Result, #state{adapter = Adapter, conn = Conn} = State) when
+    Conn =/= undefined
+->
+    case mentions(response_too_large, Result) of
+        false ->
+            State;
+        true ->
+            try
+                Adapter:close(Conn)
+            catch
+                _:_ -> ok
+            end,
+            try_connect(State#state{conn = undefined, watch = undefined})
+    end;
+retire_dead_connection(_Result, State) ->
+    State.
+
+mentions(Atom, Atom) -> true;
+mentions(Atom, T) when is_map(T) -> mentions(Atom, maps:to_list(T));
+mentions(Atom, T) when is_tuple(T) -> mentions(Atom, tuple_to_list(T));
+mentions(Atom, [H | T]) -> mentions(Atom, H) orelse mentions(Atom, T);
+mentions(_, _) -> false.
 
 %% Connect now; on failure schedule another attempt, doubling the delay.
 try_connect(State) ->
@@ -362,7 +388,9 @@ full_resync(Mode, ImapName, LocalId, State, Attempts, Replace) ->
     #state{adapter = Adapter, conn = Conn} = State,
     Fetch = fun(Cursor) -> Adapter:fetch_changes_since(Conn, ImapName, Cursor, #{}) end,
     Limit = mailio_config:get(sync_max_listed_uids, 10000000),
-    Acc0 = #{seen => mailio_uid_set:new(Limit), stats => new_stats()},
+    Acc0 = #{
+        seen => mailio_uid_set:new(Limit), removed => #{}, stats => new_stats(), limit => Limit
+    },
     Step = fun(Changes, _Next, Acc) ->
         case resync_mode(Changes) of
             none -> resync_page(State, ImapName, LocalId, Replace, Changes, Acc);
@@ -370,8 +398,8 @@ full_resync(Mode, ImapName, LocalId, State, Attempts, Replace) ->
         end
     end,
     case mailio_sync_pages:walk(Fetch, initial, page_opts(), Acc0, Step) of
-        {ok, #{seen := Seen, stats := Stats}, Final} ->
-            finish_resync(State, LocalId, Seen, Stats, Final);
+        {ok, #{seen := Seen, removed := Removed, stats := Stats}, Final} ->
+            finish_resync(State, LocalId, Seen, Removed, Stats, Final);
         {stopped, {signal, Signal}} ->
             %% remembered on disk: a restart of this process must not forget it
             Signal =:= reset andalso mark_reset(State#state.db, LocalId),
@@ -387,6 +415,20 @@ full_resync(Mode, ImapName, LocalId, State, Attempts, Replace) ->
 resync_page(State, ImapName, LocalId, Replace, Changes, #{seen := Seen, stats := Stats} = Acc) ->
     resync_page(State, ImapName, LocalId, Replace, Changes, Seen, Stats, Acc).
 
+%% A UID the server reports gone after it was listed, on this page or an earlier
+%% one, is gone: it leaves the store now and is not kept by the final cleanup. The
+%% changes come in the order they happened, so one listed again later is back.
+resync_removed(State, LocalId, Uid, Stats, #{removed := Removed, limit := Limit} = Acc) ->
+    Stats1 =
+        case remove_local_uid(State#state.account_id, LocalId, Uid) of
+            ok -> bump(Stats, removed);
+            already_gone -> Stats
+        end,
+    case map_size(Removed) >= Limit andalso not is_map_key(Uid, Removed) of
+        true -> {error, mailbox_too_large_to_resync};
+        false -> {ok, Stats1, Acc#{removed := Removed#{Uid => true}}}
+    end.
+
 %% The changes of a page in the order they came: an update for a message listed
 %% before it (on this page or an earlier one) must land after it.
 resync_page(_State, _ImapName, _LocalId, _Replace, [], Seen, Stats, Acc) ->
@@ -400,10 +442,20 @@ resync_page(State, ImapName, LocalId, Replace, [{added, Info} | Rest], Seen, Sta
                 {error, Why} ->
                     {stop, {error, {resync_incomplete, Why}}};
                 Done ->
+                    Acc1 = maps:update_with(
+                        removed, fun(R) -> maps:remove(maps:get(uid, Info), R) end, Acc
+                    ),
                     resync_page(
-                        State, ImapName, LocalId, Replace, Rest, Seen1, bump(Stats, Done), Acc
+                        State, ImapName, LocalId, Replace, Rest, Seen1, bump(Stats, Done), Acc1
                     )
             end
+    end;
+resync_page(State, ImapName, LocalId, Replace, [{removed, Uid} | Rest], Seen, Stats, Acc) ->
+    case resync_removed(State, LocalId, Uid, Stats, Acc) of
+        {ok, Stats1, Acc1} ->
+            resync_page(State, ImapName, LocalId, Replace, Rest, Seen, Stats1, Acc1);
+        {error, _} = Error ->
+            {stop, Error}
     end;
 resync_page(State, ImapName, LocalId, Replace, [{updated, Info} | Rest], Seen, Stats, Acc) ->
     #state{account_id = AccountId} = State,
@@ -429,19 +481,28 @@ resync_page(State, ImapName, LocalId, Replace, [_Other | Rest], Seen, Stats, Acc
     resync_page(State, ImapName, LocalId, Replace, Rest, Seen, Stats, Acc).
 
 %% What the server listed is in line. What is held and was not listed is gone.
-finish_resync(State, LocalId, Seen, Stats, Final) ->
+finish_resync(State, LocalId, Seen, Gone, Stats, Final) ->
     Listed = mailio_uid_set:to_lookup(Seen),
-    case remove_unlisted(State, LocalId, Listed) of
-        {ok, Removed} -> {ok, Stats#{removed => Removed, reset => 1}, Final};
+    case remove_unlisted(State, LocalId, Listed, Gone) of
+        {ok, N} -> {ok, Stats#{removed => maps:get(removed, Stats) + N, reset => 1}, Final};
         {error, _} = Error -> Error
     end.
 
 %% Remove every local UID that is not in `Listed', walking the local ones batch
 %% by batch to the last, so that a mailbox of any size is cleaned and not its first
 %% thousand. The cursor is only kept when this has reached the end.
-remove_unlisted(#state{account_id = AccountId, db = Db}, LocalId, Listed) ->
+remove_unlisted(State, LocalId, Listed) ->
+    remove_unlisted(State, LocalId, Listed, #{}).
+
+%% `Gone' holds the UIDs the server reported removed after listing them: they
+%% are not kept even though the listing holds them.
+remove_unlisted(#state{account_id = AccountId, db = Db}, LocalId, Listed, Gone0) ->
     Fun = fun(Maps, N) ->
-        Gone = [Uid || {Uid, _, _} <- Maps, not mailio_uid_set:member(Uid, Listed)],
+        Gone = [
+            Uid
+         || {Uid, _, _} <- Maps,
+            not mailio_uid_set:member(Uid, Listed) orelse is_map_key(Uid, Gone0)
+        ],
         {ok, N + length([ok || Uid <- Gone, remove_local_uid(AccountId, LocalId, Uid) =:= ok])}
     end,
     fold_local_uidmaps(Db, LocalId, Fun, 0).
@@ -598,13 +659,24 @@ run_reconcile(
             {{error, not_supported}, State};
         true ->
             maybe
-                {ok, ServerUids} ?= Adapter:list_uids(Conn, ImapName),
+                {ok, ServerUids} ?= list_remote_uids(Adapter, Conn, ImapName),
                 {ok, Listed} ?= uid_lookup(ServerUids),
                 {ok, Removed} ?= remove_unlisted(State, LocalId, Listed),
                 {{ok, #{removed => Removed}}, State}
             else
                 {error, Reason} -> {{error, Reason}, State}
             end
+    end.
+
+%% With the limit given to the adapter that can use it, so that a mailbox beyond
+%% it is refused as it is read and not after every number is held.
+list_remote_uids(Adapter, Conn, ImapName) ->
+    case adapter_has(Adapter, list_uids, 3) of
+        true ->
+            Limit = mailio_config:get(sync_max_listed_uids, 10000000),
+            Adapter:list_uids(Conn, ImapName, #{max => Limit});
+        false ->
+            Adapter:list_uids(Conn, ImapName)
     end.
 
 uid_lookup(Uids) ->
@@ -662,9 +734,19 @@ clear_reset(Db, LocalId) ->
 fetch_raw(Adapter, Conn, ImapName, Uid, Validity) ->
     Self = self(),
     Ref = make_ref(),
+    Max = mailio_config:get(sync_max_message_bytes, 268435456),
+    Total = atomics:new(1, []),
+    %% Every chunk is kept, in the order it came, up to a limit: a message that
+    %% is longer than that is refused as it arrives, not after it is held.
     Sink = fun(Bytes) ->
-        Self ! {Ref, iolist_to_binary(Bytes)},
-        ok
+        Bin = iolist_to_binary(Bytes),
+        case atomics:add_get(Total, 1, byte_size(Bin)) =< Max of
+            true ->
+                Self ! {Ref, Bin},
+                ok;
+            false ->
+                {error, message_too_large}
+        end
     end,
     Result =
         case {Validity, adapter_has(Adapter, fetch_message, 5)} of
@@ -679,14 +761,27 @@ fetch_raw(Adapter, Conn, ImapName, Uid, Validity) ->
             {_, false} ->
                 {error, {adapter_cannot_check_uidvalidity, Adapter}}
         end,
+    Chunks = collect_chunks(Ref, []),
+    Size = atomics:get(Total, 1),
     case Result of
+        {ok, _} when Size > Max ->
+            {error, message_too_large};
+        %% what the adapter says it sent must be what arrived: a message with a
+        %% part missing is not the message
+        {ok, #{size := Told}} when Told =/= Size ->
+            {error, {message_incomplete, Told, Size}};
+        {ok, _} when Chunks =:= [] ->
+            {error, no_data};
         {ok, _} ->
-            receive
-                {Ref, Raw} -> {ok, Raw}
-            after 0 -> {error, no_data}
-            end;
+            {ok, iolist_to_binary(Chunks)};
         {error, _} = Err ->
             Err
+    end.
+
+collect_chunks(Ref, Acc) ->
+    receive
+        {Ref, Bin} -> collect_chunks(Ref, [Bin | Acc])
+    after 0 -> lists:reverse(Acc)
     end.
 
 adapter_has(Adapter, Fun, Arity) ->

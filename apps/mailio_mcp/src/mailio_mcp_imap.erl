@@ -999,6 +999,14 @@ qresync_result(C, Account, Box, Prev, Old, Sel, Events) ->
     end.
 
 qresync_apply(C, Account, Box, Prev, Old, #{exists := Exists} = Sel, Events, Vanished) ->
+    %% a snapshot never holds more than `max_snapshot' entries: a mailbox beyond it
+    %% is read the capped way, not extended one delivery at a time
+    case Exists > mailio_mcp_config:limit(max_snapshot, 20000) of
+        true -> fallback;
+        false -> qresync_apply_within(C, Account, Box, Prev, Old, Sel, Events, Vanished)
+    end.
+
+qresync_apply_within(C, Account, Box, Prev, Old, #{exists := Exists} = Sel, Events, Vanished) ->
     Gone = lists:sort([U || U <- Vanished, is_map_key(U, Old)]),
     Changed = [
         {maps:get(uid, M), flag_bits(maps:get(flags, M, []))}
@@ -1054,23 +1062,33 @@ full_changes(C, Account, Box, Sel, Prev) ->
             true -> iolist_to_binary([integer_to_list(Exists - Cap + 1), ":*"]);
             false -> <<"1:*">>
         end,
-    Cur =
+    %% A fetch that fails is an error, not an empty mailbox: an empty snapshot
+    %% would report every message the caller knows as removed.
+    Fetched =
         case Exists of
             0 ->
-                #{};
+                {ok, #{}};
             _ ->
                 case mailio_mcp_imap_io:cmd(C, [<<"FETCH ">>, Range, <<" (UID FLAGS)">>]) of
                     {ok, U, _} ->
-                        maps:from_list([
-                            {maps:get(uid, M), flag_bits(maps:get(flags, M, []))}
-                         || {fetch, _Seq, Items} <- U,
-                            M <- [fetch_map(Items)],
-                            is_map_key(uid, M)
-                        ]);
-                    _ ->
-                        #{}
+                        {ok,
+                            maps:from_list([
+                                {maps:get(uid, M), flag_bits(maps:get(flags, M, []))}
+                             || {fetch, _Seq, Items} <- U,
+                                M <- [fetch_map(Items)],
+                                is_map_key(uid, M)
+                            ])};
+                    Failed ->
+                        {error, {imap_fetch_failed, Failed}}
                 end
         end,
+    case Fetched of
+        {ok, Cur} -> full_changes(C, Account, Box, Sel, Prev, Cap, Cur);
+        {error, _} = Error -> Error
+    end.
+
+full_changes(C, Account, Box, Sel, Prev, Cap, Cur) ->
+    Exists = maps:get(exists, Sel),
     Snap = #{
         uv => maps:get(uv, Sel),
         uidnext => maps:get(uidnext, Sel),

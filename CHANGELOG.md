@@ -167,6 +167,25 @@
   message) is no longer listed. The read stops with an error and local mail is
   kept. A saved position that knows nothing about the mailbox now makes it be
   read again in full.
+- Reconcile no longer deletes local mail when the server's list of UIDs does
+  not match the number of messages it reports. The list is read again a few
+  times, and then the sync stops with an error and keeps local mail.
+- A full read now applies a removal that arrives on a later page, instead of
+  keeping the message and saving a position that hides it.
+- A message that the adapter hands over in several pieces is stored whole, and
+  one that arrives shorter than the adapter said is refused instead of stored
+  with a missing body.
+- A removal that stops half way is finished by the next one and no longer
+  leaves an email counted in an empty mailbox. A shared email that is already
+  read is no longer counted as unread in the second mailbox.
+- After the server sent a response larger than the limit, every later sync of
+  that account failed. The connection is now replaced and the next sync runs.
+- The list of UIDs that reconcile reads stops at the configured limit as it is
+  read, instead of after the whole list is held.
+- The mail changes tool no longer reports every message as removed when the
+  server refuses to list flags, and its saved snapshot never grows past the
+  configured size.
+- Mappings written by the intermediate build of this branch are still found.
 - Reading mail now opens mailboxes read-only. Only changing flags, moving and
   deleting open them for writing.
 - Unsubscribing from events no longer leaks a monitor.

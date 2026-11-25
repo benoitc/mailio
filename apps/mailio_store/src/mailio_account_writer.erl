@@ -119,21 +119,24 @@ lookup_uid(AccountId, MailboxId, Uid) ->
 uid_key(Uid) when is_integer(Uid) -> <<"i:", (integer_to_binary(Uid))/binary>>;
 uid_key(Uid) when is_binary(Uid) -> <<"b:", Uid/binary>>.
 
-%% Mappings written by an older version: the UID as it is, in the old namespace.
-%% Their document holds the UID with its type, and only a document that holds
-%% this UID is this UID's mapping.
-legacy_uidmap_id(MailboxId, Uid) ->
-    <<?ID_UIDMAP, MailboxId/binary, "/", (legacy_uid_text(Uid))/binary>>.
-
-legacy_uid_text(Uid) when is_integer(Uid) -> integer_to_binary(Uid);
-legacy_uid_text(Uid) when is_binary(Uid) -> Uid.
-
-legacy_mapping(Db, MailboxId, Uid) ->
-    Id = legacy_uidmap_id(MailboxId, Uid),
-    case mailio_db:get(Db, Id) of
-        {ok, #{<<"uid">> := Stored}} = Found when Stored =:= Uid -> {ok, Id, Found};
-        _ -> none
+%% Mappings written by an older version: the UID as it is, in the old namespace,
+%% or, from a build that ran for a while, a text UID after `b:'. Their document
+%% holds the UID with its type, and only a document that holds this UID is this
+%% UID's mapping.
+legacy_uidmap_ids(MailboxId, Uid) ->
+    Base = <<?ID_UIDMAP, MailboxId/binary, "/">>,
+    case Uid of
+        _ when is_integer(Uid) -> [<<Base/binary, (integer_to_binary(Uid))/binary>>];
+        _ -> [<<Base/binary, Uid/binary>>, <<Base/binary, "b:", Uid/binary>>]
     end.
+
+legacy_mappings(Db, MailboxId, Uid) ->
+    [
+        {Id, Found}
+     || Id <- legacy_uidmap_ids(MailboxId, Uid),
+        {ok, #{<<"uid">> := Stored}} = Found <- [mailio_db:get(Db, Id)],
+        Stored =:= Uid
+    ].
 
 %% The mapping of a UID: the current one, or an older one that has not moved yet.
 existing_uidmap_id(Db, MailboxId, Uid) ->
@@ -142,9 +145,9 @@ existing_uidmap_id(Db, MailboxId, Uid) ->
         {ok, _} = Found ->
             {Id, Found};
         {error, not_found} = Missing ->
-            case legacy_mapping(Db, MailboxId, Uid) of
-                {ok, Old, Found} -> {Old, Found};
-                none -> {Id, Missing}
+            case legacy_mappings(Db, MailboxId, Uid) of
+                [{Old, Found} | _] -> {Old, Found};
+                [] -> {Id, Missing}
             end
     end.
 
@@ -154,13 +157,8 @@ delete_uidmap(Db, MailboxId, Uid) ->
     drop_legacy(Db, MailboxId, Uid).
 
 drop_legacy(Db, MailboxId, Uid) ->
-    case legacy_mapping(Db, MailboxId, Uid) of
-        {ok, Old, _} ->
-            _ = mailio_db:delete(Db, Old),
-            ok;
-        none ->
-            ok
-    end.
+    _ = [mailio_db:delete(Db, Old) || {Old, _} <- legacy_mappings(Db, MailboxId, Uid)],
+    ok.
 
 %%====================================================================
 %% gen_server
@@ -240,9 +238,13 @@ merge_existing(Db, Existing, MailboxId, Opts) ->
     E3 = add_imap_entry(E2, MailboxId, Opts),
     {ok, _, _} = mailio_db:put(Db, E3),
     maybe_write_uidmap(Db, MailboxId, Opts, mailio_email:id_of(Existing)),
+    NowSeen = mailio_email:is_seen(E3),
+    %% the mailboxes that held it already: merging keywords may have read it
+    adjust_unread(Db, mailio_email:mailbox_ids(Existing), WasSeen, NowSeen),
     case AlreadyMember of
         true -> ok;
-        false -> bump_mailbox(Db, MailboxId, +1, seen_delta(false, WasSeen))
+        %% a new membership is unread only if the email is, as it is now
+        false -> bump_mailbox(Db, MailboxId, +1, seen_delta(NowSeen, false))
     end.
 
 %%====================================================================
@@ -273,11 +275,14 @@ do_apply_flags(Db, _MailboxId, EmailId, ServerKeywords) ->
 %% One UID of a mailbox is gone from the server. Two UIDs can hold the same mail
 %% (one email), so the email stays a member of the mailbox, with its counter,
 %% for as long as another UID of that mailbox still refers to it.
+%%
+%% The mapping goes last. A removal that stops half way leaves it in place, so
+%% the next one finds it and finishes, and it does not count the email out of
+%% the mailbox twice (the email says whether it is still a member).
 do_remove_uid(Db, MailboxId, Uid) ->
     {_MapId, Found} = existing_uidmap_id(Db, MailboxId, Uid),
     case Found of
         {ok, #{<<"emailId">> := EmailId}} ->
-            ok = delete_uidmap(Db, MailboxId, Uid),
             case mailio_db:get(Db, <<?ID_EMAIL, EmailId/binary>>) of
                 {ok, Email} ->
                     Left = mailio_email:remove_imap_entry(Email, MailboxId, Uid),
@@ -290,7 +295,8 @@ do_remove_uid(Db, MailboxId, Uid) ->
                     end;
                 {error, not_found} ->
                     ok
-            end;
+            end,
+            ok = delete_uidmap(Db, MailboxId, Uid);
         {error, not_found} ->
             {error, not_found}
     end.
@@ -299,19 +305,24 @@ do_remove_member(Db, MailboxId, EmailId) ->
     DocId = <<?ID_EMAIL, EmailId/binary>>,
     case mailio_db:get(Db, DocId) of
         {ok, Email} ->
-            WasSeen = mailio_email:is_seen(Email),
             %% leaving a mailbox also forgets its UIDs: a stale one would keep a
             %% later redelivery looking like a copy that is still there
             Email1 = mailio_email:clear_imap_entries(
                 mailio_email:remove_mailbox(Email, MailboxId), MailboxId
             ),
-            bump_mailbox(Db, MailboxId, -1, seen_delta(WasSeen, true) * -1),
-            case mailio_email:mailbox_ids(Email1) of
-                [] ->
-                    destroy_email(Db, Email1);
-                _ ->
-                    {ok, _, _} = mailio_db:put(Db, Email1),
+            case mailio_email:in_mailbox(Email, MailboxId) of
+                true ->
+                    %% the email and the counter in one write: either both say
+                    %% the email left, or neither does
+                    WasSeen = mailio_email:is_seen(Email),
+                    Counter = bumped_mailbox(Db, MailboxId, -1, seen_delta(WasSeen, true) * -1),
+                    {ok, _} = mailio_db:put_batch_strict(Db, [Email1 | Counter]);
+                false ->
                     ok
+            end,
+            case mailio_email:mailbox_ids(Email1) of
+                [] -> destroy_email(Db, Email1);
+                _ -> ok
             end,
             ok = delete_first_uidmap(Db, Email, MailboxId),
             ok;
@@ -617,19 +628,29 @@ ensure_mailbox(Db, MailboxId) ->
     end.
 
 bump_mailbox(Db, MailboxId, TotalDelta, UnreadDelta) ->
+    case bumped_mailbox(Db, MailboxId, TotalDelta, UnreadDelta) of
+        [Doc1] ->
+            {ok, _, _} = mailio_db:put(Db, Doc1),
+            ok;
+        [] ->
+            ok
+    end.
+
+%% The mailbox document with its counters moved, to be written by the caller.
+bumped_mailbox(Db, MailboxId, TotalDelta, UnreadDelta) ->
     DocId = <<?ID_MAILBOX, MailboxId/binary>>,
     case mailio_db:get(Db, DocId) of
         {ok, Doc} ->
             Total = maps:get(<<"totalEmails">>, Doc, 0) + TotalDelta,
             Unread = maps:get(<<"unreadEmails">>, Doc, 0) + UnreadDelta,
-            Doc1 = Doc#{
-                <<"totalEmails">> => max(0, Total),
-                <<"unreadEmails">> => max(0, Unread)
-            },
-            {ok, _, _} = mailio_db:put(Db, Doc1),
-            ok;
+            [
+                Doc#{
+                    <<"totalEmails">> => max(0, Total),
+                    <<"unreadEmails">> => max(0, Unread)
+                }
+            ];
         {error, not_found} ->
-            ok
+            []
     end.
 
 seen_delta(IsSeen, _Was) when IsSeen -> 0;

@@ -19,12 +19,23 @@
     unwatch/2
 ]).
 
-connect(Config) -> mailio_imap:connect(Config).
+connect(Config) ->
+    N = application:get_env(mailio_store, connect_count, 0),
+    application:set_env(mailio_store, connect_count, N + 1),
+    mailio_imap:connect(Config).
 close(Conn) -> mailio_imap:close(Conn).
 capabilities(Conn) -> mailio_imap:capabilities(Conn).
 list_mailboxes(Conn) -> mailio_imap:list_mailboxes(Conn).
-fetch_message(Conn, Box, Uid, Sink) -> mailio_imap:fetch_message(Conn, Box, Uid, Sink).
-fetch_message(Conn, Box, Uid, Sink, Opts) -> mailio_imap:fetch_message(Conn, Box, Uid, Sink, Opts).
+fetch_message(Conn, Box, Uid, Sink) ->
+    fetch_message(Conn, Box, Uid, Sink, #{}).
+
+%% a scripted message (`fetch_override', a fun of the UID and the sink), for a test
+%% of how the sink is used
+fetch_message(Conn, Box, Uid, Sink, Opts) ->
+    case application:get_env(mailio_store, fetch_override) of
+        {ok, Fun} -> Fun(Uid, Sink);
+        undefined -> mailio_imap:fetch_message(Conn, Box, Uid, Sink, Opts)
+    end.
 list_uids(Conn, Box) -> mailio_imap:list_uids(Conn, Box).
 watch(Conn, Box, Pid) -> mailio_imap:watch(Conn, Box, Pid).
 unwatch(Conn, Ref) -> mailio_imap:unwatch(Conn, Ref).

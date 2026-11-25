@@ -81,13 +81,14 @@ set_failure(Srv, Kind, Bool) when
 %% which RFC 3501 allows), `fail_max_uid' (UID FETCH * answers NO) and
 %% `bad_vanished' (a QRESYNC answer with a VANISHED line that lists nothing) and
 %% `no_exists' (EXAMINE does not report EXISTS), `zero_max_uid' (UID FETCH *
-%% answers with UID 0) and `bad_validity' (UIDVALIDITY 01). `set_search/2' makes UID SEARCH
+%% answers with UID 0), `fail_flags_fetch' (FETCH 1:* answers NO) and `bad_validity' (UIDVALIDITY 01). `set_search/2' makes UID SEARCH
 %% answer badly.
 set_option(Srv, Option, Bool) when
     Option =:= no_uidnext;
     Option =:= no_exists;
     Option =:= fail_max_uid;
     Option =:= zero_max_uid;
+    Option =:= fail_flags_fetch;
     Option =:= bad_validity;
     Option =:= bad_vanished
 ->
@@ -97,7 +98,7 @@ set_option(Srv, Option, Bool) when
 %% `junk' (a SEARCH line with a number that is not one), `outside' (a UID that was
 %% not asked for), `bracket' (`* SEARCH )'), `bracket_between' (`* SEARCH 5 ) 7') or
 %% `modseq' (the CONDSTORE form: the UIDs, then `(MODSEQ n)') or `modseq_alone'
-%% (`* SEARCH (MODSEQ n)' with no UIDs, which is malformed), `modseq_glued' (no space
+%% (`* SEARCH (MODSEQ n)' with no UIDs, which is malformed), `empty' (an explicit, empty `* SEARCH' although the mailbox holds mail), `modseq_glued' (no space
 %% before the suffix) or `modseq_zero' (`(MODSEQ 0)').
 set_search(Srv, Mode) when
     Mode =:= normal;
@@ -108,6 +109,7 @@ set_search(Srv, Mode) when
     Mode =:= bracket_between;
     Mode =:= modseq;
     Mode =:= modseq_alone;
+    Mode =:= empty;
     Mode =:= modseq_glued;
     Mode =:= modseq_zero
 ->
@@ -315,7 +317,22 @@ log_command(Rest) ->
     end.
 
 %% FETCH 1:* (UID FLAGS): the flags of every message.
-handle_plain_fetch(Sock, Tag, #{messages := Ms} = State) ->
+handle_plain_fetch(Sock, Tag, Args, #{messages := Ms0} = State) ->
+    %% `N:*' is the messages from the Nth, as a real server answers
+    Ms =
+        case re:run(Args, <<"^([0-9]+):\\*">>, [{capture, all_but_first, binary}]) of
+            {match, [From]} -> lists:nthtail(min(length(Ms0), binary_to_integer(From) - 1), Ms0);
+            nomatch -> Ms0
+        end,
+    case maps:get({opt, fail_flags_fetch}, State, false) of
+        true ->
+            tagged(Sock, Tag, <<"NO cannot read flags">>),
+            {continue, State};
+        false ->
+            plain_fetch_answer(Sock, Tag, Ms, State)
+    end.
+
+plain_fetch_answer(Sock, Tag, Ms, State) ->
     [
         send(Sock, [
             <<"* ", (integer_to_binary(Seq))/binary, " FETCH (UID ",
@@ -398,7 +415,7 @@ dispatch(Sock, Tag, Rest, State) ->
         <<"EXAMINE">> ->
             handle_select(Sock, Tag, Args, State);
         <<"FETCH">> ->
-            handle_plain_fetch(Sock, Tag, State);
+            handle_plain_fetch(Sock, Tag, Args, State);
         <<"UID">> ->
             handle_uid(Sock, Tag, Args, State);
         <<"LOGOUT">> ->
@@ -612,6 +629,7 @@ handle_uid_search(Sock, Tag, Rest, #{messages := Ms} = State) ->
     case maps:get(search_mode, State, normal) of
         normal -> send(Sock, [<<"* SEARCH ">>, Uids, <<"\r\n">>]);
         none -> ok;
+        empty -> send(Sock, <<"* SEARCH\r\n">>);
         junk -> send(Sock, [<<"* SEARCH 5 abc 7\r\n">>]);
         outside -> send(Sock, <<"* SEARCH 99999\r\n">>);
         bracket -> send(Sock, <<"* SEARCH )\r\n">>);
