@@ -769,10 +769,11 @@ fetch_raw(Adapter, Conn, ImapName, Uid, Validity) ->
     %% The sink always answers ok (its contract). Past the limit it keeps nothing
     %% more, and the fetch ends as an error once the adapter returns.
     Sink = fun(Bytes) ->
-        case atomics:add_get(Total, 1, iolist_size(Bytes)) =< Max of
-            true -> Self ! {Ref, iolist_to_binary(Bytes)};
-            false -> ok
-        end,
+        _ =
+            case atomics:add_get(Total, 1, iolist_size(Bytes)) =< Max of
+                true -> Self ! {Ref, iolist_to_binary(Bytes)};
+                false -> ok
+            end,
         ok
     end,
     Result =
