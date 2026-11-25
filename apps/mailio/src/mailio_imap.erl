@@ -147,7 +147,9 @@ to_mailbox({list, Attrs, Delim, Name}) ->
     {ok, [mailio_adapter:change()], mailio_adapter:remote_state(), more | done}
     | {error, term()}.
 fetch_changes_since(#{caps := Caps} = Conn, MailboxId, State, _Opts) ->
-    Prev = mailio_imap_map:decode_state(State),
+    %% only the literal `initial' is a first read; a saved cursor, even one that
+    %% decodes to nothing, is compared with the mailbox
+    Prev = (mailio_imap_map:decode_state(State))#{first_read => State =:= initial},
     case maps:get(page, Prev, undefined) of
         undefined ->
             case use_qresync(Caps, Prev) of
@@ -660,6 +662,8 @@ unwatch(_Conn, _Ref) ->
 -spec list_uids(conn(), binary()) -> {ok, [integer()]} | {error, term()}.
 list_uids(#{pid := Pid} = Conn, MailboxId) ->
     case examine_listing(Pid, MailboxId) of
+        {ok, #{uidvalidity := undefined}} ->
+            command_error({error, uidvalidity_invalid});
         {ok, #{uidnext := UidNext}} ->
             Upto = UidNext - 1,
             Window = search_window(Conn),
@@ -710,9 +714,22 @@ examine_listing(Pid, MailboxId) ->
         Other -> Other
     end.
 
-ensure_uidnext(_Pid, #{uidnext := N} = Sel) when is_integer(N) ->
-    {ok, Sel};
 ensure_uidnext(Pid, Sel) ->
+    case find_uidnext(Pid, Sel) of
+        {ok, #{uidnext := Next, exists := Exists}} when
+            is_integer(Exists), Next - 1 < Exists
+        ->
+            %% every message has a UID of its own from 1, so the highest is at
+            %% least their number: a bound below it is not true, and a listing
+            %% under it would leave messages out
+            {error, uidnext_below_exists};
+        Other ->
+            Other
+    end.
+
+find_uidnext(_Pid, #{uidnext := N} = Sel) when is_integer(N) ->
+    {ok, Sel};
+find_uidnext(Pid, Sel) ->
     case maps:get(exists, Sel, undefined) of
         0 ->
             {ok, Sel#{uidnext => 1}};
@@ -735,17 +752,15 @@ max_uid(Pid) ->
     Cmd = fun(T) -> {mailio_imap_proto:uid_fetch(T, <<"*">>, [<<"UID">>]), undefined} end,
     case run(Pid, Cmd) of
         {ok, Untagged, {ok, _, _}} ->
-            case
-                [U || {fetch, _, I} <- Untagged, U <- [proplists:get_value(uid, I)], is_integer(U)]
-            of
-                [] ->
-                    {error, no_highest_uid};
-                Uids ->
-                    %% a UID is a number from 1 to 2^32-1 (RFC 3501, section 2.3.1.1)
-                    case lists:max(Uids) of
-                        U when U >= 1, U =< 4294967295 -> {ok, U};
-                        _ -> {error, no_highest_uid}
-                    end
+            %% The server may volunteer updates for other messages in the same
+            %% answer, so the highest is the largest of them; but every UID in
+            %% it must be one (RFC 3501, section 2.3.1.1: 1 to 2^32-1), or the
+            %% answer cannot be trusted about the last message.
+            Uids = [proplists:get_value(uid, I) || {fetch, _, I} <- Untagged],
+            Valid = fun(U) -> is_integer(U) andalso U >= 1 andalso U =< 4294967295 end,
+            case Uids =/= [] andalso lists:all(Valid, Uids) of
+                true -> {ok, lists:max(Uids)};
+                false -> {error, no_highest_uid}
             end;
         Other ->
             Other
@@ -814,8 +829,7 @@ encode(#{uidvalidity := UV, uidnext := UN, highestmodseq := MS}, Where) ->
 %% messages (RFC 3501, section 2.3.1.1): unless it is the very first read, the
 %% mailbox is read again in full.
 uidvalidity_changed(#{uidvalidity := undefined} = Prev, _New) ->
-    maps:get(uidnext, Prev, undefined) =/= undefined orelse
-        maps:get(highestmodseq, Prev, undefined) =/= undefined;
+    not maps:get(first_read, Prev, false);
 uidvalidity_changed(#{uidvalidity := Prev}, #{uidvalidity := New}) ->
     Prev =/= New.
 

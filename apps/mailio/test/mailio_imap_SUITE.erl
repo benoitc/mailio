@@ -49,6 +49,10 @@
     a_highest_uid_of_zero_is_an_error/1,
     a_cursor_needs_a_valid_uidvalidity/1,
     a_cursor_without_a_known_uidvalidity_is_reset/1,
+    a_listing_needs_a_valid_uidvalidity/1,
+    a_uidnext_below_exists_is_an_error/1,
+    an_update_does_not_hide_an_invalid_highest_uid/1,
+    a_saved_cursor_with_nothing_known_is_reset/1,
     writes_open_read_write/1
 ]).
 
@@ -87,6 +91,10 @@ all() ->
         a_highest_uid_of_zero_is_an_error,
         a_cursor_needs_a_valid_uidvalidity,
         a_cursor_without_a_known_uidvalidity_is_reset,
+        a_listing_needs_a_valid_uidvalidity,
+        a_uidnext_below_exists_is_an_error,
+        an_update_does_not_hide_an_invalid_highest_uid,
+        a_saved_cursor_with_nothing_known_is_reset,
         writes_open_read_write
     ].
 
@@ -513,4 +521,48 @@ a_cursor_without_a_known_uidvalidity_is_reset(Config) ->
     }),
     ?assertMatch(
         {ok, [reset], _, done}, mailio_imap:fetch_changes_since(Conn, <<"INBOX">>, Old, #{})
+    ).
+
+%% A listing is about one generation of the mailbox: without a valid UIDVALIDITY
+%% it cannot be used to remove anything.
+a_listing_needs_a_valid_uidvalidity(Config) ->
+    Srv = ?config(srv, Config),
+    ok = mailio_fake_imap:set_option(Srv, bad_validity, true),
+    Conn = conn_with(Config, #{}),
+    ?assertMatch({error, _}, mailio_imap:list_uids(Conn, <<"INBOX">>)).
+
+%% Two messages cannot have a highest UID of 0: UIDNEXT 1 contradicts EXISTS 2.
+a_uidnext_below_exists_is_an_error(Config) ->
+    Srv = ?config(srv, Config),
+    ok = mailio_fake_imap:set_uidnext(Srv, 1),
+    Conn = conn_with(Config, #{}),
+    ?assertMatch({error, _}, mailio_imap:list_uids(Conn, <<"INBOX">>)),
+    ?assertMatch({error, _}, mailio_imap:fetch_changes_since(Conn, <<"INBOX">>, initial, #{})).
+
+%% An update for another message in the same answer does not make the invalid
+%% UID of the last one a valid highest UID.
+an_update_does_not_hide_an_invalid_highest_uid(Config) ->
+    Srv = ?config(srv, Config),
+    ok = mailio_fake_imap:set_uidnext(Srv, <<"01">>),
+    ok = mailio_fake_imap:set_option(Srv, zero_max_uid, true),
+    ok = mailio_fake_imap:inject(Srv, [<<"* 1 FETCH (UID 100 FLAGS (\\Seen))">>]),
+    Conn = conn_with(Config, #{}),
+    ?assertMatch({error, _}, mailio_imap:list_uids(Conn, <<"INBOX">>)).
+
+%% Only the literal `initial' is a first read. A saved cursor that knows nothing
+%% cannot say its UIDs are still the same messages.
+a_saved_cursor_with_nothing_known_is_reset(Config) ->
+    Conn = conn_with(Config, #{}),
+    Old = mailio_imap_map:encode_state(#{
+        uidvalidity => undefined,
+        uidnext => undefined,
+        highestmodseq => undefined,
+        page => undefined
+    }),
+    ?assertMatch(
+        {ok, [reset], _, done}, mailio_imap:fetch_changes_since(Conn, <<"INBOX">>, Old, #{})
+    ),
+    ?assertMatch(
+        {ok, [{added, _} | _], _, done},
+        mailio_imap:fetch_changes_since(Conn, <<"INBOX">>, initial, #{})
     ).

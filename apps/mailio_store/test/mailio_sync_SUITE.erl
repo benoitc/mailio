@@ -54,6 +54,7 @@
     a_first_read_without_a_valid_uidvalidity_gives_no_cursor/1,
     integer_and_text_ids_do_not_collide/1,
     an_older_text_id_mapping_is_still_found/1,
+    a_half_moved_mapping_is_finished_by_a_retry/1,
     opaque_ids_are_synced_and_reconciled/1,
     an_unreliable_listing_does_not_remove_local_mail/1,
     a_repeated_cursor_ends_the_sync/1,
@@ -96,6 +97,7 @@ all() ->
         a_first_read_without_a_valid_uidvalidity_gives_no_cursor,
         integer_and_text_ids_do_not_collide,
         an_older_text_id_mapping_is_still_found,
+        a_half_moved_mapping_is_finished_by_a_retry,
         opaque_ids_are_synced_and_reconciled,
         an_unreliable_listing_does_not_remove_local_mail,
         a_repeated_cursor_ends_the_sync,
@@ -879,29 +881,85 @@ integer_and_text_ids_do_not_collide(Config) ->
         application:unset_env(mailio_store, opaque_messages)
     end.
 
-%% A text id stored before the key kept its type is still found and removed.
+%% Mappings an older version wrote sit under the UID as it is, with the UID and
+%% its type in the document. They are found and removed for that UID only.
 an_older_text_id_mapping_is_still_found(Config) ->
     Account = ?config(account, Config),
     Db = mailio_account:db_name(Account),
     restart_with(Config, #{}, mailio_opaque_adapter),
-    Raw = <<"From: a@x\r\nTo: b@y\r\nSubject: old\r\nMessage-ID: <o@x>\r\n\r\nbody\r\n">>,
-    application:set_env(mailio_store, opaque_messages, #{<<"msg-o">> => Raw}),
+    Mail = fun(N) ->
+        <<"From: a@x\r\nTo: b@y\r\nSubject: old ", N/binary, "\r\nMessage-ID: <", N/binary,
+            "@x>\r\n\r\nbody ", N/binary, "\r\n">>
+    end,
+    %% `x' and `b:x' are two messages; so are the texts 001 and 123
+    Ids = [<<"x">>, <<"b:x">>, <<"001">>, <<"123">>],
+    Messages = maps:from_list([{Id, Mail(Id)} || Id <- Ids]),
+    application:set_env(mailio_store, opaque_messages, Messages),
     try
         {ok, _} = mailio_sync_mgr:sync_mailbox(Account, <<"INBOX">>),
         {ok, LocalId} = ensure_inbox(Account),
-        New = mailio_account_writer:uidmap_id(Account, LocalId, <<"msg-o">>),
-        {ok, Doc} = mailio_db:get(Db, New),
-        Old = <<"uidmap/", LocalId/binary, "/msg-o">>,
-        {ok, _, _} = mailio_db:put(Db, Doc#{<<"id">> => Old}),
-        _ = mailio_db:delete(Db, New),
-        ?assertMatch({ok, _}, mailio_account_writer:lookup_uid(Account, LocalId, <<"msg-o">>)),
-        application:set_env(mailio_store, opaque_messages, #{}),
+        [to_legacy_mapping(Db, Account, LocalId, Id) || Id <- Ids],
+        %% each is found as itself
+        Subject = fun(Id) ->
+            {ok, EmailId} = mailio_account_writer:lookup_uid(Account, LocalId, Id),
+            {ok, Email} = mailio_db:get(Db, <<"email/", EmailId/binary>>),
+            maps:get(<<"subject">>, Email)
+        end,
+        ?assertEqual([<<"old x">>, <<"old b:x">>], [Subject(<<"x">>), Subject(<<"b:x">>)]),
+        %% the provider drops `x' and `001': the others, and their mappings, stay
+        application:set_env(
+            mailio_store, opaque_messages, maps:with([<<"b:x">>, <<"123">>], Messages)
+        ),
         {ok, R} = mailio_sync_mgr:reconcile_mailbox(Account, <<"INBOX">>),
-        ?assertEqual(1, maps:get(removed, R)),
+        ?assertEqual(2, maps:get(removed, R)),
+        ?assertEqual([<<"old 123">>, <<"old b:x">>], lists:sort(subjects(Account))),
+        ?assertEqual(
+            {error, not_found}, mailio_account_writer:lookup_uid(Account, LocalId, <<"x">>)
+        ),
+        ?assertMatch({ok, _}, mailio_account_writer:lookup_uid(Account, LocalId, <<"b:x">>)),
+        ?assertMatch({ok, _}, mailio_account_writer:lookup_uid(Account, LocalId, <<"123">>)),
+        %% and all of them when the provider has nothing
+        application:set_env(mailio_store, opaque_messages, #{}),
+        {ok, R2} = mailio_sync_mgr:reconcile_mailbox(Account, <<"INBOX">>),
+        ?assertEqual(2, maps:get(removed, R2)),
         ?assertEqual([], all_emails(Db))
     after
         application:unset_env(mailio_store, opaque_messages)
     end.
+
+%% A move to the new key that stopped half way leaves both records: reading the
+%% same message again finishes it, and it can be repeated.
+a_half_moved_mapping_is_finished_by_a_retry(Config) ->
+    Account = ?config(account, Config),
+    Db = mailio_account:db_name(Account),
+    restart_with(Config, #{}, mailio_opaque_adapter),
+    Raw = <<"From: a@x\r\nTo: b@y\r\nSubject: half\r\nMessage-ID: <h@x>\r\n\r\nbody\r\n">>,
+    application:set_env(mailio_store, opaque_messages, #{<<"h">> => Raw}),
+    try
+        {ok, _} = mailio_sync_mgr:sync_mailbox(Account, <<"INBOX">>),
+        {ok, LocalId} = ensure_inbox(Account),
+        Current = mailio_account_writer:uidmap_id(Account, LocalId, <<"h">>),
+        {ok, Doc} = mailio_db:get(Db, Current),
+        Old = <<"uidmap/", LocalId/binary, "/h">>,
+        {ok, _, _} = mailio_db:put(Db, Doc#{<<"id">> => Old}),
+        %% both exist; the mailbox is read in full twice
+        [{ok, _} = mailio_sync_mgr:reconcile_mailbox(Account, <<"INBOX">>) || _ <- [1, 2]],
+        ?assertEqual(1, length(all_emails(Db))),
+        ?assertMatch({ok, _}, mailio_account_writer:lookup_uid(Account, LocalId, <<"h">>)),
+        {ok, _} = mailio_account_writer:ingest(Account, LocalId, Raw, #{uid => <<"h">>}),
+        ?assertEqual({error, not_found}, mailio_db:get(Db, Old))
+    after
+        application:unset_env(mailio_store, opaque_messages)
+    end.
+
+%% What an older version stored for `Id': the UID as it is, under the old prefix.
+to_legacy_mapping(Db, Account, LocalId, Id) ->
+    Current = mailio_account_writer:uidmap_id(Account, LocalId, Id),
+    {ok, Doc} = mailio_db:get(Db, Current),
+    Old = <<"uidmap/", LocalId/binary, "/", Id/binary>>,
+    {ok, _, _} = mailio_db:put(Db, Doc#{<<"id">> => Old}),
+    _ = mailio_db:delete(Db, Current),
+    ok.
 
 %% Ids that are not numbers: two distinct ones are two messages, in a first read,
 %% in the next, and in a reconcile.

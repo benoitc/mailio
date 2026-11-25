@@ -159,7 +159,14 @@
   position saved without a known UIDVALIDITY makes the mailbox read again in
   full.
 - Messages whose ids are the number 1 and the text "1" were stored as one
-  message. They are now kept apart, and mappings saved before are still found.
+  message. They are now kept apart. Mappings saved by an earlier version are
+  still found for their own id only, and move to the new form when the message
+  is read again.
+- A mailbox whose answers contradict each other (for example two messages and
+  a next UID of 1, or an invalid highest UID next to an update for another
+  message) is no longer listed. The read stops with an error and local mail is
+  kept. A saved position that knows nothing about the mailbox now makes it be
+  read again in full.
 - Reading mail now opens mailboxes read-only. Only changing flags, moving and
   deleting open them for writing.
 - Unsubscribing from events no longer leaks a monitor.

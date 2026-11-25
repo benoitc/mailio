@@ -623,7 +623,6 @@ uid_lookup(Uids) ->
 %% listing that fails is an error, never an empty one: an empty one would read as
 %% "everything is gone".
 fold_local_uidmaps(Db, LocalId, Fun, Acc) ->
-    Prefix = <<?ID_UIDMAP, LocalId/binary, "/">>,
     Batch = fun(Docs, A) ->
         Maps = [
             {maps:get(<<"uid">>, D), maps:get(<<"emailId">>, D), maps:get(<<"id">>, D)}
@@ -631,7 +630,12 @@ fold_local_uidmaps(Db, LocalId, Fun, Acc) ->
         ],
         Fun(Maps, A)
     end,
-    mailio_db:fold_id_prefix(Db, Prefix, 500, Batch, Acc).
+    %% the current namespace, then the mappings an older version wrote
+    maybe
+        {ok, Acc1} ?=
+            mailio_db:fold_id_prefix(Db, <<?ID_UIDMAP2, LocalId/binary, "/">>, 500, Batch, Acc),
+        mailio_db:fold_id_prefix(Db, <<?ID_UIDMAP, LocalId/binary, "/">>, 500, Batch, Acc1)
+    end.
 
 %% The marker that the UIDs held for a mailbox may mean other messages: it stays
 %% until a full read has replaced them, whatever happens in between.

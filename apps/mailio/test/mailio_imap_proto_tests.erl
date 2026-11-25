@@ -517,8 +517,18 @@ search_answer_with_a_bad_modseq_suffix_is_malformed_test() ->
      || Wire <- [
             <<"* SEARCH 5(MODSEQ 9)">>,
             <<"* SEARCH 5 (MODSEQ 0)">>,
+            <<"* SEARCH 5 (MODSEQ 00)">>,
+            <<"* SEARCH 5 (MODSEQ 9223372036854775808)">>,
+            <<"* SEARCH 5 (MODSEQ 09223372036854775808)">>
+        ]
+    ],
+    %% leading zeros are digits: the value counts, not the length
+    [
+        ?assertEqual({untagged, {search, [5]}}, ?P:parse_response(Wire))
+     || Wire <- [
             <<"* SEARCH 5 (MODSEQ 09)">>,
-            <<"* SEARCH 5 (MODSEQ 9223372036854775808)">>
+            <<"* SEARCH 5 (MODSEQ 000000000000000000000009)">>,
+            <<"* SEARCH 5 (MODSEQ 09223372036854775807)">>
         ]
     ],
     ?assertEqual(

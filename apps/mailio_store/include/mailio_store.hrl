@@ -23,6 +23,8 @@
 %% Present while a mailbox that was recreated has not been read in full again.
 -define(ID_SYNC_RESET, "sync/reset/").
 -define(ID_UIDMAP, "uidmap/").
+%% the uid mappings that keep the type of the UID; ?ID_UIDMAP holds older ones
+-define(ID_UIDMAP2, "uidmap2/").
 -define(ID_RULE, "rule/").
 -define(ID_JOB, "job/").
 -define(ID_ACCOUNT, "account/").

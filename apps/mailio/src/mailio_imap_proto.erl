@@ -546,9 +546,14 @@ search_modseq(<<"(", Rest/binary>>) ->
 search_modseq(_) ->
     error.
 
-%% A mod-sequence is from 1 to 2^63-1 (RFC 7162, section 7), with no leading zero.
-modseq_value(<<"0", _/binary>>) -> false;
-modseq_value(Bin) -> digits(Bin) andalso binary_to_integer(Bin) =< 9223372036854775807.
+%% A mod-sequence is a number from 1 to 2^63-1 (RFC 7162, section 7); leading
+%% zeros are digits like any other, and the value is checked after them.
+modseq_value(Bin) ->
+    digits(Bin) andalso
+        case string:trim(Bin, leading, "0") of
+            <<>> -> false;
+            Sig -> byte_size(Sig) =< 19 andalso binary_to_integer(Sig) =< 9223372036854775807
+        end.
 
 digits(<<>>) -> false;
 digits(Bin) -> lists:all(fun(C) -> C >= $0 andalso C =< $9 end, binary_to_list(Bin)).

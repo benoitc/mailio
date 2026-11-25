@@ -517,9 +517,10 @@ handle_uid_fetch(Sock, Tag, Rest, #{messages := Ms} = State) ->
                     tagged(Sock, Tag, <<"NO no highest uid">>),
                     {continue, State};
                 {_, true} ->
+                    [send(Sock, [Line, <<"\r\n">>]) || Line <- maps:get(injected, State, [])],
                     send(Sock, <<"* 2 FETCH (UID 0)\r\n">>),
                     tagged(Sock, Tag, <<"OK UID FETCH done">>),
-                    {continue, State};
+                    {continue, maps:remove(injected, State)};
                 _ ->
                     handle_uid_fetch_data(Sock, Tag, SetBin, ItemsBin, State)
             end;
