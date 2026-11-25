@@ -24,7 +24,7 @@ order_does_not_matter_test() ->
 
 a_dense_mailbox_is_a_few_ranges_test() ->
     {ok, S} = fill(lists:seq(1, 50000), 1000000),
-    {Tuple, N} = mailio_uid_set:to_lookup(S),
+    {Tuple, N, _} = mailio_uid_set:to_lookup(S),
     ?assertEqual(1, N),
     ?assertEqual({1, 50000}, element(1, Tuple)).
 
@@ -58,6 +58,28 @@ a_shuffled_mailbox_is_still_compact_test() ->
     Uids = [U || {_, U} <- lists:sort([{rand:uniform(), U} || U <- lists:seq(1, 5000)])],
     {ok, S} = fill(Uids, 100000),
     ?assertEqual(5000, mailio_uid_set:size(S)),
-    {Tuple, N} = mailio_uid_set:to_lookup(S),
+    {Tuple, N, _} = mailio_uid_set:to_lookup(S),
     ?assertEqual(1, N),
     ?assertEqual({1, 5000}, element(1, Tuple)).
+
+%% A provider's ids need not be numbers. They are kept exactly, and counted once.
+opaque_ids_are_members_by_equality_test() ->
+    {ok, S} = fill([<<"a">>, <<"b">>, <<"a">>, <<"c">>], 10),
+    ?assertEqual(3, mailio_uid_set:size(S)),
+    L = mailio_uid_set:to_lookup(S),
+    [?assert(mailio_uid_set:member(U, L)) || U <- [<<"a">>, <<"b">>, <<"c">>]],
+    ?assertNot(mailio_uid_set:member(<<"d">>, L)),
+    ?assertNot(mailio_uid_set:member(1, L)).
+
+opaque_ids_use_the_limit_too_test() ->
+    {ok, S} = fill([<<"a">>, <<"b">>], 2),
+    ?assertMatch({ok, _}, mailio_uid_set:add(<<"a">>, S)),
+    ?assertEqual({error, too_many}, mailio_uid_set:add(<<"z">>, S)).
+
+numbers_and_opaque_ids_can_be_mixed_test() ->
+    {ok, S} = fill([1, 2, <<"x">>, 3, <<"y">>], 20),
+    ?assertEqual(5, mailio_uid_set:size(S)),
+    L = mailio_uid_set:to_lookup(S),
+    [?assert(mailio_uid_set:member(U, L)) || U <- [1, 2, 3, <<"x">>, <<"y">>]],
+    ?assertNot(mailio_uid_set:member(4, L)),
+    ?assertNot(mailio_uid_set:member(<<"1">>, L)).

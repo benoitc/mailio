@@ -47,6 +47,9 @@
     reconcile_removes_more_than_one_chunk_of_mappings/1,
     a_reset_is_remembered_across_a_failed_retry_and_a_restart/1,
     a_streamed_read_applies_flag_updates_in_order/1,
+    reconcile_keeps_local_mail_for_a_modseq_suffix_alone/1,
+    reconcile_keeps_local_mail_for_a_uidnext_with_a_leading_zero/1,
+    opaque_ids_are_synced_and_reconciled/1,
     an_unreliable_listing_does_not_remove_local_mail/1,
     a_repeated_cursor_ends_the_sync/1,
     an_endless_listing_is_bounded/1,
@@ -81,6 +84,9 @@ all() ->
         reconcile_removes_more_than_one_chunk_of_mappings,
         a_reset_is_remembered_across_a_failed_retry_and_a_restart,
         a_streamed_read_applies_flag_updates_in_order,
+        reconcile_keeps_local_mail_for_a_modseq_suffix_alone,
+        reconcile_keeps_local_mail_for_a_uidnext_with_a_leading_zero,
+        opaque_ids_are_synced_and_reconciled,
         an_unreliable_listing_does_not_remove_local_mail,
         a_repeated_cursor_ends_the_sync,
         an_endless_listing_is_bounded,
@@ -769,6 +775,59 @@ a_streamed_read_applies_flag_updates_in_order(Config) ->
     ?assert(mailio_email:is_seen(email_by_subject(Db, <<"First message">>))),
     ?assertNot(mailio_email:is_seen(email_by_subject(Db, <<"Second message">>))),
     ?assertEqual({2, 1}, mailbox_counts(Account, LocalId)).
+
+%% Two replies that read as an empty mailbox if they are taken as they are
+%% written. Neither may make reconcile remove local mail.
+reconcile_keeps_local_mail_for_a_modseq_suffix_alone(Config) ->
+    Account = ?config(account, Config),
+    Db = mailio_account:db_name(Account),
+    Srv = ?config(srv, Config),
+    {ok, _} = mailio_sync_mgr:sync_mailbox(Account, <<"INBOX">>),
+    ok = mailio_fake_imap:set_search(Srv, modseq_alone),
+    ?assertMatch({error, _}, mailio_sync_mgr:reconcile_mailbox(Account, <<"INBOX">>)),
+    ?assertEqual(2, length(all_emails(Db))).
+
+reconcile_keeps_local_mail_for_a_uidnext_with_a_leading_zero(Config) ->
+    Account = ?config(account, Config),
+    Db = mailio_account:db_name(Account),
+    Srv = ?config(srv, Config),
+    {ok, _} = mailio_sync_mgr:sync_mailbox(Account, <<"INBOX">>),
+    ok = mailio_fake_imap:set_uidnext(Srv, <<"01">>),
+    {ok, S} = mailio_sync_mgr:reconcile_mailbox(Account, <<"INBOX">>),
+    ?assertEqual(0, maps:get(removed, S)),
+    ?assertEqual(2, length(all_emails(Db))).
+
+%% Ids that are not numbers: two distinct ones are two messages, in a first read,
+%% in the next, and in a reconcile.
+opaque_ids_are_synced_and_reconciled(Config) ->
+    Account = ?config(account, Config),
+    Db = mailio_account:db_name(Account),
+    restart_with(Config, #{}, mailio_opaque_adapter),
+    Mail = fun(N) ->
+        <<"From: a@x\r\nTo: b@y\r\nSubject: opaque ", N/binary, "\r\nMessage-ID: <", N/binary,
+            "@x>\r\n\r\nbody ", N/binary, "\r\n">>
+    end,
+    application:set_env(mailio_store, opaque_messages, #{
+        <<"msg-a">> => Mail(<<"a">>), <<"msg-b">> => Mail(<<"b">>)
+    }),
+    try
+        {ok, S1} = mailio_sync_mgr:sync_mailbox(Account, <<"INBOX">>),
+        ?assertEqual(2, maps:get(added, S1)),
+        ?assertEqual(2, length(all_emails(Db))),
+        %% the same mailbox again changes nothing
+        {ok, S2} = mailio_sync_mgr:sync_mailbox(Account, <<"INBOX">>),
+        ?assertEqual(0, maps:get(removed, S2)),
+        ?assertEqual(2, length(all_emails(Db))),
+        {ok, R} = mailio_sync_mgr:reconcile_mailbox(Account, <<"INBOX">>),
+        ?assertEqual(0, maps:get(removed, R)),
+        %% one is gone from the provider
+        application:set_env(mailio_store, opaque_messages, #{<<"msg-a">> => Mail(<<"a">>)}),
+        {ok, R2} = mailio_sync_mgr:reconcile_mailbox(Account, <<"INBOX">>),
+        ?assertEqual(1, maps:get(removed, R2)),
+        ?assertEqual([<<"opaque a">>], subjects(Account))
+    after
+        application:unset_env(mailio_store, opaque_messages)
+    end.
 
 %% A listing that does not say what is there is not a listing of nothing.
 an_unreliable_listing_does_not_remove_local_mail(Config) ->

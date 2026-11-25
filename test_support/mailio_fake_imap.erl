@@ -93,7 +93,8 @@ set_option(Srv, Option, Bool) when
 %% @doc How UID SEARCH answers: `normal', `none' (tagged OK and no SEARCH line)
 %% `junk' (a SEARCH line with a number that is not one), `outside' (a UID that was
 %% not asked for), `bracket' (`* SEARCH )'), `bracket_between' (`* SEARCH 5 ) 7') or
-%% `modseq' (the CONDSTORE form: the UIDs, then `(MODSEQ n)').
+%% `modseq' (the CONDSTORE form: the UIDs, then `(MODSEQ n)') or `modseq_alone'
+%% (`* SEARCH (MODSEQ n)' with no UIDs, which is malformed).
 set_search(Srv, Mode) when
     Mode =:= normal;
     Mode =:= none;
@@ -101,11 +102,13 @@ set_search(Srv, Mode) when
     Mode =:= outside;
     Mode =:= bracket;
     Mode =:= bracket_between;
-    Mode =:= modseq
+    Mode =:= modseq;
+    Mode =:= modseq_alone
 ->
     call(Srv, {set_search, Mode}, ok).
 
-%% @doc The UIDNEXT the server reports, for a mailbox whose UIDs are far apart.
+%% @doc The UIDNEXT the server reports, for a mailbox whose UIDs are far apart. A
+%% binary is sent as it is, to send one that is not a valid number.
 set_uidnext(Srv, N) -> call(Srv, {set_uidnext, N}, ok).
 
 %% @doc Raw lines the server volunteers with its next answer to a UID FETCH,
@@ -421,7 +424,7 @@ handle_select(Sock, Tag, Args, State) ->
 send_select(Sock, #{messages := Ms, uidnext := UidNext} = State) ->
     N = integer_to_binary(length(Ms)),
     HMS = integer_to_binary(highestmodseq(State)),
-    UN = integer_to_binary(UidNext),
+    UN = uidnext_text(UidNext),
     send(Sock, <<"* FLAGS (\\Answered \\Flagged \\Deleted \\Seen \\Draft)\r\n">>),
     case maps:get({opt, no_exists}, State, false) of
         true -> ok;
@@ -435,6 +438,9 @@ send_select(Sock, #{messages := Ms, uidnext := UidNext} = State) ->
         false -> send(Sock, <<"* OK [UIDNEXT ", UN/binary, "] Predicted next UID\r\n">>)
     end,
     send(Sock, <<"* OK [HIGHESTMODSEQ ", HMS/binary, "] Highest\r\n">>).
+
+uidnext_text(N) when is_integer(N) -> integer_to_binary(N);
+uidnext_text(Bin) when is_binary(Bin) -> Bin.
 
 emit_qresync(Sock, #{vanished := V, messages := Ms} = State, Since) ->
     Gone = [Uid || {Uid, MS} <- V, MS > Since],
@@ -590,7 +596,8 @@ handle_uid_search(Sock, Tag, Rest, #{messages := Ms} = State) ->
         outside -> send(Sock, <<"* SEARCH 99999\r\n">>);
         bracket -> send(Sock, <<"* SEARCH )\r\n">>);
         bracket_between -> send(Sock, <<"* SEARCH 5 ) 7\r\n">>);
-        modseq -> send(Sock, [<<"* SEARCH ">>, Uids, <<" (MODSEQ 9)\r\n">>])
+        modseq -> send(Sock, [<<"* SEARCH ">>, Uids, <<" (MODSEQ 9)\r\n">>]);
+        modseq_alone -> send(Sock, <<"* SEARCH (MODSEQ 9)\r\n">>)
     end,
     tagged(Sock, Tag, <<"OK UID SEARCH done">>),
     {continue, State}.

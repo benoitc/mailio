@@ -107,6 +107,15 @@
   If the read that follows fails, or the process restarts, the next read still
   replaces what it holds, even for an adapter that does not say which identity a
   message was listed under.
+- A reply to a UID search that holds only the change-tracking suffix is no longer
+  taken for an empty result: a server leaves the suffix out when nothing
+  matched, so such a reply is malformed and the listing stops with an error.
+- A "next UID" or a mailbox identity written with a leading zero or a sign is no
+  longer read as the number it looks like, which made a mailbox with mail look
+  empty. The highest UID is asked for instead.
+- A provider whose message identifiers are not numbers can be read by the store
+  again: two different identifiers are two messages, in a first read, in a later
+  one and when the store reconciles with the server.
 - A report of vanished messages without a list of numbers, or with one that is
   not well formed, is no longer acted on in part. Both the store and the MCP
   server compare the whole mailbox instead.

@@ -515,8 +515,12 @@ parse_search(Rest) ->
             nomatch -> {Rest, <<>>};
             {At, _} -> {binary:part(Rest, 0, At), binary:part(Rest, At, byte_size(Rest) - At)}
         end,
+    Words = binary:split(Numbers, [<<" ">>, <<"\t">>], [global, trim_all]),
     case search_modseq(mailio_ascii:trim(Tail)) of
-        ok -> search_numbers(binary:split(Numbers, [<<" ">>, <<"\t">>], [global, trim_all]), []);
+        %% the suffix is left out when nothing matched (RFC 7162, section 3.1.6):
+        %% one with no numbers before it is not an empty answer
+        ok when Tail =/= <<>>, Words =:= [] -> error;
+        ok -> search_numbers(Words, []);
         error -> error
     end.
 
@@ -575,10 +579,24 @@ split_bracket(<<>>, _Acc) -> none.
 
 parse_code(CodeBin) ->
     {Name, Args} = split_word(CodeBin),
+    Upper = string:uppercase(Name),
     case tokenize(Args) of
-        [] -> {string:uppercase(Name)};
-        Toks -> {string:uppercase(Name), Toks}
+        [] ->
+            {Upper};
+        Toks ->
+            case nz_number_code(Upper) andalso not valid_nz_number(mailio_ascii:trim(Args)) of
+                %% not a number from 1 as written: it is not read as one
+                true -> {Upper, [{invalid, Args}]};
+                false -> {Upper, Toks}
+            end
     end.
+
+%% Codes whose argument is an nz-number (RFC 3501, section 9).
+nz_number_code(<<"UIDNEXT">>) -> true;
+nz_number_code(<<"UIDVALIDITY">>) -> true;
+nz_number_code(_) -> false.
+
+valid_nz_number(Bin) -> uid(Bin) =/= error.
 
 %%====================================================================
 %% FETCH item interpretation

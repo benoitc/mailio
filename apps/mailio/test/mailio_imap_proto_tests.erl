@@ -496,5 +496,36 @@ search_answer_with_brackets_is_not_read_test() ->
 search_answer_with_modseq_is_read_test() ->
     ?assertEqual(
         {untagged, {search, [5, 7]}}, ?P:parse_response(<<"* SEARCH 5 7 (MODSEQ 917162500)">>)
+    ).
+
+%% RFC 7162, section 3.1.6: the suffix is left out when nothing matched. A
+%% suffix alone is not an empty answer, it is a malformed one.
+search_answer_with_modseq_alone_is_not_an_empty_answer_test() ->
+    ?assertMatch(
+        {untagged, {other, <<"SEARCH", _/binary>>}}, ?P:parse_response(<<"* SEARCH (MODSEQ 9)">>)
     ),
-    ?assertEqual({untagged, {search, []}}, ?P:parse_response(<<"* SEARCH (MODSEQ 9)">>)).
+    %% an explicit empty answer is still one
+    ?assertEqual({untagged, {search, []}}, ?P:parse_response(<<"* SEARCH">>)).
+
+%% UIDNEXT and UIDVALIDITY are numbers from 1 (RFC 3501, section 9: nz-number):
+%% no leading zero and no sign, checked on the bytes before they become a number.
+status_codes_with_non_canonical_numbers_are_not_numbers_test() ->
+    [
+        begin
+            {untagged, {status_resp, ok, {Name, Args}, _}} = ?P:parse_response(Wire),
+            ?assertNotMatch([{number, _}], Args)
+        end
+     || {Name, Wire} <- [
+            {<<"UIDNEXT">>, <<"* OK [UIDNEXT 01] next">>},
+            {<<"UIDNEXT">>, <<"* OK [UIDNEXT 007] next">>},
+            {<<"UIDNEXT">>, <<"* OK [UIDNEXT +5] next">>},
+            {<<"UIDNEXT">>, <<"* OK [UIDNEXT 0] next">>},
+            {<<"UIDVALIDITY">>, <<"* OK [UIDVALIDITY 01] valid">>},
+            {<<"UIDVALIDITY">>, <<"* OK [UIDVALIDITY 0] valid">>}
+        ]
+    ],
+    %% and the canonical ones are numbers
+    ?assertMatch(
+        {untagged, {status_resp, ok, {<<"UIDNEXT">>, [{number, 102}]}, _}},
+        ?P:parse_response(<<"* OK [UIDNEXT 102] next">>)
+    ).

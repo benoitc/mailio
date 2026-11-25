@@ -44,6 +44,8 @@
     a_search_answer_outside_the_window_is_an_error/1,
     a_search_answer_with_modseq_is_accepted/1,
     a_uidnext_of_zero_is_not_trusted/1,
+    a_uidnext_with_a_leading_zero_is_not_trusted/1,
+    a_modseq_suffix_alone_is_an_error/1,
     writes_open_read_write/1
 ]).
 
@@ -77,6 +79,8 @@ all() ->
         a_search_answer_outside_the_window_is_an_error,
         a_search_answer_with_modseq_is_accepted,
         a_uidnext_of_zero_is_not_trusted,
+        a_uidnext_with_a_leading_zero_is_not_trusted,
+        a_modseq_suffix_alone_is_an_error,
         writes_open_read_write
     ].
 
@@ -435,7 +439,7 @@ search_answers_that_are_not_valid_are_errors(Config) ->
             ok = mailio_fake_imap:set_search(Srv, Mode),
             ?assertMatch({error, _}, mailio_imap:list_uids(Conn, <<"INBOX">>))
         end
-     || Mode <- [bracket, bracket_between, junk, none]
+     || Mode <- [bracket, bracket_between, junk, none, modseq_alone]
     ].
 
 %% A number the window did not ask for is not an answer about the window.
@@ -460,3 +464,19 @@ a_uidnext_of_zero_is_not_trusted(Config) ->
     ?assertEqual({ok, [100, 101]}, mailio_imap:list_uids(Conn, <<"INBOX">>)),
     {ok, Changes, _, done} = mailio_imap:fetch_changes_since(Conn, <<"INBOX">>, initial, #{}),
     ?assertEqual([100, 101], [U || {added, #{uid := U}} <- Changes]).
+
+%% `UIDNEXT 01' is not a UIDNEXT: it must not read as 1, which would make the
+%% mailbox look empty.
+a_uidnext_with_a_leading_zero_is_not_trusted(Config) ->
+    Srv = ?config(srv, Config),
+    ok = mailio_fake_imap:set_uidnext(Srv, <<"01">>),
+    Conn = conn_with(Config, #{}),
+    ?assertEqual({ok, [100, 101]}, mailio_imap:list_uids(Conn, <<"INBOX">>)),
+    {ok, Changes, _, done} = mailio_imap:fetch_changes_since(Conn, <<"INBOX">>, initial, #{}),
+    ?assertEqual([100, 101], [U || {added, #{uid := U}} <- Changes]).
+
+a_modseq_suffix_alone_is_an_error(Config) ->
+    Srv = ?config(srv, Config),
+    ok = mailio_fake_imap:set_search(Srv, modseq_alone),
+    Conn = conn_with(Config, #{}),
+    ?assertMatch({error, _}, mailio_imap:list_uids(Conn, <<"INBOX">>)).
