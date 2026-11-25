@@ -192,6 +192,15 @@
   error and keeps local mail.
 - The mail changes tool no longer reports old messages as removed when its
   snapshot only covers the newest ones.
+- Several callers can now share one IMAP connection safely. Before, a call
+  that selects a mailbox and then reads or changes a message could act on
+  the mailbox another caller had just selected. Callers now take turns.
+- Deleting or moving a message on an IMAP server no longer removes other
+  messages that were already marked as deleted. Without server support for
+  removing by UID, the call now stops with an error when other messages are
+  marked, instead of removing them.
+- A message is stored only from the body the server sent for that message. A
+  body for another message, or one with no message number, is an error.
 - A removal that fails between updating the email and updating the counter is
   repaired by the next change to that mailbox.
 - A sync started by an IDLE notification replaces a dead connection and keeps

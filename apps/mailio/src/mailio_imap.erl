@@ -61,6 +61,8 @@
 -define(CONN_MAX_UNTAGGED, 100000).
 -define(CONN_MAX_LINE, 65536).
 -define(LISTING_ATTEMPTS, 3).
+%% how long a caller waits for its turn on a shared connection
+-define(SESSION_WAIT, 120000).
 
 -spec connect(map()) -> {ok, conn()} | {error, mailio_error:error_map()}.
 connect(Config) ->
@@ -71,8 +73,10 @@ connect(Config) ->
                 {ok, Untagged, {ok, _, _}} ->
                     Caps = caps_map(collect_caps(Untagged, Pid)),
                     maybe_enable_qresync(Pid, Caps),
+                    {ok, Lock} = mailio_imap_lock:start_link(Pid),
                     {ok, #{
                         pid => Pid,
+                        lock => Lock,
                         caps => Caps,
                         max_vanished => min(
                             maps:get(max_vanished, Config, ?MAX_VANISHED), ?MAX_VANISHED
@@ -94,13 +98,28 @@ connect(Config) ->
     end.
 
 -spec close(conn()) -> ok.
-close(#{pid := Pid}) ->
+close(#{pid := Pid} = Conn) ->
+    stop_lock(Conn),
     try
         run(Pid, fun(T) -> {mailio_imap_proto:logout(T), undefined} end)
     catch
         _:_ -> ok
     end,
     mailio_imap_conn:close(Pid).
+
+stop_lock(#{lock := Lock}) -> mailio_imap_lock:stop(Lock);
+stop_lock(_) -> ok.
+
+%% One session at a time on a connection: what selects a mailbox and then acts on
+%% it holds the connection for the whole sequence, so a command never lands on the
+%% mailbox another caller selected in between.
+session(#{lock := Lock}, Fun) ->
+    case mailio_imap_lock:with_session(Lock, ?SESSION_WAIT, fun() -> {done, Fun()} end) of
+        {done, Result} -> Result;
+        {error, _} = Error -> command_error(Error)
+    end;
+session(_Conn, Fun) ->
+    Fun().
 
 -spec capabilities(conn()) -> #{atom() => boolean()}.
 capabilities(#{caps := Caps}) -> Caps.
@@ -149,7 +168,10 @@ to_mailbox({list, Attrs, Delim, Name}) ->
 -spec fetch_changes_since(conn(), binary(), mailio_adapter:remote_state(), map()) ->
     {ok, [mailio_adapter:change()], mailio_adapter:remote_state(), more | done}
     | {error, term()}.
-fetch_changes_since(#{caps := Caps} = Conn, MailboxId, State, _Opts) ->
+fetch_changes_since(Conn, MailboxId, State, Opts) ->
+    session(Conn, fun() -> do_fetch_changes(Conn, MailboxId, State, Opts) end).
+
+do_fetch_changes(#{caps := Caps} = Conn, MailboxId, State, _Opts) ->
     %% only the literal `initial' is a first read; a saved cursor, even one that
     %% decodes to nothing, is compared with the mailbox
     Prev = (mailio_imap_map:decode_state(State))#{first_read => State =:= initial},
@@ -476,7 +498,10 @@ fetch_message(Conn, MailboxId, Uid, Sink) ->
 %% `{error, uidvalidity_changed}'.
 -spec fetch_message(conn(), binary(), term(), mailio_adapter:fetch_sink(), map()) ->
     {ok, #{size := non_neg_integer()}} | {error, term()}.
-fetch_message(#{pid := Pid}, MailboxId, Uid, Sink, Opts) ->
+fetch_message(#{pid := Pid} = Conn, MailboxId, Uid, Sink, Opts) ->
+    session(Conn, fun() -> do_fetch_message(Pid, MailboxId, Uid, Sink, Opts) end).
+
+do_fetch_message(Pid, MailboxId, Uid, Sink, Opts) ->
     case do_examine(Pid, MailboxId) of
         {ok, Sel} when
             is_map_key(uidvalidity, Opts),
@@ -501,27 +526,19 @@ fetch_message(#{pid := Pid}, MailboxId, Uid, Sink, Opts) ->
             command_error(Other)
     end.
 
+%% Only the body of the UID that was asked for. Another message's body, or one with
+%% no UID to say whose it is, is not this message: it must not be stored as it.
 body_from(Untagged, Uid) ->
     Matches = [
-        proplists:get_value(body, I)
+        Body
      || {fetch, _Seq, I} <- Untagged,
         proplists:get_value(uid, I) =:= Uid,
-        proplists:get_value(body, I) =/= undefined
+        Body <- [proplists:get_value(body, I)],
+        is_binary(Body)
     ],
     case Matches of
-        [Body | _] when is_binary(Body) -> {ok, Body};
-        _ ->
-            %% Fall back to the first body returned (single-uid fetch).
-            AnyBody = [
-                B
-             || {fetch, _S, I} <- Untagged,
-                B <- [proplists:get_value(body, I)],
-                is_binary(B)
-            ],
-            case AnyBody of
-                [Body | _] -> {ok, Body};
-                _ -> not_found
-            end
+        [Body] -> {ok, Body};
+        _ -> not_found
     end.
 
 %%====================================================================
@@ -530,7 +547,10 @@ body_from(Untagged, Uid) ->
 
 -spec set_keywords(conn(), binary(), term(), [binary()], [binary()]) ->
     ok | {error, term()}.
-set_keywords(#{pid := Pid}, MailboxId, Uid, Add, Remove) ->
+set_keywords(#{pid := Pid} = Conn, MailboxId, Uid, Add, Remove) ->
+    session(Conn, fun() -> do_set_keywords(Pid, MailboxId, Uid, Add, Remove) end).
+
+do_set_keywords(Pid, MailboxId, Uid, Add, Remove) ->
     case do_select(Pid, MailboxId) of
         {ok, _} ->
             AddFlags = mailio_imap_map:keywords_to_flags(Add),
@@ -557,7 +577,10 @@ store(Pid, Uid, Action, Flags) ->
 
 -spec move(conn(), binary(), term(), binary()) ->
     {ok, term() | undefined} | {error, term()}.
-move(#{pid := Pid, caps := Caps}, FromMailbox, Uid, ToMailbox) ->
+move(#{pid := Pid, caps := Caps} = Conn, FromMailbox, Uid, ToMailbox) ->
+    session(Conn, fun() -> do_move(Pid, Caps, FromMailbox, Uid, ToMailbox) end).
+
+do_move(Pid, Caps, FromMailbox, Uid, ToMailbox) ->
     case do_select(Pid, FromMailbox) of
         {ok, _} ->
             case maps:get(move, Caps, false) of
@@ -571,18 +594,20 @@ move(#{pid := Pid, caps := Caps}, FromMailbox, Uid, ToMailbox) ->
                         Other -> command_error(Other)
                     end;
                 false ->
-                    move_by_copy(Pid, Uid, ToMailbox)
+                    move_by_copy(Pid, Caps, Uid, ToMailbox)
             end;
         Other ->
             command_error(Other)
     end.
 
-move_by_copy(Pid, Uid, ToMailbox) ->
+move_by_copy(Pid, Caps, Uid, ToMailbox) ->
     ok_chain(
         [
+            %% before the copy: a refused expunge must not leave two copies
+            fun() -> only_targets_deleted(Pid, Caps, Uid) end,
             fun() -> copy(Pid, Uid, ToMailbox) end,
             fun() -> store(Pid, Uid, add, [<<"\\Deleted">>]) end,
-            fun() -> do_uid_expunge(Pid, Uid) end
+            fun() -> expunge_targets(Pid, Caps, Uid) end
         ],
         {ok, undefined}
     ).
@@ -609,17 +634,58 @@ append(#{pid := Pid}, MailboxId, Raw, Keywords) ->
 appenduid({<<"APPENDUID">>, [_Validity, {number, Uid}]}) -> Uid;
 appenduid(_) -> undefined.
 
+%% Removes the messages named and no others. With UIDPLUS that is `UID EXPUNGE'.
+%% Without it the only command is `EXPUNGE', which also removes every other
+%% message flagged \Deleted, so it is refused when there is one.
 -spec expunge(conn(), binary(), [term()]) -> ok | {error, term()}.
-expunge(#{pid := Pid}, MailboxId, Uids) ->
+expunge(#{pid := Pid, caps := Caps} = Conn, MailboxId, Uids) ->
+    session(Conn, fun() -> do_expunge_set(Pid, Caps, MailboxId, Uids) end).
+
+do_expunge_set(Pid, Caps, MailboxId, Uids) ->
     case do_select(Pid, MailboxId) of
         {ok, _} ->
             ok_chain([
+                fun() -> only_targets_deleted(Pid, Caps, Uids) end,
                 fun() -> store(Pid, format_set(Uids), add, [<<"\\Deleted">>]) end,
-                fun() -> do_expunge(Pid) end
+                fun() -> expunge_targets(Pid, Caps, format_set(Uids)) end
             ]);
         Other ->
             command_error(Other)
     end.
+
+%% Without UIDPLUS: nothing outside the target may be flagged \Deleted already.
+only_targets_deleted(_Pid, #{uidplus := true}, _Uids) ->
+    ok;
+only_targets_deleted(Pid, _Caps, Uids) ->
+    Targets = target_list(Uids),
+    Cmd = fun(T) -> {mailio_imap_proto:uid_search(T, <<"DELETED">>), undefined} end,
+    case run(Pid, Cmd) of
+        {ok, Untagged, {ok, _, _}} ->
+            Answers = [Us || {search, Us} <- Untagged],
+            Unreadable = [R || {other, <<"SEARCH", _/binary>> = R} <- Untagged],
+            case {Answers, Unreadable} of
+                {[_ | _], []} ->
+                    case [U || U <- lists:append(Answers), not lists:member(U, Targets)] of
+                        [] -> ok;
+                        _ -> command_error({error, other_messages_flagged_deleted})
+                    end;
+                _ ->
+                    command_error({error, search_answer_invalid})
+            end;
+        Other ->
+            command_error(Other)
+    end.
+
+target_list(Uids) when is_list(Uids) -> Uids;
+target_list(Uid) -> [Uid].
+
+expunge_targets(Pid, #{uidplus := true}, Set) ->
+    case run(Pid, fun(T) -> {mailio_imap_proto:uid_expunge(T, Set), undefined} end) of
+        {ok, _, {ok, _, _}} -> ok;
+        Other -> command_error(Other)
+    end;
+expunge_targets(Pid, _Caps, _Set) ->
+    do_expunge(Pid).
 
 do_expunge(Pid) ->
     case run(Pid, fun(T) -> {mailio_imap_proto:expunge(T), undefined} end) of
@@ -627,32 +693,27 @@ do_expunge(Pid) ->
         Other -> command_error(Other)
     end.
 
-do_uid_expunge(Pid, Uid) ->
-    case run(Pid, fun(T) -> {mailio_imap_proto:uid_expunge(T, Uid), undefined} end) of
-        {ok, _, {ok, _, _}} -> ok;
-        %% UIDPLUS unsupported: fall back to plain EXPUNGE.
-        _ -> do_expunge(Pid)
-    end.
-
 %%====================================================================
 %% Watch (IDLE)
 %%====================================================================
 
 -spec watch(conn(), binary(), pid()) -> {ok, term()} | {error, not_supported | term()}.
-watch(#{pid := Pid, caps := Caps}, MailboxId, NotifyPid) ->
+watch(#{pid := Pid, caps := Caps} = Conn, MailboxId, NotifyPid) ->
     case maps:get(idle, Caps, false) of
         false ->
             {error, not_supported};
         true ->
-            case do_examine(Pid, MailboxId) of
-                {ok, _} ->
-                    case mailio_imap_conn:idle_start(Pid, NotifyPid) of
-                        ok -> {ok, {idle, Pid}};
-                        Other -> command_error(Other)
-                    end;
-                Other ->
-                    command_error(Other)
-            end
+            session(Conn, fun() ->
+                case do_examine(Pid, MailboxId) of
+                    {ok, _} ->
+                        case mailio_imap_conn:idle_start(Pid, NotifyPid) of
+                            ok -> {ok, {idle, Pid}};
+                            Other -> command_error(Other)
+                        end;
+                    Other ->
+                        command_error(Other)
+                end
+            end)
     end.
 
 -spec unwatch(conn(), term()) -> ok.
@@ -668,7 +729,10 @@ list_uids(Conn, MailboxId) ->
 
 %% How many messages the server says the mailbox holds.
 -spec mailbox_size(conn(), binary()) -> {ok, non_neg_integer()} | {error, term()}.
-mailbox_size(#{pid := Pid}, MailboxId) ->
+mailbox_size(#{pid := Pid} = Conn, MailboxId) ->
+    session(Conn, fun() -> do_mailbox_size(Pid, MailboxId) end).
+
+do_mailbox_size(Pid, MailboxId) ->
     case do_examine(Pid, MailboxId) of
         {ok, #{exists := Exists}} when is_integer(Exists) -> {ok, Exists};
         {ok, _} -> command_error({error, mailbox_size_unknown});
@@ -683,7 +747,7 @@ mailbox_size(#{pid := Pid}, MailboxId) ->
 -spec list_uids(conn(), binary(), #{max => pos_integer()}) ->
     {ok, [integer()]} | {error, term()}.
 list_uids(Conn, MailboxId, Opts) ->
-    list_uids(Conn, MailboxId, Opts, ?LISTING_ATTEMPTS).
+    session(Conn, fun() -> list_uids(Conn, MailboxId, Opts, ?LISTING_ATTEMPTS) end).
 
 list_uids(#{pid := Pid} = Conn, MailboxId, Opts, Attempts) ->
     case examine_listing(Pid, MailboxId) of
