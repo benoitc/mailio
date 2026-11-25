@@ -152,6 +152,14 @@
 - Rules and actions now run in their own process with a time limit. A rule that
   fails is retried up to three times instead of being skipped for good, so a
   rule action may run more than once for the same message.
+- A server answer of "highest UID 0", a search answer with a malformed or zero
+  mod-sequence, or a mailbox with no valid UIDVALIDITY could make a mailbox
+  look empty or let an old position cross into a new copy of the mailbox, so
+  local mail was deleted or skipped. These answers are now errors, and a
+  position saved without a known UIDVALIDITY makes the mailbox read again in
+  full.
+- Messages whose ids are the number 1 and the text "1" were stored as one
+  message. They are now kept apart, and mappings saved before are still found.
 - Reading mail now opens mailboxes read-only. Only changing flags, moving and
   deleting open them for writing.
 - Unsubscribing from events no longer leaks a monitor.

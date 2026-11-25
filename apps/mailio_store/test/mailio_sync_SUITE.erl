@@ -49,6 +49,11 @@
     a_streamed_read_applies_flag_updates_in_order/1,
     reconcile_keeps_local_mail_for_a_modseq_suffix_alone/1,
     reconcile_keeps_local_mail_for_a_uidnext_with_a_leading_zero/1,
+    reconcile_keeps_local_mail_for_an_invalid_highest_uid/1,
+    reconcile_keeps_local_mail_for_a_bad_modseq_suffix/1,
+    a_first_read_without_a_valid_uidvalidity_gives_no_cursor/1,
+    integer_and_text_ids_do_not_collide/1,
+    an_older_text_id_mapping_is_still_found/1,
     opaque_ids_are_synced_and_reconciled/1,
     an_unreliable_listing_does_not_remove_local_mail/1,
     a_repeated_cursor_ends_the_sync/1,
@@ -86,6 +91,11 @@ all() ->
         a_streamed_read_applies_flag_updates_in_order,
         reconcile_keeps_local_mail_for_a_modseq_suffix_alone,
         reconcile_keeps_local_mail_for_a_uidnext_with_a_leading_zero,
+        reconcile_keeps_local_mail_for_an_invalid_highest_uid,
+        reconcile_keeps_local_mail_for_a_bad_modseq_suffix,
+        a_first_read_without_a_valid_uidvalidity_gives_no_cursor,
+        integer_and_text_ids_do_not_collide,
+        an_older_text_id_mapping_is_still_found,
         opaque_ids_are_synced_and_reconciled,
         an_unreliable_listing_does_not_remove_local_mail,
         a_repeated_cursor_ends_the_sync,
@@ -796,6 +806,102 @@ reconcile_keeps_local_mail_for_a_uidnext_with_a_leading_zero(Config) ->
     {ok, S} = mailio_sync_mgr:reconcile_mailbox(Account, <<"INBOX">>),
     ?assertEqual(0, maps:get(removed, S)),
     ?assertEqual(2, length(all_emails(Db))).
+
+reconcile_keeps_local_mail_for_an_invalid_highest_uid(Config) ->
+    Account = ?config(account, Config),
+    Db = mailio_account:db_name(Account),
+    Srv = ?config(srv, Config),
+    {ok, _} = mailio_sync_mgr:sync_mailbox(Account, <<"INBOX">>),
+    ok = mailio_fake_imap:set_uidnext(Srv, <<"01">>),
+    ok = mailio_fake_imap:set_option(Srv, zero_max_uid, true),
+    ?assertMatch({error, _}, mailio_sync_mgr:reconcile_mailbox(Account, <<"INBOX">>)),
+    ?assertEqual(2, length(all_emails(Db))).
+
+reconcile_keeps_local_mail_for_a_bad_modseq_suffix(Config) ->
+    Account = ?config(account, Config),
+    Db = mailio_account:db_name(Account),
+    Srv = ?config(srv, Config),
+    {ok, _} = mailio_sync_mgr:sync_mailbox(Account, <<"INBOX">>),
+    [
+        begin
+            ok = mailio_fake_imap:set_search(Srv, Mode),
+            ?assertMatch({error, _}, mailio_sync_mgr:reconcile_mailbox(Account, <<"INBOX">>)),
+            ?assertEqual(2, length(all_emails(Db)))
+        end
+     || Mode <- [modseq_glued, modseq_zero]
+    ].
+
+%% With no valid UIDVALIDITY the first read gives no cursor, so a later read of
+%% the same UIDs under another generation is not taken for "nothing new".
+a_first_read_without_a_valid_uidvalidity_gives_no_cursor(Config) ->
+    Account = ?config(account, Config),
+    Db = mailio_account:db_name(Account),
+    Srv = ?config(srv, Config),
+    ok = mailio_fake_imap:set_option(Srv, bad_validity, true),
+    ?assertMatch({error, _}, mailio_sync_mgr:sync_mailbox(Account, <<"INBOX">>)),
+    ok = mailio_fake_imap:set_option(Srv, bad_validity, false),
+    {ok, S} = mailio_sync_mgr:sync_mailbox(Account, <<"INBOX">>),
+    ?assertEqual(2, maps:get(added, S)),
+    ?assertEqual(2, length(all_emails(Db))).
+
+%% The integer 1 and the text "1" are two ids: removing one keeps the other.
+integer_and_text_ids_do_not_collide(Config) ->
+    Account = ?config(account, Config),
+    Db = mailio_account:db_name(Account),
+    restart_with(Config, #{}, mailio_opaque_adapter),
+    Mail = fun(N) ->
+        <<"From: a@x\r\nTo: b@y\r\nSubject: id ", N/binary, "\r\nMessage-ID: <", N/binary,
+            "@x>\r\n\r\nbody ", N/binary, "\r\n">>
+    end,
+    application:set_env(mailio_store, opaque_messages, #{
+        1 => Mail(<<"int">>), <<"1">> => Mail(<<"text">>)
+    }),
+    try
+        {ok, S1} = mailio_sync_mgr:sync_mailbox(Account, <<"INBOX">>),
+        ?assertEqual(2, maps:get(added, S1)),
+        ?assertEqual(2, length(all_emails(Db))),
+        %% the text id is gone from the provider: the integer one stays
+        application:set_env(mailio_store, opaque_messages, #{1 => Mail(<<"int">>)}),
+        {ok, R1} = mailio_sync_mgr:reconcile_mailbox(Account, <<"INBOX">>),
+        ?assertEqual(1, maps:get(removed, R1)),
+        ?assertEqual([<<"id int">>], subjects(Account)),
+        %% and the other way round
+        application:set_env(mailio_store, opaque_messages, #{
+            1 => Mail(<<"int">>), <<"1">> => Mail(<<"text">>)
+        }),
+        {ok, _} = mailio_sync_mgr:reconcile_mailbox(Account, <<"INBOX">>),
+        {ok, _} = mailio_sync_mgr:sync_mailbox(Account, <<"INBOX">>),
+        application:set_env(mailio_store, opaque_messages, #{<<"1">> => Mail(<<"text">>)}),
+        {ok, R2} = mailio_sync_mgr:reconcile_mailbox(Account, <<"INBOX">>),
+        ?assertEqual(1, maps:get(removed, R2)),
+        ?assertEqual([<<"id text">>], subjects(Account))
+    after
+        application:unset_env(mailio_store, opaque_messages)
+    end.
+
+%% A text id stored before the key kept its type is still found and removed.
+an_older_text_id_mapping_is_still_found(Config) ->
+    Account = ?config(account, Config),
+    Db = mailio_account:db_name(Account),
+    restart_with(Config, #{}, mailio_opaque_adapter),
+    Raw = <<"From: a@x\r\nTo: b@y\r\nSubject: old\r\nMessage-ID: <o@x>\r\n\r\nbody\r\n">>,
+    application:set_env(mailio_store, opaque_messages, #{<<"msg-o">> => Raw}),
+    try
+        {ok, _} = mailio_sync_mgr:sync_mailbox(Account, <<"INBOX">>),
+        {ok, LocalId} = ensure_inbox(Account),
+        New = mailio_account_writer:uidmap_id(Account, LocalId, <<"msg-o">>),
+        {ok, Doc} = mailio_db:get(Db, New),
+        Old = <<"uidmap/", LocalId/binary, "/msg-o">>,
+        {ok, _, _} = mailio_db:put(Db, Doc#{<<"id">> => Old}),
+        _ = mailio_db:delete(Db, New),
+        ?assertMatch({ok, _}, mailio_account_writer:lookup_uid(Account, LocalId, <<"msg-o">>)),
+        application:set_env(mailio_store, opaque_messages, #{}),
+        {ok, R} = mailio_sync_mgr:reconcile_mailbox(Account, <<"INBOX">>),
+        ?assertEqual(1, maps:get(removed, R)),
+        ?assertEqual([], all_emails(Db))
+    after
+        application:unset_env(mailio_store, opaque_messages)
+    end.
 
 %% Ids that are not numbers: two distinct ones are two messages, in a first read,
 %% in the next, and in a reconcile.

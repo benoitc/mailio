@@ -46,6 +46,9 @@
     a_uidnext_of_zero_is_not_trusted/1,
     a_uidnext_with_a_leading_zero_is_not_trusted/1,
     a_modseq_suffix_alone_is_an_error/1,
+    a_highest_uid_of_zero_is_an_error/1,
+    a_cursor_needs_a_valid_uidvalidity/1,
+    a_cursor_without_a_known_uidvalidity_is_reset/1,
     writes_open_read_write/1
 ]).
 
@@ -81,6 +84,9 @@ all() ->
         a_uidnext_of_zero_is_not_trusted,
         a_uidnext_with_a_leading_zero_is_not_trusted,
         a_modseq_suffix_alone_is_an_error,
+        a_highest_uid_of_zero_is_an_error,
+        a_cursor_needs_a_valid_uidvalidity,
+        a_cursor_without_a_known_uidvalidity_is_reset,
         writes_open_read_write
     ].
 
@@ -439,7 +445,7 @@ search_answers_that_are_not_valid_are_errors(Config) ->
             ok = mailio_fake_imap:set_search(Srv, Mode),
             ?assertMatch({error, _}, mailio_imap:list_uids(Conn, <<"INBOX">>))
         end
-     || Mode <- [bracket, bracket_between, junk, none, modseq_alone]
+     || Mode <- [bracket, bracket_between, junk, none, modseq_alone, modseq_glued, modseq_zero]
     ].
 
 %% A number the window did not ask for is not an answer about the window.
@@ -480,3 +486,31 @@ a_modseq_suffix_alone_is_an_error(Config) ->
     ok = mailio_fake_imap:set_search(Srv, modseq_alone),
     Conn = conn_with(Config, #{}),
     ?assertMatch({error, _}, mailio_imap:list_uids(Conn, <<"INBOX">>)).
+
+%% A highest UID of 0 is not a UID: it must not make the mailbox look empty.
+a_highest_uid_of_zero_is_an_error(Config) ->
+    Srv = ?config(srv, Config),
+    ok = mailio_fake_imap:set_uidnext(Srv, <<"01">>),
+    ok = mailio_fake_imap:set_option(Srv, zero_max_uid, true),
+    Conn = conn_with(Config, #{}),
+    ?assertMatch({error, _}, mailio_imap:list_uids(Conn, <<"INBOX">>)),
+    ?assertMatch({error, _}, mailio_imap:fetch_changes_since(Conn, <<"INBOX">>, initial, #{})).
+
+%% A cursor says which mailbox generation its UIDs belong to. Without a valid
+%% UIDVALIDITY there is nothing to say, so no cursor is issued.
+a_cursor_needs_a_valid_uidvalidity(Config) ->
+    Srv = ?config(srv, Config),
+    ok = mailio_fake_imap:set_option(Srv, bad_validity, true),
+    Conn = conn_with(Config, #{}),
+    ?assertMatch({error, _}, mailio_imap:fetch_changes_since(Conn, <<"INBOX">>, initial, #{})).
+
+%% A cursor from before the validity was known cannot be compared with the
+%% mailbox now: it is a reset, not "nothing changed".
+a_cursor_without_a_known_uidvalidity_is_reset(Config) ->
+    Conn = conn_with(Config, #{}),
+    Old = mailio_imap_map:encode_state(#{
+        uidvalidity => undefined, uidnext => 102, highestmodseq => 1, page => undefined
+    }),
+    ?assertMatch(
+        {ok, [reset], _, done}, mailio_imap:fetch_changes_since(Conn, <<"INBOX">>, Old, #{})
+    ).

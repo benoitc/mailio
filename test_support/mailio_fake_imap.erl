@@ -80,12 +80,15 @@ set_failure(Srv, Kind, Bool) when
 %% @doc Server behaviour switches: `no_uidnext' (EXAMINE does not report UIDNEXT,
 %% which RFC 3501 allows), `fail_max_uid' (UID FETCH * answers NO) and
 %% `bad_vanished' (a QRESYNC answer with a VANISHED line that lists nothing) and
-%% `no_exists' (EXAMINE does not report EXISTS). `set_search/2' makes UID SEARCH
+%% `no_exists' (EXAMINE does not report EXISTS), `zero_max_uid' (UID FETCH *
+%% answers with UID 0) and `bad_validity' (UIDVALIDITY 01). `set_search/2' makes UID SEARCH
 %% answer badly.
 set_option(Srv, Option, Bool) when
     Option =:= no_uidnext;
     Option =:= no_exists;
     Option =:= fail_max_uid;
+    Option =:= zero_max_uid;
+    Option =:= bad_validity;
     Option =:= bad_vanished
 ->
     call(Srv, {set_option, Option, Bool}, ok).
@@ -94,7 +97,8 @@ set_option(Srv, Option, Bool) when
 %% `junk' (a SEARCH line with a number that is not one), `outside' (a UID that was
 %% not asked for), `bracket' (`* SEARCH )'), `bracket_between' (`* SEARCH 5 ) 7') or
 %% `modseq' (the CONDSTORE form: the UIDs, then `(MODSEQ n)') or `modseq_alone'
-%% (`* SEARCH (MODSEQ n)' with no UIDs, which is malformed).
+%% (`* SEARCH (MODSEQ n)' with no UIDs, which is malformed), `modseq_glued' (no space
+%% before the suffix) or `modseq_zero' (`(MODSEQ 0)').
 set_search(Srv, Mode) when
     Mode =:= normal;
     Mode =:= none;
@@ -103,7 +107,9 @@ set_search(Srv, Mode) when
     Mode =:= bracket;
     Mode =:= bracket_between;
     Mode =:= modseq;
-    Mode =:= modseq_alone
+    Mode =:= modseq_alone;
+    Mode =:= modseq_glued;
+    Mode =:= modseq_zero
 ->
     call(Srv, {set_search, Mode}, ok).
 
@@ -431,7 +437,11 @@ send_select(Sock, #{messages := Ms, uidnext := UidNext} = State) ->
         false -> send(Sock, <<"* ", N/binary, " EXISTS\r\n">>)
     end,
     send(Sock, <<"* 0 RECENT\r\n">>),
-    Validity = integer_to_binary(maps:get(uidvalidity, State, 1)),
+    Validity =
+        case maps:get({opt, bad_validity}, State, false) of
+            true -> <<"01">>;
+            false -> integer_to_binary(maps:get(uidvalidity, State, 1))
+        end,
     send(Sock, <<"* OK [UIDVALIDITY ", Validity/binary, "] UIDs valid\r\n">>),
     case maps:get({opt, no_uidnext}, State, false) of
         true -> ok;
@@ -497,11 +507,20 @@ handle_uid_fetch(Sock, Tag, Rest, #{messages := Ms} = State) ->
         none when
             SetBin =:= <<"*">>
         ->
-            case maps:get({opt, fail_max_uid}, State, false) of
-                true ->
+            case
+                {
+                    maps:get({opt, fail_max_uid}, State, false),
+                    maps:get({opt, zero_max_uid}, State, false)
+                }
+            of
+                {true, _} ->
                     tagged(Sock, Tag, <<"NO no highest uid">>),
                     {continue, State};
-                false ->
+                {_, true} ->
+                    send(Sock, <<"* 2 FETCH (UID 0)\r\n">>),
+                    tagged(Sock, Tag, <<"OK UID FETCH done">>),
+                    {continue, State};
+                _ ->
                     handle_uid_fetch_data(Sock, Tag, SetBin, ItemsBin, State)
             end;
         none ->
@@ -597,7 +616,9 @@ handle_uid_search(Sock, Tag, Rest, #{messages := Ms} = State) ->
         bracket -> send(Sock, <<"* SEARCH )\r\n">>);
         bracket_between -> send(Sock, <<"* SEARCH 5 ) 7\r\n">>);
         modseq -> send(Sock, [<<"* SEARCH ">>, Uids, <<" (MODSEQ 9)\r\n">>]);
-        modseq_alone -> send(Sock, <<"* SEARCH (MODSEQ 9)\r\n">>)
+        modseq_alone -> send(Sock, <<"* SEARCH (MODSEQ 9)\r\n">>);
+        modseq_glued -> send(Sock, [<<"* SEARCH ">>, Uids, <<"(MODSEQ 9)\r\n">>]);
+        modseq_zero -> send(Sock, [<<"* SEARCH ">>, Uids, <<" (MODSEQ 0)\r\n">>])
     end,
     tagged(Sock, Tag, <<"OK UID SEARCH done">>),
     {continue, State}.

@@ -171,6 +171,8 @@ use_qresync(Caps, Prev) ->
 %% CONDSTORE) CHANGEDSINCE for flag updates. Removals are not detected here.
 plain_changes(#{pid := Pid} = Conn, MailboxId, Prev) ->
     case examine_listing(Pid, MailboxId) of
+        {ok, #{uidvalidity := undefined}} ->
+            command_error({error, uidvalidity_invalid});
         {ok, SelInfo} ->
             New = sel_to_state(SelInfo),
             case uidvalidity_changed(Prev, New) of
@@ -201,6 +203,8 @@ qresync_changes(#{pid := Pid} = Conn, MaxVanished, MailboxId, Prev) ->
             command_error(Other)
     end.
 
+qresync_listing(_Conn, _Prev, #{uidvalidity := undefined}, _Vanished, _Updated) ->
+    command_error({error, uidvalidity_invalid});
 qresync_listing(Conn, Prev, SelInfo, Vanished, Updated) ->
     New = sel_to_state(SelInfo),
     case {uidvalidity_changed(Prev, New), Vanished} of
@@ -226,6 +230,8 @@ qresync_listing(Conn, Prev, SelInfo, Vanished, Updated) ->
 %% stopped. The mailbox must still be the one it started on.
 continue_listing(#{pid := Pid} = Conn, MailboxId, Prev, {Phase, Next, PrevModSeq}) ->
     case examine_listing(Pid, MailboxId) of
+        {ok, #{uidvalidity := undefined}} ->
+            command_error({error, uidvalidity_invalid});
         {ok, SelInfo} ->
             Now = sel_to_state(SelInfo),
             case maps:get(uidvalidity, Now) =:= maps:get(uidvalidity, Prev) of
@@ -732,8 +738,14 @@ max_uid(Pid) ->
             case
                 [U || {fetch, _, I} <- Untagged, U <- [proplists:get_value(uid, I)], is_integer(U)]
             of
-                [] -> {error, no_highest_uid};
-                Uids -> {ok, lists:max(Uids)}
+                [] ->
+                    {error, no_highest_uid};
+                Uids ->
+                    %% a UID is a number from 1 to 2^32-1 (RFC 3501, section 2.3.1.1)
+                    case lists:max(Uids) of
+                        U when U >= 1, U =< 4294967295 -> {ok, U};
+                        _ -> {error, no_highest_uid}
+                    end
             end;
         Other ->
             Other
@@ -798,8 +810,14 @@ encode(#{uidvalidity := UV, uidnext := UN, highestmodseq := MS}, Where) ->
         page => Where
     }).
 
-uidvalidity_changed(#{uidvalidity := undefined}, _New) -> false;
-uidvalidity_changed(#{uidvalidity := Prev}, #{uidvalidity := New}) -> Prev =/= New.
+%% A cursor that never knew a UIDVALIDITY cannot say its UIDs are still the same
+%% messages (RFC 3501, section 2.3.1.1): unless it is the very first read, the
+%% mailbox is read again in full.
+uidvalidity_changed(#{uidvalidity := undefined} = Prev, _New) ->
+    maps:get(uidnext, Prev, undefined) =/= undefined orelse
+        maps:get(highestmodseq, Prev, undefined) =/= undefined;
+uidvalidity_changed(#{uidvalidity := Prev}, #{uidvalidity := New}) ->
+    Prev =/= New.
 
 %%====================================================================
 %% Item helpers

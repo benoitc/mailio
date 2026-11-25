@@ -102,20 +102,53 @@ via(AccountId) ->
 %% @doc Document id of the uid->email mapping for a mailbox + uid.
 -spec uidmap_id(binary(), binary(), term()) -> binary().
 uidmap_id(_AccountId, MailboxId, Uid) ->
-    UidBin = to_bin(Uid),
-    <<?ID_UIDMAP, MailboxId/binary, "/", UidBin/binary>>.
+    <<?ID_UIDMAP, MailboxId/binary, "/", (uid_key(Uid))/binary>>.
 
 %% @doc Look up the email id mapped to a mailbox + uid.
 -spec lookup_uid(binary(), binary(), term()) -> {ok, binary()} | {error, not_found}.
 lookup_uid(AccountId, MailboxId, Uid) ->
     Db = mailio_account:db_name(AccountId),
-    case mailio_db:get(Db, uidmap_id(AccountId, MailboxId, Uid)) of
-        {ok, #{<<"emailId">> := EmailId}} -> {ok, EmailId};
-        {error, not_found} -> {error, not_found}
+    case existing_uidmap_id(Db, MailboxId, Uid) of
+        {_, {ok, #{<<"emailId">> := EmailId}}} -> {ok, EmailId};
+        {_, {error, not_found}} -> {error, not_found}
     end.
 
-to_bin(Uid) when is_integer(Uid) -> integer_to_binary(Uid);
-to_bin(Uid) when is_binary(Uid) -> Uid.
+%% The key keeps the type of the UID: the integer 1 and the text "1" are two
+%% messages for an adapter with opaque UIDs, so they get two keys.
+uid_key(Uid) when is_integer(Uid) -> integer_to_binary(Uid);
+uid_key(Uid) when is_binary(Uid) -> <<"b:", Uid/binary>>.
+
+%% Mappings written before the key kept the type hold a text UID as it is. One
+%% that is only digits cannot be told from an integer, so it is not looked up.
+legacy_uid_key(Uid) when is_binary(Uid) ->
+    case
+        Uid =/= <<>> andalso lists:all(fun(C) -> C >= $0 andalso C =< $9 end, binary_to_list(Uid))
+    of
+        true -> none;
+        false -> {ok, Uid}
+    end;
+legacy_uid_key(_) ->
+    none.
+
+%% The id a mapping is stored under: the current key, or the older one while an
+%% old mapping is still there.
+existing_uidmap_id(Db, MailboxId, Uid) ->
+    Id = uidmap_id(<<>>, MailboxId, Uid),
+    case mailio_db:get(Db, Id) of
+        {ok, _} = Found ->
+            {Id, Found};
+        {error, not_found} = Missing ->
+            case legacy_uid_key(Uid) of
+                {ok, Raw} ->
+                    Old = <<?ID_UIDMAP, MailboxId/binary, "/", Raw/binary>>,
+                    case mailio_db:get(Db, Old) of
+                        {ok, #{<<"uid">> := Uid}} = Found -> {Old, Found};
+                        _ -> {Id, Missing}
+                    end;
+                none ->
+                    {Id, Missing}
+            end
+    end.
 
 %%====================================================================
 %% gen_server
@@ -229,8 +262,8 @@ do_apply_flags(Db, _MailboxId, EmailId, ServerKeywords) ->
 %% (one email), so the email stays a member of the mailbox, with its counter,
 %% for as long as another UID of that mailbox still refers to it.
 do_remove_uid(Db, MailboxId, Uid) ->
-    MapId = uidmap_id(<<>>, MailboxId, Uid),
-    case mailio_db:get(Db, MapId) of
+    {MapId, Found} = existing_uidmap_id(Db, MailboxId, Uid),
+    case Found of
         {ok, #{<<"emailId">> := EmailId}} ->
             _ = mailio_db:delete(Db, MapId),
             case mailio_db:get(Db, <<?ID_EMAIL, EmailId/binary>>) of
@@ -278,7 +311,7 @@ do_remove_member(Db, MailboxId, EmailId) ->
 uidmap_id_for(Email, MailboxId) ->
     case mailio_email:imap_entries(Email, MailboxId) of
         [#{<<"uid">> := Uid} | _] ->
-            <<?ID_UIDMAP, MailboxId/binary, "/", (to_bin(Uid))/binary>>;
+            uidmap_id(<<>>, MailboxId, Uid);
         _ ->
             <<?ID_UIDMAP, MailboxId/binary, "/none">>
     end.
@@ -385,11 +418,17 @@ maybe_write_uidmap(Db, MailboxId, Opts, EmailId) ->
         Uid ->
             %% Enumerated by the `uidmap/<mailbox>/' id prefix, so no
             %% separate mailboxId field is needed for lookup.
-            Id = <<?ID_UIDMAP, MailboxId/binary, "/", (to_bin(Uid))/binary>>,
+            Id = uidmap_id(<<>>, MailboxId, Uid),
             Doc = #{<<"id">> => Id, <<"uid">> => Uid, <<"emailId">> => EmailId},
-            case mailio_db:get(Db, Id) of
-                %% the same message again (a replayed page): nothing to write
+            {OldId, Found} = existing_uidmap_id(Db, MailboxId, Uid),
+            case Found of
+                %% the same message again (a replayed page): nothing to write,
+                %% apart from moving an older mapping to the current key
+                {ok, #{<<"emailId">> := EmailId}} when OldId =:= Id ->
+                    ok;
                 {ok, #{<<"emailId">> := EmailId}} ->
+                    {ok, _, _} = mailio_db:put(Db, Doc),
+                    _ = mailio_db:delete(Db, OldId),
                     ok;
                 %% The UID now belongs to another message: the one that held it
                 %% loses it (and its place in the mailbox, if it had no other).

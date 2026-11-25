@@ -516,7 +516,9 @@ parse_search(Rest) ->
             {At, _} -> {binary:part(Rest, 0, At), binary:part(Rest, At, byte_size(Rest) - At)}
         end,
     Words = binary:split(Numbers, [<<" ">>, <<"\t">>], [global, trim_all]),
-    case search_modseq(mailio_ascii:trim(Tail)) of
+    Spaced = Tail =:= <<>> orelse Numbers =:= <<>> orelse lists:member(binary:last(Numbers), " \t"),
+    case Spaced andalso search_modseq(mailio_ascii:trim(Tail)) of
+        false -> error;
         %% the suffix is left out when nothing matched (RFC 7162, section 3.1.6):
         %% one with no numbers before it is not an empty answer
         ok when Tail =/= <<>>, Words =:= [] -> error;
@@ -531,7 +533,7 @@ search_modseq(<<"(", Rest/binary>>) ->
         [Inner, <<>>] ->
             case binary:split(Inner, <<" ">>, [global]) of
                 [Name, Value] ->
-                    case {string:uppercase(Name), digits(Value)} of
+                    case {string:uppercase(Name), modseq_value(Value)} of
                         {<<"MODSEQ">>, true} -> ok;
                         _ -> error
                     end;
@@ -543,6 +545,10 @@ search_modseq(<<"(", Rest/binary>>) ->
     end;
 search_modseq(_) ->
     error.
+
+%% A mod-sequence is from 1 to 2^63-1 (RFC 7162, section 7), with no leading zero.
+modseq_value(<<"0", _/binary>>) -> false;
+modseq_value(Bin) -> digits(Bin) andalso binary_to_integer(Bin) =< 9223372036854775807.
 
 digits(<<>>) -> false;
 digits(Bin) -> lists:all(fun(C) -> C >= $0 andalso C =< $9 end, binary_to_list(Bin)).
@@ -875,7 +881,6 @@ token_to_bin({number, N}) -> integer_to_binary(N);
 token_to_bin(nil) -> <<>>;
 token_to_bin(_) -> <<>>.
 
-is_all_digits(<<>>) -> false;
 is_all_digits(Bin) -> is_all_digits_1(Bin).
 is_all_digits_1(<<>>) -> true;
 is_all_digits_1(<<D, Rest/binary>>) when D >= $0, D =< $9 -> is_all_digits_1(Rest);

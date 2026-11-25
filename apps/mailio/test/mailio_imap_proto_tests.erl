@@ -507,6 +507,24 @@ search_answer_with_modseq_alone_is_not_an_empty_answer_test() ->
     %% an explicit empty answer is still one
     ?assertEqual({untagged, {search, []}}, ?P:parse_response(<<"* SEARCH">>)).
 
+%% The suffix is its own item (a space before it) and holds a mod-sequence from
+%% 1 to 2^63-1 (RFC 7162, section 7).
+search_answer_with_a_bad_modseq_suffix_is_malformed_test() ->
+    [
+        ?assertMatch(
+            {untagged, {other, <<"SEARCH", _/binary>>}}, ?P:parse_response(Wire)
+        )
+     || Wire <- [
+            <<"* SEARCH 5(MODSEQ 9)">>,
+            <<"* SEARCH 5 (MODSEQ 0)">>,
+            <<"* SEARCH 5 (MODSEQ 09)">>,
+            <<"* SEARCH 5 (MODSEQ 9223372036854775808)">>
+        ]
+    ],
+    ?assertEqual(
+        {untagged, {search, [5]}}, ?P:parse_response(<<"* SEARCH 5 (MODSEQ 9223372036854775807)">>)
+    ).
+
 %% UIDNEXT and UIDVALIDITY are numbers from 1 (RFC 3501, section 9: nz-number):
 %% no leading zero and no sign, checked on the bytes before they become a number.
 status_codes_with_non_canonical_numbers_are_not_numbers_test() ->
