@@ -18,7 +18,7 @@
 -record(state, {
     conn :: reference(),
     holder :: {reference(), reference()} | undefined,
-    queue = queue:new() :: queue:queue({gen_server:from(), reference()})
+    queue = queue:new() :: queue:queue({gen_server:from(), reference(), reference()})
 }).
 
 %% @doc A lock for the connection `ConnPid'. It goes away with the connection.
@@ -67,23 +67,28 @@ init(ConnPid) ->
 
 handle_call({acquire, Ref}, {Pid, _}, #state{holder = undefined} = State) ->
     {reply, ok, State#state{holder = {Ref, erlang:monitor(process, Pid)}}};
-handle_call({acquire, Ref}, From, #state{queue = Q} = State) ->
-    {noreply, State#state{queue = queue:in({From, Ref}, Q)}}.
+handle_call({acquire, Ref}, {Pid, _} = From, #state{queue = Q} = State) ->
+    %% a caller that dies while it waits is dropped at once, not when its turn comes
+    {noreply, State#state{queue = queue:in({From, Ref, erlang:monitor(process, Pid)}, Q)}}.
 
 handle_cast({release, Ref}, #state{holder = {Ref, Mon}} = State) ->
     erlang:demonitor(Mon, [flush]),
     {noreply, next(State#state{holder = undefined})};
 handle_cast({release, Ref}, #state{queue = Q} = State) ->
     %% a caller that gave up while it was still waiting
-    {noreply, State#state{queue = queue:filter(fun({_, R}) -> R =/= Ref end, Q)}};
+    {Gone, Left} = lists:partition(fun({_, R, _}) -> R =:= Ref end, queue:to_list(Q)),
+    [erlang:demonitor(M, [flush]) || {_, _, M} <- Gone],
+    {noreply, State#state{queue = queue:from_list(Left)}};
 handle_cast(_Msg, State) ->
     {noreply, State}.
 
 handle_info({'DOWN', Mon, process, _, _}, #state{conn = Mon, queue = Q} = State) ->
-    [gen_server:reply(From, {error, imap_disconnected}) || {From, _} <- queue:to_list(Q)],
+    [gen_server:reply(From, {error, imap_disconnected}) || {From, _, _} <- queue:to_list(Q)],
     {stop, normal, State};
 handle_info({'DOWN', Mon, process, _, _}, #state{holder = {_, Mon}} = State) ->
     {noreply, next(State#state{holder = undefined})};
+handle_info({'DOWN', Mon, process, _, _}, #state{queue = Q} = State) ->
+    {noreply, State#state{queue = queue:filter(fun({_, _, M}) -> M =/= Mon end, Q)}};
 handle_info(_Info, State) ->
     {noreply, State}.
 
@@ -92,7 +97,7 @@ next(#state{queue = Q} = State) ->
     case queue:out(Q) of
         {empty, _} ->
             State;
-        {{value, {{Pid, _} = From, Ref}}, Q1} ->
+        {{value, {From, Ref, Mon}}, Q1} ->
             gen_server:reply(From, ok),
-            State#state{queue = Q1, holder = {Ref, erlang:monitor(process, Pid)}}
+            State#state{queue = Q1, holder = {Ref, Mon}}
     end.

@@ -71,7 +71,7 @@ The sync adapter (`mailio_adapter`) reports more than before:
 - A mailbox is listed in windows of `listing_window` UIDs, and a read that does not fit in one call answers `more` with a state to continue from. The state carries where the listing stopped, so it may be kept between calls.
 - A listing or flag fetch the server refuses is now an error, and so is a UID search that does not answer in full: a tagged OK with no `* SEARCH` line, or one with something other than numbers in it, is not a mailbox with no mail (an explicit, empty `* SEARCH` is). It used to be an empty answer with a new state.
 
-- `list_uids/3` takes `#{max => N}` and stops with an error as soon as the mailbox holds more than N messages. `mailbox_size/2` says how many it holds. Both are optional; the store uses them to check a listing against the mailbox before it removes anything.
+- `list_uids/3` takes `#{max => N}` and stops with an error as soon as the mailbox holds more than N messages. `mailbox_info/2` says how many it holds and under which UIDVALIDITY. Both are optional; the store uses them to check a listing against the mailbox before it removes anything.
 - `list_uids` answers only when the UIDs it found are as many as the messages the server reported, and it reads again a few times when they are not. A mailbox that never agrees is an error.
 
 The rest of this section is about `reset` and `resync`. `reset` means the UIDs the caller holds mean other messages now; `resync` means there were too many changes to list. In both cases read the whole mailbox again and keep the new state only when that worked.
@@ -80,7 +80,7 @@ The rest of this section is about `reset` and `resync`. `reset` means the UIDs t
 
 The IMAP adapter lets several processes use one handle. A call that selects a mailbox and then acts on it (reading a message, changing flags, moving, expunging, listing, starting IDLE) holds the connection for the whole call, so it never acts on a mailbox somebody else selected in between. Callers wait for their turn in the order they asked, for up to two minutes, and a caller that dies gives its turn up. If you use `mailio_imap_conn` directly you select and send on your own, so give each connection one user or use `mailio_imap_lock` the same way.
 
-`expunge/3` removes the UIDs you name and no other message. With UIDPLUS that is `UID EXPUNGE`. Without it the only command is `EXPUNGE`, which would also take every other message flagged `\Deleted`, so the call is refused with an error when there is one, before anything is changed. Moving a message on a server without MOVE follows the same rule.
+`expunge/3` removes the UIDs you name and no other message, with `UID EXPUNGE`. A server without UIDPLUS has only `EXPUNGE`, which would also take every message another client flagged `\\Deleted` at that moment, so the call returns `imap_operation_unsupported` before it changes anything. Moving a message uses `UID MOVE` when the server has MOVE, and copy then `UID EXPUNGE` when it has UIDPLUS; with neither it is refused the same way.
 
 ## Errors
 

@@ -248,3 +248,24 @@ a_snapshot_stays_within_its_limit_test() ->
             application:unset_env(mailio_mcp, limits)
         end
     end).
+
+%% A message that comes back into the capped window was there before: it is not
+%% a new one.
+a_message_entering_the_capped_window_is_not_added_test() ->
+    with(fun(Srv, Acc) ->
+        application:set_env(mailio_mcp, limits, #{max_snapshot => 2}),
+        try
+            Snap = baseline(Acc),
+            ok = mailio_fake_imap:deliver(Srv, <<"Third message">>),
+            {ok, R1} = changes(Acc, Snap),
+            Snap2 = maps:get(snapshot, R1),
+            ?assertEqual([101, 102], lists:sort(maps:keys(maps:get(flags, Snap2)))),
+            ok = mailio_fake_imap:expunge(Srv, 102),
+            {ok, R2} = changes(Acc, Snap2),
+            ?assertEqual([102], maps:get(removed, R2)),
+            ?assertEqual([], maps:get(added, R2)),
+            ?assertEqual(0, maps:get(added_total, R2))
+        after
+            application:unset_env(mailio_mcp, limits)
+        end
+    end).

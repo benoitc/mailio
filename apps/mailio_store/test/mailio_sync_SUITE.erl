@@ -67,6 +67,10 @@
     an_idle_sync_that_finds_a_dead_connection_keeps_the_watch/1,
     a_sink_answers_ok_past_the_size_limit/1,
     a_removal_that_failed_between_the_email_and_the_counter_is_repaired/1,
+    a_refused_removal_in_an_incremental_sync_is_an_error/1,
+    a_refused_removal_in_a_reconcile_is_an_error/1,
+    a_refused_removal_in_a_replacing_read_is_an_error/1,
+    a_full_read_of_a_recreated_mailbox_is_not_accepted/1,
 
     opaque_ids_are_synced_and_reconciled/1,
     an_unreliable_listing_does_not_remove_local_mail/1,
@@ -123,6 +127,10 @@ all() ->
         an_idle_sync_that_finds_a_dead_connection_keeps_the_watch,
         a_sink_answers_ok_past_the_size_limit,
         a_removal_that_failed_between_the_email_and_the_counter_is_repaired,
+        a_refused_removal_in_an_incremental_sync_is_an_error,
+        a_refused_removal_in_a_reconcile_is_an_error,
+        a_refused_removal_in_a_replacing_read_is_an_error,
+        a_full_read_of_a_recreated_mailbox_is_not_accepted,
 
         opaque_ids_are_synced_and_reconciled,
         an_unreliable_listing_does_not_remove_local_mail,
@@ -1215,6 +1223,115 @@ a_removal_that_failed_between_the_email_and_the_counter_is_repaired(Config) ->
     ?assertEqual({ok, []}, mailio_fsck:check_counters(Account)),
     {ok, Fixed} = mailio_db:get(Db, <<?ID_MAILBOX, "mbA">>),
     ?assertNot(maps:is_key(<<"counters_dirty">>, Fixed)).
+
+%% The store refuses every removal: what is asked of it must come back as an error,
+%% with the cursor where it was, not as a crash of the sync.
+with_refused_removals(Account, Fun) ->
+    Real = mailio_registry:whereis_name({writer, Account}),
+    mailio_registry:unregister_name({writer, Account}),
+    Proxy = spawn_link(fun Loop() ->
+        receive
+            {'$gen_call', From, {remove_uid, _, _}} ->
+                gen_server:reply(From, {error, db_unavailable}),
+                Loop();
+            {'$gen_call', From, Req} ->
+                gen_server:reply(From, gen_server:call(Real, Req, 30000)),
+                Loop();
+            stop ->
+                ok
+        end
+    end),
+    yes = mailio_registry:register_name({writer, Account}, Proxy),
+    try
+        Fun()
+    after
+        mailio_registry:unregister_name({writer, Account}),
+        Proxy ! stop,
+        yes = mailio_registry:register_name({writer, Account}, Real)
+    end.
+
+a_refused_removal_in_an_incremental_sync_is_an_error(Config) ->
+    Account = ?config(account, Config),
+    Db = mailio_account:db_name(Account),
+    restart_with(Config, #{}, mailio_failing_adapter),
+    {ok, _} = mailio_sync_mgr:sync_mailbox(Account, <<"INBOX">>),
+    {ok, LocalId} = ensure_inbox(Account),
+    Before = cursor(Db, LocalId),
+    application:set_env(mailio_store, script, fun
+        (initial) -> {ok, [], state(1, 102), done};
+        (_) -> {ok, [{removed, 100}], state(1, 102), done}
+    end),
+    try
+        with_refused_removals(Account, fun() ->
+            ?assertMatch({error, _}, mailio_sync_mgr:sync_mailbox(Account, <<"INBOX">>))
+        end)
+    after
+        application:unset_env(mailio_store, script)
+    end,
+    ?assertEqual(Before, cursor(Db, LocalId)),
+    ?assertEqual(2, length(all_emails(Db))).
+
+a_refused_removal_in_a_reconcile_is_an_error(Config) ->
+    Account = ?config(account, Config),
+    Db = mailio_account:db_name(Account),
+    {ok, _} = mailio_sync_mgr:sync_mailbox(Account, <<"INBOX">>),
+    {ok, LocalId} = ensure_inbox(Account),
+    Raw = <<"From: a@x\r\nTo: b@y\r\nSubject: gone\r\nMessage-ID: <g@x>\r\n\r\nbody\r\n">>,
+    {ok, _} = mailio_account_writer:ingest(Account, LocalId, Raw, #{uid => 5}),
+    with_refused_removals(Account, fun() ->
+        ?assertMatch({error, _}, mailio_sync_mgr:reconcile_mailbox(Account, <<"INBOX">>))
+    end),
+    ?assertEqual(3, length(all_emails(Db))).
+
+a_refused_removal_in_a_replacing_read_is_an_error(Config) ->
+    Account = ?config(account, Config),
+    Db = mailio_account:db_name(Account),
+    restart_with(Config, #{}, mailio_failing_adapter),
+    {ok, _} = mailio_sync_mgr:sync_mailbox(Account, <<"INBOX">>),
+    Fetched = counters:new(1, []),
+    application:set_env(mailio_store, script, fun
+        (initial) -> {ok, [added(100, 1), added(101, 1)], state(1, 102), done};
+        (_) -> {ok, [reset], state(1, 102), done}
+    end),
+    application:set_env(mailio_store, fetch_override, fun(_Uid, _Sink) ->
+        counters:add(Fetched, 1, 1),
+        {error, should_not_fetch}
+    end),
+    try
+        with_refused_removals(Account, fun() ->
+            ?assertMatch({error, _}, mailio_sync_mgr:sync_mailbox(Account, <<"INBOX">>))
+        end)
+    after
+        application:unset_env(mailio_store, script),
+        application:unset_env(mailio_store, fetch_override)
+    end,
+    %% the message was not fetched on top of one that could not be replaced
+    ?assertEqual(0, counters:get(Fetched, 1)),
+    ?assertEqual(2, length(all_emails(Db))).
+
+%% The mailbox was recreated while it was being read: the numbers listed are the
+%% old ones, and the size is the same. UIDVALIDITY is what tells them apart.
+a_full_read_of_a_recreated_mailbox_is_not_accepted(Config) ->
+    Account = ?config(account, Config),
+    Db = mailio_account:db_name(Account),
+    restart_with(Config, #{}, mailio_failing_adapter),
+    {ok, _} = mailio_sync_mgr:sync_mailbox(Account, <<"INBOX">>),
+    {ok, LocalId} = ensure_inbox(Account),
+    Before = cursor(Db, LocalId),
+    application:set_env(mailio_store, script, fun
+        (initial) -> {ok, [added(100, 1), added(101, 1)], state(1, 102), done};
+        (S) -> {ok, [resync], S, done}
+    end),
+    application:set_env(mailio_store, mailbox_size, 2),
+    application:set_env(mailio_store, mailbox_validity, 2),
+    try
+        ?assertMatch({error, _}, mailio_sync_mgr:sync_mailbox(Account, <<"INBOX">>))
+    after
+        application:unset_env(mailio_store, script),
+        application:unset_env(mailio_store, mailbox_size),
+        application:unset_env(mailio_store, mailbox_validity)
+    end,
+    ?assertEqual(Before, cursor(Db, LocalId)).
 
 idle_count(Srv) ->
     length([

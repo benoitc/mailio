@@ -157,11 +157,14 @@
 -callback list_uids(conn(), MailboxId :: binary(), #{max => pos_integer()}) ->
     {ok, [term()]} | {error, mailio_error:error_map()}.
 
-%% How many messages the mailbox holds now. A full read is checked against it
-%% before anything the read did not list is removed. Adapters that cannot tell
-%% leave it out, and their full reads are not checked.
--callback mailbox_size(conn(), MailboxId :: binary()) ->
-    {ok, non_neg_integer()} | {error, mailio_error:error_map()}.
+%% How many messages the mailbox holds now, and under which UIDVALIDITY. A full
+%% read is checked against both before anything the read did not list is
+%% removed: a mailbox recreated since the read began has other messages under the
+%% same numbers. Adapters that cannot tell leave it out, and their full reads are
+%% not checked.
+-callback mailbox_info(conn(), MailboxId :: binary()) ->
+    {ok, #{exists := non_neg_integer(), uidvalidity := term()}}
+    | {error, mailio_error:error_map()}.
 
 -optional_callbacks([
     watch/3,
@@ -172,5 +175,5 @@
     list_uids/2,
     list_uids/3,
     fetch_message/5,
-    mailbox_size/2
+    mailbox_info/2
 ]).

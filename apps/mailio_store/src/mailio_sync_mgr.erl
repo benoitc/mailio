@@ -391,7 +391,11 @@ full_resync(Mode, ImapName, LocalId, State, Attempts, Replace) ->
     Fetch = fun(Cursor) -> Adapter:fetch_changes_since(Conn, ImapName, Cursor, #{}) end,
     Limit = mailio_config:get(sync_max_listed_uids, 10000000),
     Acc0 = #{
-        seen => mailio_uid_set:new(Limit), removed => #{}, stats => new_stats(), limit => Limit
+        seen => mailio_uid_set:new(Limit),
+        removed => #{},
+        stats => new_stats(),
+        limit => Limit,
+        validity => undefined
     },
     Step = fun(Changes, _Next, Acc) ->
         case resync_mode(Changes) of
@@ -400,8 +404,8 @@ full_resync(Mode, ImapName, LocalId, State, Attempts, Replace) ->
         end
     end,
     case mailio_sync_pages:walk(Fetch, initial, page_opts(), Acc0, Step) of
-        {ok, #{seen := Seen, removed := Removed, stats := Stats}, Final} ->
-            case inventory_matches(State, ImapName, Seen, Removed) of
+        {ok, #{seen := Seen, removed := Removed, stats := Stats, validity := Validity}, Final} ->
+            case inventory_matches(State, ImapName, Seen, Removed, Validity) of
                 true ->
                     finish_resync(State, LocalId, Seen, Removed, Stats, Final);
                 false ->
@@ -427,18 +431,26 @@ full_resync(Mode, ImapName, LocalId, State, Attempts, Replace) ->
 %% The number of messages the read listed (those still there at its end) is the
 %% number the server holds. An adapter that cannot say how many it holds cannot
 %% be checked.
-inventory_matches(#state{adapter = Adapter, conn = Conn}, ImapName, Seen, Gone) ->
-    case adapter_has(Adapter, mailbox_size, 2) of
+inventory_matches(#state{adapter = Adapter, conn = Conn}, ImapName, Seen, Gone, Validity) ->
+    case adapter_has(Adapter, mailbox_info, 2) of
         false ->
             true;
         true ->
             Lookup = mailio_uid_set:to_lookup(Seen),
             Dropped = length([U || U <- maps:keys(Gone), mailio_uid_set:member(U, Lookup)]),
-            case Adapter:mailbox_size(Conn, ImapName) of
-                {ok, N} -> N =:= mailio_uid_set:size(Seen) - Dropped;
-                {error, _} = Error -> Error
+            case Adapter:mailbox_info(Conn, ImapName) of
+                {ok, #{exists := N, uidvalidity := V}} ->
+                    N =:= mailio_uid_set:size(Seen) - Dropped andalso same_validity(Validity, V);
+                {error, _} = Error ->
+                    Error
             end
     end.
+
+%% The generation the listed messages were read under is the one the mailbox has
+%% now. A read that listed nothing has no generation to compare.
+same_validity(undefined, _Now) -> true;
+same_validity(mixed, _Now) -> false;
+same_validity(Read, Now) -> Read =:= Now.
 
 resync_page(State, ImapName, LocalId, Replace, Changes, #{seen := Seen, stats := Stats} = Acc) ->
     resync_page(State, ImapName, LocalId, Replace, Changes, Seen, Stats, Acc).
@@ -447,14 +459,29 @@ resync_page(State, ImapName, LocalId, Replace, Changes, #{seen := Seen, stats :=
 %% one, is gone: it leaves the store now and is not kept by the final cleanup. The
 %% changes come in the order they happened, so one listed again later is back.
 resync_removed(State, LocalId, Uid, Stats, #{removed := Removed, limit := Limit} = Acc) ->
-    Stats1 =
-        case remove_local_uid(State#state.account_id, LocalId, Uid) of
-            ok -> bump(Stats, removed);
-            already_gone -> Stats
-        end,
-    case map_size(Removed) >= Limit andalso not is_map_key(Uid, Removed) of
-        true -> {error, mailbox_too_large_to_resync};
-        false -> {ok, Stats1, Acc#{removed := Removed#{Uid => true}}}
+    case remove_local_uid(State#state.account_id, LocalId, Uid) of
+        {error, _} = Error ->
+            Error;
+        Done ->
+            Stats1 =
+                case Done of
+                    ok -> bump(Stats, removed);
+                    already_gone -> Stats
+                end,
+            case map_size(Removed) >= Limit andalso not is_map_key(Uid, Removed) of
+                true -> {error, mailbox_too_large_to_resync};
+                false -> {ok, Stats1, Acc#{removed := Removed#{Uid => true}}}
+            end
+    end.
+
+%% The UIDVALIDITY the listed messages were read under, `mixed' when they were not
+%% all read under one.
+read_validity(Known, Info) ->
+    case {Known, maps:find(uidvalidity, Info)} of
+        {_, error} -> Known;
+        {undefined, {ok, V}} -> V;
+        {V, {ok, V}} -> V;
+        {_, {ok, _}} -> mixed
     end.
 
 %% The changes of a page in the order they came: an update for a message listed
@@ -470,9 +497,11 @@ resync_page(State, ImapName, LocalId, Replace, [{added, Info} | Rest], Seen, Sta
                 {error, Why} ->
                     {stop, {error, {resync_incomplete, Why}}};
                 Done ->
-                    Acc1 = maps:update_with(
+                    Acc1 = (maps:update_with(
                         removed, fun(R) -> maps:remove(maps:get(uid, Info), R) end, Acc
-                    ),
+                    ))#{
+                        validity := read_validity(maps:get(validity, Acc), Info)
+                    },
                     resync_page(
                         State, ImapName, LocalId, Replace, Rest, Seen1, bump(Stats, Done), Acc1
                     )
@@ -531,14 +560,30 @@ remove_unlisted(#state{account_id = AccountId, db = Db}, LocalId, Listed, Gone0)
          || {Uid, _, _} <- Maps,
             not mailio_uid_set:member(Uid, Listed) orelse is_map_key(Uid, Gone0)
         ],
-        {ok, N + length([ok || Uid <- Gone, remove_local_uid(AccountId, LocalId, Uid) =:= ok])}
+        remove_all(AccountId, LocalId, Gone, N)
     end,
-    fold_local_uidmaps(Db, LocalId, Fun, 0).
+    case fold_local_uidmaps(Db, LocalId, Fun, 0) of
+        {ok, _} = Done -> Done;
+        {stopped, {error, _} = Error} -> Error;
+        {error, _} = Error -> Error
+    end.
+
+%% Every UID in turn; the first removal the store refuses ends the walk, so that
+%% a failure is an error and not a smaller count.
+remove_all(_AccountId, _LocalId, [], N) ->
+    {ok, N};
+remove_all(AccountId, LocalId, [Uid | Rest], N) ->
+    case remove_local_uid(AccountId, LocalId, Uid) of
+        ok -> remove_all(AccountId, LocalId, Rest, N + 1);
+        already_gone -> remove_all(AccountId, LocalId, Rest, N);
+        {error, _} = Error -> {stop, Error}
+    end.
 
 remove_local_uid(AccountId, LocalId, Uid) ->
     case mailio_account_writer:remove_uid(AccountId, LocalId, Uid) of
         ok -> ok;
-        {error, not_found} -> already_gone
+        {error, not_found} -> already_gone;
+        {error, _} = Error -> Error
     end.
 
 %% One message of a full read. A UID we already know is only the same message if
@@ -569,8 +614,10 @@ sync_one(State, ImapName, LocalId, Info, Replace) ->
     end.
 
 replace_one(State, ImapName, LocalId, Info) ->
-    _ = mailio_account_writer:remove_uid(State#state.account_id, LocalId, maps:get(uid, Info)),
-    fetch_one(State, ImapName, LocalId, Info).
+    case remove_local_uid(State#state.account_id, LocalId, maps:get(uid, Info)) of
+        {error, _} = Error -> Error;
+        _ -> fetch_one(State, ImapName, LocalId, Info)
+    end.
 
 fetch_one(State, ImapName, LocalId, Info) ->
     case ingest_added(State, ImapName, LocalId, Info) of
@@ -636,9 +683,10 @@ apply_change(State, _ImapName, LocalId, {updated, Info}, Stats) ->
     end;
 apply_change(State, _ImapName, LocalId, {removed, Uid}, Stats) ->
     #state{account_id = AccountId} = State,
-    case mailio_account_writer:remove_uid(AccountId, LocalId, Uid) of
+    case remove_local_uid(AccountId, LocalId, Uid) of
         ok -> bump(Stats, removed);
-        {error, not_found} -> Stats
+        already_gone -> Stats;
+        {error, _} = Error -> Error
     end;
 apply_change(_State, _ImapName, _LocalId, Signal, Stats) when
     Signal =:= reset; Signal =:= resync

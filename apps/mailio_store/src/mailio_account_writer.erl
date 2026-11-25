@@ -66,7 +66,7 @@ remove_member(AccountId, MailboxId, EmailId) ->
 
 %% @doc One UID of a mailbox is gone: drop its mapping, and the email's
 %% membership only if no other UID of the mailbox still refers to it.
--spec remove_uid(binary(), binary(), term()) -> ok | {error, not_found}.
+-spec remove_uid(binary(), binary(), term()) -> ok | {error, not_found | term()}.
 remove_uid(AccountId, MailboxId, Uid) ->
     gen_server:call(via(AccountId), {remove_uid, MailboxId, Uid}, 30000).
 

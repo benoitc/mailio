@@ -129,3 +129,26 @@ waiting_callers_are_told_when_the_connection_goes_test() ->
         after 2000 -> timeout
         end
     ).
+
+%% A caller that dies while it waits leaves nothing behind, even when the holder
+%% never lets go.
+a_waiter_that_dies_leaves_the_queue_test() ->
+    with_lock(fun(Lock, _Conn) ->
+        spawn_link(fun() ->
+            mailio_imap_lock:with_session(Lock, 5000, fun() -> timer:sleep(infinity) end)
+        end),
+        timer:sleep(50),
+        Waiter = spawn(fun() ->
+            mailio_imap_lock:with_session(Lock, 5000, fun() -> ok end)
+        end),
+        timer:sleep(50),
+        ?assertEqual(1, queued(Lock)),
+        exit(Waiter, kill),
+        timer:sleep(50),
+        ?assertEqual(0, queued(Lock))
+    end).
+
+%% the queue is the last field of the lock's state
+queued(Lock) ->
+    State = sys:get_state(Lock),
+    queue:len(element(tuple_size(State), State)).

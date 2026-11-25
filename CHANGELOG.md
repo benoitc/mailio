@@ -190,15 +190,20 @@
   the server holds before it removes anything it did not list. A read that
   missed messages is made again, and after a few tries the sync stops with an
   error and keeps local mail.
-- The mail changes tool no longer reports old messages as removed when its
-  snapshot only covers the newest ones.
+- The mail changes tool no longer reports old messages as removed, or old
+  messages coming back into view as new, when its snapshot only covers the
+  newest ones.
 - Several callers can now share one IMAP connection safely. Before, a call
   that selects a mailbox and then reads or changes a message could act on
   the mailbox another caller had just selected. Callers now take turns.
 - Deleting or moving a message on an IMAP server no longer removes other
-  messages that were already marked as deleted. Without server support for
-  removing by UID, the call now stops with an error when other messages are
-  marked, instead of removing them.
+  messages that were marked as deleted. Removing several messages at once also
+  sent a wrong list of numbers and could remove a message nobody named. A
+  server that cannot remove by UID is no longer used for deleting or for
+  moving by copy: the call stops with an error before it changes anything.
+- A full read also checks that the mailbox was not recreated while it was
+  being read, and a removal the store refuses is now an error that keeps the
+  saved position, not a crash of the sync.
 - A message is stored only from the body the server sent for that message. A
   body for another message, or one with no message number, is an error.
 - A removal that fails between updating the email and updating the counter is

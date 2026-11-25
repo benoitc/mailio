@@ -1108,7 +1108,17 @@ full_changes(C, Account, Box, Sel, Prev, Cap, Cur) ->
                 removed => []
             }};
         #{flags := Old} ->
-            Added = lists:sort([U || U <- maps:keys(Cur), not maps:is_key(U, Old)]),
+            %% After a capped read a UID that was not in the snapshot may simply have
+            %% been outside it. Only one at or above the previous UIDNEXT is new.
+            AddFloor =
+                case maps:get(partial, Prev, false) of
+                    true -> maps:get(uidnext, Prev, 0);
+                    false -> 0
+                end,
+            Added = lists:sort([
+                U
+             || U <- maps:keys(Cur), not maps:is_key(U, Old), U >= AddFloor
+            ]),
             %% A capped read lists only the newest messages. A UID below the
             %% lowest one it lists may well still be there: only those within
             %% what was listed are known to be gone.

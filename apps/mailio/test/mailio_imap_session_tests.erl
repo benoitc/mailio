@@ -302,9 +302,9 @@ expunge_removes_only_the_named_messages_test() ->
     ?assertNot(logged(Tab, <<"^[^ ]+ EXPUNGE">>)),
     gen_tcp:close(L).
 
-%% Without UIDPLUS the only expunge is a mailbox-wide one: it is refused when
-%% it would take another message, and nothing is changed.
-expunge_without_uidplus_refuses_to_take_other_messages_test() ->
+%% Without UIDPLUS the only expunge is a mailbox-wide one, which can take messages
+%% nobody named, so it is refused.
+expunge_without_uidplus_leaves_flagged_messages_alone_test() ->
     {Port, Tab, L} = start(<<>>),
     Conn = connect(Port),
     ets:insert(Tab, {{deleted, <<"A">>}, [3]}),
@@ -313,11 +313,26 @@ expunge_without_uidplus_refuses_to_take_other_messages_test() ->
     ?assertEqual([3], deleted(Tab, <<"A">>)),
     gen_tcp:close(L).
 
-expunge_without_uidplus_works_when_nothing_else_is_flagged_test() ->
+expunge_without_uidplus_is_refused_before_anything_is_changed_test() ->
     {Port, Tab, L} = start(<<>>),
     Conn = connect(Port),
-    ?assertEqual(ok, mailio_imap:expunge(Conn, <<"A">>, [1, 2])),
-    ?assertEqual([3, 4], msgs(Tab, <<"A">>)),
+    ?assertMatch({error, _}, mailio_imap:expunge(Conn, <<"A">>, [1, 2])),
+    ?assertEqual([1, 2, 3, 4], msgs(Tab, <<"A">>)),
+    ?assertEqual([], deleted(Tab, <<"A">>)),
+    ?assertNot(logged(Tab, <<" STORE ">>)),
+    gen_tcp:close(L).
+
+%% The UIDs go on the wire once, as given: [1, 3] is `1,3', and no other message
+%% is marked or removed.
+expunge_sends_the_uids_it_was_given_test() ->
+    {Port, Tab, L} = start(<<"UIDPLUS">>),
+    Conn = connect(Port),
+    ets:insert(Tab, {{msgs, <<"A">>}, [1, 2, 3, 4, 44]}),
+    ?assertEqual(ok, mailio_imap:expunge(Conn, <<"A">>, [1, 3])),
+    ?assert(logged(Tab, <<" UID STORE 1,3 \\+FLAGS">>)),
+    ?assert(logged(Tab, <<" UID EXPUNGE 1,3$">>)),
+    ?assertEqual([2, 4, 44], msgs(Tab, <<"A">>)),
+    ?assertEqual([], deleted(Tab, <<"A">>)),
     gen_tcp:close(L).
 
 %% A move by copy ends with the same expunge, and the same rule.
@@ -329,13 +344,13 @@ move_by_copy_does_not_expunge_other_messages_test() ->
     ?assertEqual([2, 3, 4], msgs(Tab, <<"A">>)),
     gen_tcp:close(L).
 
-move_by_copy_without_uidplus_is_refused_before_copying_test() ->
+move_without_move_or_uidplus_is_refused_before_copying_test() ->
     {Port, Tab, L} = start(<<>>),
     Conn = connect(Port),
-    ets:insert(Tab, {{deleted, <<"A">>}, [3]}),
     ?assertMatch({error, _}, mailio_imap:move(Conn, <<"A">>, 1, <<"B">>)),
     ?assertEqual([1, 2, 3, 4], msgs(Tab, <<"A">>)),
     ?assertNot(logged(Tab, <<" UID COPY ">>)),
+    ?assertNot(logged(Tab, <<" STORE ">>)),
     gen_tcp:close(L).
 
 %%====================================================================

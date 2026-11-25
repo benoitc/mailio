@@ -27,7 +27,7 @@
     unwatch/2,
     list_uids/2,
     list_uids/3,
-    mailbox_size/2
+    mailbox_info/2
 ]).
 
 %% A connection handle: the FSM pid plus cached capabilities.
@@ -578,7 +578,14 @@ store(Pid, Uid, Action, Flags) ->
 -spec move(conn(), binary(), term(), binary()) ->
     {ok, term() | undefined} | {error, term()}.
 move(#{pid := Pid, caps := Caps} = Conn, FromMailbox, Uid, ToMailbox) ->
-    session(Conn, fun() -> do_move(Pid, Caps, FromMailbox, Uid, ToMailbox) end).
+    case maps:get(move, Caps, false) orelse maps:get(uidplus, Caps, false) of
+        true ->
+            session(Conn, fun() -> do_move(Pid, Caps, FromMailbox, Uid, ToMailbox) end);
+        false ->
+            %% neither MOVE nor UIDPLUS: a copy would be followed by an expunge that
+            %% can take other messages, so nothing is copied
+            {error, uidplus_required_error()}
+    end.
 
 do_move(Pid, Caps, FromMailbox, Uid, ToMailbox) ->
     case do_select(Pid, FromMailbox) of
@@ -594,20 +601,18 @@ do_move(Pid, Caps, FromMailbox, Uid, ToMailbox) ->
                         Other -> command_error(Other)
                     end;
                 false ->
-                    move_by_copy(Pid, Caps, Uid, ToMailbox)
+                    move_by_copy(Pid, Uid, ToMailbox)
             end;
         Other ->
             command_error(Other)
     end.
 
-move_by_copy(Pid, Caps, Uid, ToMailbox) ->
+move_by_copy(Pid, Uid, ToMailbox) ->
     ok_chain(
         [
-            %% before the copy: a refused expunge must not leave two copies
-            fun() -> only_targets_deleted(Pid, Caps, Uid) end,
             fun() -> copy(Pid, Uid, ToMailbox) end,
             fun() -> store(Pid, Uid, add, [<<"\\Deleted">>]) end,
-            fun() -> expunge_targets(Pid, Caps, Uid) end
+            fun() -> expunge_targets(Pid, Uid) end
         ],
         {ok, undefined}
     ).
@@ -634,61 +639,34 @@ append(#{pid := Pid}, MailboxId, Raw, Keywords) ->
 appenduid({<<"APPENDUID">>, [_Validity, {number, Uid}]}) -> Uid;
 appenduid(_) -> undefined.
 
-%% Removes the messages named and no others. With UIDPLUS that is `UID EXPUNGE'.
-%% Without it the only command is `EXPUNGE', which also removes every other
-%% message flagged \Deleted, so it is refused when there is one.
+%% Removes the messages named and no others, with `UID EXPUNGE' (UIDPLUS, RFC 4315).
+%% Without it the only command is `EXPUNGE', which also takes every message
+%% flagged \\Deleted, and another client can flag one at any moment, so a check
+%% beforehand would not hold. The call is refused before anything is changed.
 -spec expunge(conn(), binary(), [term()]) -> ok | {error, term()}.
 expunge(#{pid := Pid, caps := Caps} = Conn, MailboxId, Uids) ->
-    session(Conn, fun() -> do_expunge_set(Pid, Caps, MailboxId, Uids) end).
+    case maps:get(uidplus, Caps, false) of
+        true -> session(Conn, fun() -> do_expunge_set(Pid, MailboxId, Uids) end);
+        false -> {error, uidplus_required_error()}
+    end.
 
-do_expunge_set(Pid, Caps, MailboxId, Uids) ->
+uidplus_required_error() ->
+    mailio_error_map(imap_operation_unsupported, uidplus_required).
+
+%% The UIDs go to each command as they are: every builder encodes them once.
+do_expunge_set(Pid, MailboxId, Uids) ->
     case do_select(Pid, MailboxId) of
         {ok, _} ->
             ok_chain([
-                fun() -> only_targets_deleted(Pid, Caps, Uids) end,
-                fun() -> store(Pid, format_set(Uids), add, [<<"\\Deleted">>]) end,
-                fun() -> expunge_targets(Pid, Caps, format_set(Uids)) end
+                fun() -> store(Pid, Uids, add, [<<"\\Deleted">>]) end,
+                fun() -> expunge_targets(Pid, Uids) end
             ]);
         Other ->
             command_error(Other)
     end.
 
-%% Without UIDPLUS: nothing outside the target may be flagged \Deleted already.
-only_targets_deleted(_Pid, #{uidplus := true}, _Uids) ->
-    ok;
-only_targets_deleted(Pid, _Caps, Uids) ->
-    Targets = target_list(Uids),
-    Cmd = fun(T) -> {mailio_imap_proto:uid_search(T, <<"DELETED">>), undefined} end,
-    case run(Pid, Cmd) of
-        {ok, Untagged, {ok, _, _}} ->
-            Answers = [Us || {search, Us} <- Untagged],
-            Unreadable = [R || {other, <<"SEARCH", _/binary>> = R} <- Untagged],
-            case {Answers, Unreadable} of
-                {[_ | _], []} ->
-                    case [U || U <- lists:append(Answers), not lists:member(U, Targets)] of
-                        [] -> ok;
-                        _ -> command_error({error, other_messages_flagged_deleted})
-                    end;
-                _ ->
-                    command_error({error, search_answer_invalid})
-            end;
-        Other ->
-            command_error(Other)
-    end.
-
-target_list(Uids) when is_list(Uids) -> Uids;
-target_list(Uid) -> [Uid].
-
-expunge_targets(Pid, #{uidplus := true}, Set) ->
-    case run(Pid, fun(T) -> {mailio_imap_proto:uid_expunge(T, Set), undefined} end) of
-        {ok, _, {ok, _, _}} -> ok;
-        Other -> command_error(Other)
-    end;
-expunge_targets(Pid, _Caps, _Set) ->
-    do_expunge(Pid).
-
-do_expunge(Pid) ->
-    case run(Pid, fun(T) -> {mailio_imap_proto:expunge(T), undefined} end) of
+expunge_targets(Pid, Uids) ->
+    case run(Pid, fun(T) -> {mailio_imap_proto:uid_expunge(T, Uids), undefined} end) of
         {ok, _, {ok, _, _}} -> ok;
         Other -> command_error(Other)
     end.
@@ -727,16 +705,21 @@ unwatch(_Conn, _Ref) ->
 list_uids(Conn, MailboxId) ->
     list_uids(Conn, MailboxId, #{}).
 
-%% How many messages the server says the mailbox holds.
--spec mailbox_size(conn(), binary()) -> {ok, non_neg_integer()} | {error, term()}.
-mailbox_size(#{pid := Pid} = Conn, MailboxId) ->
-    session(Conn, fun() -> do_mailbox_size(Pid, MailboxId) end).
+%% How many messages the server says the mailbox holds, and under which UIDVALIDITY.
+-spec mailbox_info(conn(), binary()) ->
+    {ok, #{exists := non_neg_integer(), uidvalidity := pos_integer() | undefined}}
+    | {error, term()}.
+mailbox_info(#{pid := Pid} = Conn, MailboxId) ->
+    session(Conn, fun() -> do_mailbox_info(Pid, MailboxId) end).
 
-do_mailbox_size(Pid, MailboxId) ->
+do_mailbox_info(Pid, MailboxId) ->
     case do_examine(Pid, MailboxId) of
-        {ok, #{exists := Exists}} when is_integer(Exists) -> {ok, Exists};
-        {ok, _} -> command_error({error, mailbox_size_unknown});
-        Other -> command_error(Other)
+        {ok, #{exists := Exists} = Sel} when is_integer(Exists) ->
+            {ok, #{exists => Exists, uidvalidity => maps:get(uidvalidity, Sel, undefined)}};
+        {ok, _} ->
+            command_error({error, mailbox_size_unknown});
+        Other ->
+            command_error(Other)
     end.
 
 %% A listing is only an inventory if it agrees with the mailbox: the number of
@@ -961,9 +944,6 @@ parse_internaldate(Bin) ->
         {ok, Epoch} -> Epoch;
         error -> erlang:system_time(second)
     end.
-
-format_set(Uids) when is_list(Uids) -> mailio_imap_proto:format_seqset(Uids);
-format_set(Uid) -> Uid.
 
 %%====================================================================
 %% Capabilities
