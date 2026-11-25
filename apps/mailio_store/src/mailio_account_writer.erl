@@ -385,13 +385,20 @@ maybe_write_uidmap(Db, MailboxId, Opts, EmailId) ->
         Uid ->
             %% Enumerated by the `uidmap/<mailbox>/' id prefix, so no
             %% separate mailboxId field is needed for lookup.
-            Doc = #{
-                <<"id">> => <<?ID_UIDMAP, MailboxId/binary, "/", (to_bin(Uid))/binary>>,
-                <<"uid">> => Uid,
-                <<"emailId">> => EmailId
-            },
-            {ok, _, _} = mailio_db:put(Db, Doc),
-            ok
+            Id = <<?ID_UIDMAP, MailboxId/binary, "/", (to_bin(Uid))/binary>>,
+            Doc = #{<<"id">> => Id, <<"uid">> => Uid, <<"emailId">> => EmailId},
+            case mailio_db:get(Db, Id) of
+                %% the same message again (a replayed page): nothing to write
+                {ok, #{<<"emailId">> := EmailId}} ->
+                    ok;
+                %% the UID now belongs to another message
+                {ok, #{<<"_rev">> := Rev}} ->
+                    {ok, _, _} = mailio_db:put(Db, Doc#{<<"_rev">> => Rev}),
+                    ok;
+                {error, not_found} ->
+                    {ok, _, _} = mailio_db:put(Db, Doc),
+                    ok
+            end
     end.
 
 full_ingest(Db, EmailId, DocId, MailboxId, Raw, Opts) ->

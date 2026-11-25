@@ -15,6 +15,7 @@
 
 -export([start/0, start/1, stop/1, port/1, commands/1]).
 -export([last_flags/2, set_flags/3, deliver/2, expunge/2, new_validity/2, set_failure/3]).
+-export([set_option/3, inject/2, set_uidnext/2]).
 
 -record(srv, {port, pid, ref, tab}).
 
@@ -70,9 +71,26 @@ deliver(Srv, Subject) -> call(Srv, {deliver, Subject}, ok).
 expunge(Srv, Uid) -> call(Srv, {expunge, Uid}, ok).
 
 %% @doc Make a kind of UID FETCH answer `NO': `meta' (the listing of UIDs and
-%% flags) or `body' (a message body).
-set_failure(Srv, Kind, Bool) when Kind =:= meta; Kind =:= body ->
+%% flags), `body' (a message body) or `{body, Uid}' (the body of one message).
+set_failure(Srv, Kind, Bool) when
+    Kind =:= meta; Kind =:= body; (is_tuple(Kind) andalso element(1, Kind) =:= body)
+->
     call(Srv, {set_failure, Kind, Bool}, ok).
+
+%% @doc Server behaviour switches: `no_uidnext' (EXAMINE does not report UIDNEXT,
+%% which RFC 3501 allows), `fail_max_uid' (UID FETCH * answers NO) and
+%% `bad_vanished' (a QRESYNC answer with a VANISHED line that lists nothing).
+set_option(Srv, Option, Bool) when
+    Option =:= no_uidnext; Option =:= fail_max_uid; Option =:= bad_vanished
+->
+    call(Srv, {set_option, Option, Bool}, ok).
+
+%% @doc The UIDNEXT the server reports, for a mailbox whose UIDs are far apart.
+set_uidnext(Srv, N) -> call(Srv, {set_uidnext, N}, ok).
+
+%% @doc Raw lines the server volunteers with its next answer to a UID FETCH,
+%% for example a flag update for a message that was not asked for.
+inject(Srv, Lines) -> call(Srv, {inject, Lines}, ok).
 
 %% @doc The mailbox is recreated: a new UIDVALIDITY and these messages, with
 %% UIDs that start again at 100, so old UIDs now mean other messages.
@@ -173,6 +191,12 @@ handle_control(Sock, Ref, {deliver, Subject}, #{messages := Ms, uidnext := Uid} 
     State1 = State#{messages => Ms1, uidnext => Uid + 1},
     notify_exists(Sock, State1),
     {{ok, Ref, ok}, State1};
+handle_control(_Sock, Ref, {set_option, Option, Bool}, State) ->
+    {{ok, Ref, ok}, State#{{opt, Option} => Bool}};
+handle_control(_Sock, Ref, {set_uidnext, N}, State) ->
+    {{ok, Ref, ok}, State#{uidnext => N}};
+handle_control(_Sock, Ref, {inject, Lines}, State) ->
+    {{ok, Ref, ok}, State#{injected => Lines}};
 handle_control(_Sock, Ref, {set_failure, Kind, Bool}, State) ->
     {{ok, Ref, ok}, State#{{fail, Kind} => Bool}};
 handle_control(_Sock, Ref, {new_validity, Subjects}, #{uidvalidity := V} = State) ->
@@ -381,17 +405,23 @@ send_select(Sock, #{messages := Ms, uidnext := UidNext} = State) ->
     send(Sock, <<"* 0 RECENT\r\n">>),
     Validity = integer_to_binary(maps:get(uidvalidity, State, 1)),
     send(Sock, <<"* OK [UIDVALIDITY ", Validity/binary, "] UIDs valid\r\n">>),
-    send(Sock, <<"* OK [UIDNEXT ", UN/binary, "] Predicted next UID\r\n">>),
+    case maps:get({opt, no_uidnext}, State, false) of
+        true -> ok;
+        false -> send(Sock, <<"* OK [UIDNEXT ", UN/binary, "] Predicted next UID\r\n">>)
+    end,
     send(Sock, <<"* OK [HIGHESTMODSEQ ", HMS/binary, "] Highest\r\n">>).
 
-emit_qresync(Sock, #{vanished := V, messages := Ms}, Since) ->
+emit_qresync(Sock, #{vanished := V, messages := Ms} = State, Since) ->
     Gone = [Uid || {Uid, MS} <- V, MS > Since],
     case Gone of
         [] ->
             ok;
         _ ->
             Set = lists:join(<<",">>, [integer_to_binary(U) || U <- lists:sort(Gone)]),
-            send(Sock, [<<"* VANISHED (EARLIER) ">>, Set, <<"\r\n">>])
+            case maps:get({opt, bad_vanished}, State, false) of
+                true -> send(Sock, <<"* VANISHED (EARLIER)\r\n">>);
+                false -> send(Sock, [<<"* VANISHED (EARLIER) ">>, Set, <<"\r\n">>])
+            end
     end,
     [send_changed(Sock, M) || {_, _, _, MS, _} = M <- Ms, MS > Since],
     ok.
@@ -433,23 +463,53 @@ handle_uid_fetch(Sock, Tag, Rest, #{messages := Ms} = State) ->
             ],
             tagged(Sock, Tag, <<"OK UID FETCH done">>),
             {continue, State};
-        none ->
-            case
-                {
-                    is_body_fetch(ItemsBin),
-                    maps:get({fail, body}, State, false),
-                    maps:get({fail, meta}, State, false)
-                }
-            of
-                {true, true, _} ->
-                    tagged(Sock, Tag, <<"NO cannot read the message">>),
+        none when
+            SetBin =:= <<"*">>
+        ->
+            case maps:get({opt, fail_max_uid}, State, false) of
+                true ->
+                    tagged(Sock, Tag, <<"NO no highest uid">>),
                     {continue, State};
-                {false, _, true} ->
+                false ->
+                    handle_uid_fetch_data(Sock, Tag, SetBin, ItemsBin, State)
+            end;
+        none ->
+            case body_uid_fails(SetBin, ItemsBin, State) of
+                true ->
+                    tagged(Sock, Tag, <<"NO cannot read this message">>),
+                    {continue, State};
+                false ->
+                    handle_uid_fetch_checked(Sock, Tag, SetBin, ItemsBin, State)
+            end
+    end.
+
+body_uid_fails(SetBin, ItemsBin, State) ->
+    case is_body_fetch(ItemsBin) of
+        true ->
+            try set_low(SetBin) of
+                Uid -> maps:get({fail, {body, Uid}}, State, false)
+            catch
+                _:_ -> false
+            end;
+        false ->
+            false
+    end.
+
+handle_uid_fetch_checked(Sock, Tag, SetBin, ItemsBin, State) ->
+    case {is_body_fetch(ItemsBin), maps:get({fail, body}, State, false)} of
+        {true, true} ->
+            tagged(Sock, Tag, <<"NO cannot read the message">>),
+            {continue, State};
+        {false, _} ->
+            case maps:get({fail, meta}, State, false) of
+                true ->
                     tagged(Sock, Tag, <<"NO cannot list">>),
                     {continue, State};
-                _ ->
+                false ->
                     handle_uid_fetch_data(Sock, Tag, SetBin, ItemsBin, State)
-            end
+            end;
+        _ ->
+            handle_uid_fetch_data(Sock, Tag, SetBin, ItemsBin, State)
     end.
 
 handle_uid_fetch_data(Sock, Tag, SetBin, ItemsBin, #{messages := Ms} = State) ->
@@ -460,6 +520,11 @@ handle_uid_fetch_data(Sock, Tag, SetBin, ItemsBin, #{messages := Ms} = State) ->
                 {Seq, Uid, _F, _MS, Raw} -> send_body(Sock, Seq, Uid, Raw);
                 false -> ok
             end,
+            tagged(Sock, Tag, <<"OK UID FETCH done">>),
+            {continue, State};
+        false when SetBin =:= <<"*">> ->
+            %% `*' alone is the message with the highest UID
+            [send_meta(Sock, M) || M <- last_message(Ms)],
             tagged(Sock, Tag, <<"OK UID FETCH done">>),
             {continue, State};
         false ->
@@ -476,8 +541,9 @@ handle_uid_fetch_data(Sock, Tag, SetBin, ItemsBin, #{messages := Ms} = State) ->
                         Found
                 end,
             [send_meta(Sock, M) || M <- Hits],
+            [send(Sock, [Line, <<"\r\n">>]) || Line <- maps:get(injected, State, [])],
             tagged(Sock, Tag, <<"OK UID FETCH done">>),
-            {continue, State}
+            {continue, maps:remove(injected, State)}
     end.
 
 handle_uid_search(Sock, Tag, Rest, #{messages := Ms} = State) ->
@@ -586,6 +652,9 @@ update_flags(State, Ms, Uid, Op, Flags) ->
 %% message; BODYSTRUCTURE and header-field sections are metadata.
 is_body_fetch(ItemsBin) ->
     re:run(string:uppercase(ItemsBin), <<"BODY(\\.PEEK)?\\[\\]">>) =/= nomatch.
+
+last_message([]) -> [];
+last_message(Ms) -> [lists:last(Ms)].
 
 %% The two ends of the first range of a set, `*' being no upper end.
 set_range(SetBin) ->

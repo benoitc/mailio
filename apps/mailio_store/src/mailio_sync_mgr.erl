@@ -334,14 +334,17 @@ full_resync(Mode, ImapName, LocalId, State) ->
     maybe
         %% Everything is read first, to the last page. Nothing is touched
         %% until the server has answered in full.
-        {ok, Changes, FullState} ?= read_all(State, ImapName),
+        {ok, Changes, FullState, ResetSeen} ?= read_all(State, ImapName),
         {ok, Local} ?= local_uidmaps(State#state.db, LocalId),
         Server = [Info || {added, Info} <- Changes],
         ServerUids = sets:from_list([maps:get(uid, I) || I <- Server]),
+        %% A mailbox recreated while it was being read means the UIDs held here
+        %% are other messages, whatever the adapter said at the start.
+        Replace = Mode =:= reset orelse ResetSeen,
         Gone = [
             Uid
          || {Uid, _EmailId, _DocId} <- Local,
-            Mode =:= reset orelse not sets:is_element(Uid, ServerUids)
+            Replace orelse not sets:is_element(Uid, ServerUids)
         ],
         Removed = [remove_local_uid(AccountId, LocalId, Uid) || Uid <- Gone],
         Results = [sync_one(State, ImapName, LocalId, Info) || Info <- Server],
@@ -365,16 +368,20 @@ full_resync(Mode, ImapName, LocalId, State) ->
 %% recreated (`reset') while it was being read discards what was read so far and
 %% starts again: nothing from two generations is mixed.
 read_all(State, ImapName) ->
-    read_all(State, ImapName, 3).
+    read_all(State, ImapName, 3, false).
 
-read_all(_State, _ImapName, 0) ->
+read_all(_State, _ImapName, 0, _ResetSeen) ->
     {error, mailbox_keeps_changing};
-read_all(#state{adapter = Adapter, conn = Conn} = State, ImapName, Attempts) ->
+read_all(#state{adapter = Adapter, conn = Conn} = State, ImapName, Attempts, ResetSeen) ->
     Fetch = fun(Cursor) -> Adapter:fetch_changes_since(Conn, ImapName, Cursor, #{}) end,
     case mailio_sync_pages:collect(Fetch, initial, page_opts()) of
-        {ok, _, _} = Ok -> Ok;
-        {stopped, {signal, _}} -> read_all(State, ImapName, Attempts - 1);
-        {error, _} = Error -> Error
+        {ok, Changes, Final} ->
+            {ok, Changes, Final, ResetSeen};
+        %% remember that the mailbox was recreated: what is held must be replaced
+        {stopped, {signal, Signal}} ->
+            read_all(State, ImapName, Attempts - 1, ResetSeen orelse Signal =:= reset);
+        {error, _} = Error ->
+            Error
     end.
 
 remove_local_uid(AccountId, LocalId, Uid) ->

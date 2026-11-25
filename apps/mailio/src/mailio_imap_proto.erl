@@ -477,8 +477,7 @@ parse_vanished(Bin) ->
                 [Marker, After] ->
                     case mailio_ascii:upper(mailio_ascii:trim(Marker)) of
                         <<"EARLIER">> when After =:= <<>>; binary_part(After, 0, 1) =:= <<" ">> ->
-                            {vanished, true,
-                                parse_uid_ranges(first_word(mailio_ascii:trim_leading(After)))};
+                            vanished_report(true, Bin, mailio_ascii:trim_leading(After));
                         _ ->
                             %% a marker we do not know: not a removal we may act on
                             {other, <<"VANISHED ", Bin/binary>>}
@@ -487,7 +486,15 @@ parse_vanished(Bin) ->
                     {other, <<"VANISHED ", Bin/binary>>}
             end;
         _ ->
-            {vanished, false, parse_uid_ranges(first_word(Trimmed))}
+            vanished_report(false, Bin, Trimmed)
+    end.
+
+%% The UIDs are required, and all of them must be well formed: a report that is
+%% not read in full is not acted on in part.
+vanished_report(Earlier, Whole, Rest) ->
+    case parse_uid_ranges_strict(first_word(Rest)) of
+        {ok, Ranges} -> {vanished, Earlier, Ranges};
+        error -> {other, <<"VANISHED ", Whole/binary>>}
     end.
 
 first_word(Bin) ->
@@ -732,6 +739,18 @@ merge_ranges([R | Rest]) ->
     [R | merge_ranges(Rest)];
 merge_ranges([]) ->
     [].
+
+%% Like parse_uid_ranges/1, but an empty set, or any part that is not a UID or a
+%% range of UIDs, is an error.
+parse_uid_ranges_strict(<<>>) ->
+    error;
+parse_uid_ranges_strict(Bin) ->
+    Parts = binary:split(Bin, <<",">>, [global]),
+    Parsed = [parse_uid_range(P) || P <- Parts],
+    case lists:all(fun(R) -> R =/= false end, Parsed) of
+        true -> {ok, merge_ranges(lists:sort([R || {true, R} <- Parsed]))};
+        false -> error
+    end.
 
 %% @doc How many UIDs the ranges stand for.
 -spec uid_count([{integer(), integer()}]) -> non_neg_integer().

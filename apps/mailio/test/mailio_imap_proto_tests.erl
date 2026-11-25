@@ -396,14 +396,16 @@ vanished_without_marker_test() ->
 %% A UID is 1*DIGIT without a sign and without a leading zero.
 vanished_rejects_things_that_are_not_uids_test() ->
     [
-        ?assertEqual({untagged, {vanished, false, []}}, ?P:parse_response(Wire))
+        ?assertMatch({untagged, {other, <<"VANISHED ", _/binary>>}}, ?P:parse_response(Wire))
      || Wire <- [
             <<"* VANISHED 01">>,
             <<"* VANISHED +2">>,
             <<"* VANISHED 007">>,
             <<"* VANISHED -3">>,
             <<"* VANISHED 0">>,
-            <<"* VANISHED 4294967296">>
+            <<"* VANISHED 4294967296">>,
+            %% one part that is not a UID spoils the report: do not act on half of it
+            <<"* VANISHED 5,abc,7">>
         ]
     ].
 
@@ -417,7 +419,12 @@ vanished_with_an_unknown_marker_is_not_a_removal_test() ->
             <<"* VANISHED (EARLIER FOO) 5">>,
             <<"* VANISHED ( ) 5">>,
             %% the marker is followed by a space
-            <<"* VANISHED (EARLIER)5">>
+            <<"* VANISHED (EARLIER)5">>,
+            %% and by the UIDs: a report without any is not a report
+            <<"* VANISHED (EARLIER)">>,
+            <<"* VANISHED (EARLIER) ">>,
+            <<"* VANISHED ">>,
+            <<"* VANISHED (EARLIER) abc">>
         ]
     ].
 

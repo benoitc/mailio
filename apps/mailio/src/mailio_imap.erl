@@ -33,7 +33,10 @@
     pid := pid(),
     caps := #{atom() => boolean()},
     max_vanished => pos_integer(),
-    listing_window => pos_integer()
+    listing_window => pos_integer(),
+    max_untagged => pos_integer(),
+    max_line => pos_integer(),
+    max_list_commands => pos_integer()
 }.
 -export_type([conn/0]).
 
@@ -48,6 +51,13 @@
 %% Config: `listing_window'.
 -define(LISTING_WINDOW, 10000).
 -define(MAX_COMMANDS, 50).
+%% What one listing may cost in commands in all, whatever the UIDs are: a
+%% mailbox whose UIDs are far apart costs windows, not messages. Config:
+%% `max_list_commands'.
+-define(MAX_LIST_COMMANDS, 100000).
+%% The connection's own defaults (see mailio_imap_conn), for sizing a window.
+-define(CONN_MAX_UNTAGGED, 100000).
+-define(CONN_MAX_LINE, 65536).
 
 -spec connect(map()) -> {ok, conn()} | {error, mailio_error:error_map()}.
 connect(Config) ->
@@ -64,7 +74,10 @@ connect(Config) ->
                         max_vanished => min(
                             maps:get(max_vanished, Config, ?MAX_VANISHED), ?MAX_VANISHED
                         ),
-                        listing_window => max(1, maps:get(listing_window, Config, ?LISTING_WINDOW))
+                        listing_window => max(1, maps:get(listing_window, Config, ?LISTING_WINDOW)),
+                        max_untagged => maps:get(max_untagged, Config, ?CONN_MAX_UNTAGGED),
+                        max_line => maps:get(max_line, Config, ?CONN_MAX_LINE),
+                        max_list_commands => maps:get(max_list_commands, Config, ?MAX_LIST_COMMANDS)
                     }};
                 {ok, _Untagged, {Status, _, Text}} ->
                     mailio_imap_conn:close(Pid),
@@ -157,7 +170,7 @@ use_qresync(Caps, Prev) ->
 %% Plain / CONDSTORE path: EXAMINE, then UID FETCH for new mail and (with
 %% CONDSTORE) CHANGEDSINCE for flag updates. Removals are not detected here.
 plain_changes(#{pid := Pid} = Conn, MailboxId, Prev) ->
-    case do_examine(Pid, MailboxId) of
+    case examine_listing(Pid, MailboxId) of
         {ok, SelInfo} ->
             New = sel_to_state(SelInfo),
             case uidvalidity_changed(Prev, New) of
@@ -179,34 +192,40 @@ qresync_changes(#{pid := Pid} = Conn, MaxVanished, MailboxId, Prev) ->
     UidValidity = maps:get(uidvalidity, Prev),
     ModSeq = maps:get(highestmodseq, Prev),
     case do_examine_qresync(Pid, MaxVanished, MailboxId, UidValidity, ModSeq) of
-        {ok, SelInfo, Vanished, Updated} ->
-            New = sel_to_state(SelInfo),
-            case {uidvalidity_changed(Prev, New), Vanished} of
-                {true, _} ->
-                    {ok, [reset], encode(New), done};
-                {false, too_many} ->
-                    %% A report too long to list: the caller re-reads the mailbox
-                    %% and compares it with what it has.
-                    {ok, [resync], encode(New), done};
-                {false, {ok, Uids}} ->
-                    Removed = [{removed, U} || U <- Uids],
-                    %% the updates are in the EXAMINE answer: only new mail is listed
-                    list_windows(
-                        Conn,
-                        New,
-                        {added, first_uid(maps:get(uidnext, Prev))},
-                        undefined,
-                        lists:reverse(Updated ++ Removed)
-                    )
+        {ok, SelInfo0, Vanished, Updated} ->
+            case ensure_uidnext(Pid, SelInfo0) of
+                {ok, SelInfo} -> qresync_listing(Conn, Prev, SelInfo, Vanished, Updated);
+                Failed -> command_error(Failed)
             end;
         Other ->
             command_error(Other)
     end.
 
+qresync_listing(Conn, Prev, SelInfo, Vanished, Updated) ->
+    New = sel_to_state(SelInfo),
+    case {uidvalidity_changed(Prev, New), Vanished} of
+        {true, _} ->
+            {ok, [reset], encode(New), done};
+        {false, too_many} ->
+            %% A report too long to list: the caller re-reads the mailbox
+            %% and compares it with what it has.
+            {ok, [resync], encode(New), done};
+        {false, {ok, Uids}} ->
+            Removed = [{removed, U} || U <- Uids],
+            %% the updates are in the EXAMINE answer: only new mail is listed
+            list_windows(
+                Conn,
+                New,
+                {added, first_uid(maps:get(uidnext, Prev))},
+                undefined,
+                lists:reverse(Updated ++ Removed)
+            )
+    end.
+
 %% The next call of a listing that did not fit in one: the state says where it
 %% stopped. The mailbox must still be the one it started on.
 continue_listing(#{pid := Pid} = Conn, MailboxId, Prev, {Phase, Next, PrevModSeq}) ->
-    case do_examine(Pid, MailboxId) of
+    case examine_listing(Pid, MailboxId) of
         {ok, SelInfo} ->
             Now = sel_to_state(SelInfo),
             case maps:get(uidvalidity, Now) =:= maps:get(uidvalidity, Prev) of
@@ -228,11 +247,62 @@ continue_listing(#{pid := Pid} = Conn, MailboxId, Prev, {Phase, Next, PrevModSeq
 %% Phases: `added' (new messages) then `updated' (flags changed since
 %% `PrevModSeq', only when it is known and the server has CONDSTORE).
 list_windows(Conn, New, Where, PrevModSeq, AccRev) ->
-    list_windows(Conn, New, Where, PrevModSeq, AccRev, length(AccRev), 0).
+    case listing_cost(Conn, New, Where, PrevModSeq) of
+        Windows when Windows > map_get(max_list_commands, Conn) ->
+            {error, listing_too_sparse_error()};
+        _ ->
+            list_windows(Conn, New, Where, PrevModSeq, AccRev, length(AccRev), 0)
+    end.
+
+%% The windows a listing still needs from where it stands: what it costs is the
+%% span of UIDs it must look at, not the number of messages in it.
+listing_cost(#{caps := Caps} = Conn, New, {Phase, Next}, PrevModSeq) ->
+    Upto = maps:get(uidnext, New) - 1,
+    W = fetch_window(Conn),
+    Flags = maps:get(condstore, Caps, false) orelse maps:get(qresync, Caps, false),
+    Added =
+        case Phase of
+            added -> windows(Next, Upto, W);
+            updated -> 0
+        end,
+    Updated =
+        case PrevModSeq =/= undefined andalso Flags of
+            true ->
+                windows(
+                    case Phase of
+                        updated -> Next;
+                        _ -> 1
+                    end,
+                    Upto,
+                    W
+                );
+            false ->
+                0
+        end,
+    Added + Updated.
+
+windows(From, Upto, _W) when From > Upto -> 0;
+windows(From, Upto, W) -> (Upto - From + W) div W.
+
+listing_too_sparse_error() ->
+    mailio_error_map(imap_listing_too_sparse, listing_too_sparse).
+
+%% A window is as wide as the setting says, but no wider than one command's
+%% answer may be: FETCH answers one line per message, and a SEARCH answer is a
+%% single line of at most eleven bytes per UID.
+fetch_window(Conn) ->
+    Setting = maps:get(listing_window, Conn, ?LISTING_WINDOW),
+    Cap = max(1, maps:get(max_untagged, Conn, ?CONN_MAX_UNTAGGED) div 2),
+    max(1, min(Setting, Cap)).
+
+search_window(Conn) ->
+    Setting = maps:get(listing_window, Conn, ?LISTING_WINDOW),
+    Cap = max(1, (maps:get(max_line, Conn, ?CONN_MAX_LINE) - 64) div 11),
+    max(1, min(Setting, Cap)).
 
 list_windows(#{caps := Caps} = Conn, New, {Phase, Next}, PrevModSeq, AccRev, Count, Cmds) ->
     Upto = maps:get(uidnext, New) - 1,
-    Window = maps:get(listing_window, Conn, ?LISTING_WINDOW),
+    Window = fetch_window(Conn),
     Validity = maps:get(uidvalidity, New),
     Flags = maps:get(condstore, Caps, false) orelse maps:get(qresync, Caps, false),
     case {Phase, Next > Upto} of
@@ -280,11 +350,7 @@ list_window(#{pid := Pid}, added, From, To, Validity, _ModSeq) ->
     end,
     case run(Pid, Cmd) of
         {ok, Untagged, {ok, _, _}} ->
-            {ok, [
-                added_change(Items0, Validity)
-             || {fetch, _Seq, Items0} <- Untagged,
-                proplists:is_defined(uid, Items0)
-            ]};
+            {ok, classify_fetches(Untagged, From, To, Validity)};
         Other ->
             command_error(Other)
     end;
@@ -348,6 +414,32 @@ do_examine_qresync(Pid, MaxVanished, MailboxId, UidValidity, ModSeq) ->
         Other ->
             Other
     end.
+
+%% What a window asked for is new mail. A FETCH for another UID is a flag update
+%% the server volunteered (RFC 3501, section 7): it is that, not new mail, and
+%% one without a UID cannot be matched to anything and is dropped.
+classify_fetches(Untagged, From, To, Validity) ->
+    lists:filtermap(
+        fun
+            ({fetch, _Seq, Items}) ->
+                case proplists:get_value(uid, Items) of
+                    Uid when is_integer(Uid), Uid >= From, Uid =< To ->
+                        {true, added_change(Items, Validity)};
+                    Uid when is_integer(Uid) ->
+                        case proplists:is_defined(flags, Items) of
+                            true ->
+                                {true, {updated, #{uid => Uid, keywords => keywords_of(Items)}}};
+                            false ->
+                                false
+                        end;
+                    _ ->
+                        false
+                end;
+            (_) ->
+                false
+        end,
+        Untagged
+    ).
 
 added_change(Items, Validity) ->
     {added, #{
@@ -561,12 +653,14 @@ unwatch(_Conn, _Ref) ->
 %% List all uids currently present (UID SEARCH ALL).
 -spec list_uids(conn(), binary()) -> {ok, [integer()]} | {error, term()}.
 list_uids(#{pid := Pid} = Conn, MailboxId) ->
-    case do_examine(Pid, MailboxId) of
-        {ok, #{uidnext := UidNext}} when is_integer(UidNext) ->
-            Window = maps:get(listing_window, Conn, ?LISTING_WINDOW),
-            list_uid_windows(Pid, 1, UidNext - 1, Window, []);
-        {ok, _} ->
-            {ok, []};
+    case examine_listing(Pid, MailboxId) of
+        {ok, #{uidnext := UidNext}} ->
+            Upto = UidNext - 1,
+            Window = search_window(Conn),
+            case windows(1, Upto, Window) > maps:get(max_list_commands, Conn, ?MAX_LIST_COMMANDS) of
+                true -> {error, listing_too_sparse_error()};
+                false -> list_uid_windows(Pid, 1, Upto, Window, [])
+            end;
         Other ->
             command_error(Other)
     end.
@@ -589,6 +683,42 @@ list_uid_windows(Pid, From, Upto, Window, AccRev) ->
 %%====================================================================
 %% Selection and cursor helpers
 %%====================================================================
+
+%% EXAMINE for a listing, with a UIDNEXT: RFC 3501 lets a server leave it out.
+examine_listing(Pid, MailboxId) ->
+    case do_examine(Pid, MailboxId) of
+        {ok, Sel} -> ensure_uidnext(Pid, Sel);
+        Other -> Other
+    end.
+
+ensure_uidnext(_Pid, #{uidnext := N} = Sel) when is_integer(N) ->
+    {ok, Sel};
+ensure_uidnext(Pid, Sel) ->
+    case maps:get(exists, Sel, 0) of
+        0 ->
+            {ok, Sel#{uidnext => 1}};
+        _ ->
+            %% one past the highest UID: never lower than the real UIDNEXT, so
+            %% at worst a message is listed twice, never missed
+            case max_uid(Pid) of
+                {ok, Highest} -> {ok, Sel#{uidnext => Highest + 1}};
+                Other -> Other
+            end
+    end.
+
+max_uid(Pid) ->
+    Cmd = fun(T) -> {mailio_imap_proto:uid_fetch(T, <<"*">>, [<<"UID">>]), undefined} end,
+    case run(Pid, Cmd) of
+        {ok, Untagged, {ok, _, _}} ->
+            case
+                [U || {fetch, _, I} <- Untagged, U <- [proplists:get_value(uid, I)], is_integer(U)]
+            of
+                [] -> {error, no_highest_uid};
+                Uids -> {ok, lists:max(Uids)}
+            end;
+        Other ->
+            Other
+    end.
 
 %% Read-write: only for commands that change the mailbox.
 do_select(Pid, MailboxId) ->

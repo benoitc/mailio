@@ -37,6 +37,8 @@
     removing_one_duplicate_in_a_resync_keeps_the_other_uid/1,
     shared_mail_leaves_a_mailbox_with_its_last_uid/1,
     a_reset_on_a_later_page_discards_the_earlier_pages/1,
+    a_reset_is_kept_when_the_adapter_names_no_uidvalidity/1,
+    a_retry_after_a_failed_fetch_stores_both_messages/1,
     a_repeated_cursor_ends_the_sync/1,
     an_endless_listing_is_bounded/1,
     an_adapter_that_cannot_check_uidvalidity_keeps_the_cursor/1
@@ -60,6 +62,8 @@ all() ->
         removing_one_duplicate_in_a_resync_keeps_the_other_uid,
         shared_mail_leaves_a_mailbox_with_its_last_uid,
         a_reset_on_a_later_page_discards_the_earlier_pages,
+        a_reset_is_kept_when_the_adapter_names_no_uidvalidity,
+        a_retry_after_a_failed_fetch_stores_both_messages,
         a_repeated_cursor_ends_the_sync,
         an_endless_listing_is_bounded,
         an_adapter_that_cannot_check_uidvalidity_keeps_the_cursor
@@ -477,7 +481,8 @@ a_reset_on_a_later_page_discards_the_earlier_pages(Config) ->
     Calls = counters:new(1, []),
     Final = state(2, 102),
     application:set_env(mailio_store, script, fun
-        (S) when S =/= initial -> {ok, [resync], S, done};
+        (<<"p1">>) ->
+            {ok, [reset], <<"p2">>, more};
         (initial) ->
             counters:add(Calls, 1, 1),
             case counters:get(Calls, 1) of
@@ -485,8 +490,8 @@ a_reset_on_a_later_page_discards_the_earlier_pages(Config) ->
                 1 -> {ok, [added(100, 1)], <<"p1">>, more};
                 _ -> {ok, [added(100, 2), added(101, 2)], Final, done}
             end;
-        (<<"p1">>) ->
-            {ok, [reset], <<"p2">>, more}
+        (S) ->
+            {ok, [resync], S, done}
     end),
     try
         {ok, _} = mailio_sync_mgr:sync_mailbox(Account, <<"INBOX">>)
@@ -498,6 +503,66 @@ a_reset_on_a_later_page_discards_the_earlier_pages(Config) ->
     ?assertEqual([<<"Reborn one">>, <<"Reborn two">>], Subjects),
     {ok, Cur} = mailio_db:get(Db, <<?ID_SYNC_IMAP, LocalId/binary>>),
     ?assertEqual(Final, maps:get(<<"remote_state">>, Cur)).
+
+%% Same, for an adapter that does not say which UIDVALIDITY a message was listed
+%% under: nothing tells the store that UIDs 100 and 101 are other messages now,
+%% except the reset it was given. It must replace what it had.
+a_reset_is_kept_when_the_adapter_names_no_uidvalidity(Config) ->
+    Account = ?config(account, Config),
+    Db = mailio_account:db_name(Account),
+    Srv = ?config(srv, Config),
+    restart_with(Config, #{}, mailio_failing_adapter),
+    {ok, _} = mailio_sync_mgr:sync_mailbox(Account, <<"INBOX">>),
+    ?assertEqual(2, length(all_emails(Db))),
+    ok = mailio_fake_imap:new_validity(Srv, [<<"Reborn one">>, <<"Reborn two">>]),
+    Calls = counters:new(1, []),
+    Plain = fun(Uid) -> {added, #{uid => Uid, keywords => []}} end,
+    application:set_env(mailio_store, script, fun
+        (<<"p1">>) ->
+            {ok, [reset], <<"p2">>, more};
+        (initial) ->
+            counters:add(Calls, 1, 1),
+            case counters:get(Calls, 1) of
+                1 -> {ok, [Plain(100)], <<"p1">>, more};
+                _ -> {ok, [Plain(100), Plain(101)], state(2, 102), done}
+            end;
+        (S) ->
+            {ok, [resync], S, done}
+    end),
+    try
+        {ok, _} = mailio_sync_mgr:sync_mailbox(Account, <<"INBOX">>)
+    after
+        application:unset_env(mailio_store, script)
+    end,
+    Subjects = lists:sort([maps:get(<<"subject">>, E) || E <- all_emails(Db)]),
+    ?assertEqual([<<"Reborn one">>, <<"Reborn two">>], Subjects).
+
+%% A fetch that fails halfway through a page: the cursor stays, and when the
+%% server recovers the same page is applied again. What was stored the first
+%% time must not make the second time fail.
+a_retry_after_a_failed_fetch_stores_both_messages(Config) ->
+    Account = ?config(account, Config),
+    Db = mailio_account:db_name(Account),
+    Srv = ?config(srv, Config),
+    {ok, LocalId} = ensure_inbox(Account),
+    WriterBefore = whereis_writer(Account),
+    ok = mailio_fake_imap:set_failure(Srv, {body, 101}, true),
+    ?assertMatch({error, _}, mailio_sync_mgr:sync_mailbox(Account, <<"INBOX">>)),
+    ?assertEqual(1, length(all_emails(Db))),
+    ?assertEqual(none, cursor_or_none(Db, LocalId)),
+    ok = mailio_fake_imap:set_failure(Srv, {body, 101}, false),
+    {ok, _} = mailio_sync_mgr:sync_mailbox(Account, <<"INBOX">>),
+    ?assertEqual(2, length(all_emails(Db))),
+    ?assertNotEqual(none, cursor_or_none(Db, LocalId)),
+    {ok, Mbx} = mailio_db:get(Db, <<?ID_MAILBOX, LocalId/binary>>),
+    ?assertEqual(2, maps:get(<<"totalEmails">>, Mbx)),
+    %% the writer was not taken down by the replay
+    ?assertEqual(WriterBefore, whereis_writer(Account)),
+    ?assert(is_process_alive(WriterBefore)).
+
+whereis_writer(Account) ->
+    {ok, Pid} = mailio_registry:lookup({writer, Account}),
+    Pid.
 
 %% An adapter that answers `more' with the cursor it was given is not getting
 %% anywhere: the sync ends instead of asking for ever.

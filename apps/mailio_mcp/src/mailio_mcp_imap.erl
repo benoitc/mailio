@@ -988,10 +988,14 @@ qresync_result(_C, _Account, _Box, #{uv := PUV}, _Old, #{uv := UV}, _Events) whe
     {error, checkpoint_expired};
 qresync_result(C, Account, Box, Prev, Old, Sel, Events) ->
     Ranges = lists:append([R || {vanished, _Earlier, R} <- Events]),
-    case mailio_imap_proto:expand_uid_ranges(Ranges, 100000) of
-        {ok, Vanished} -> qresync_apply(C, Account, Box, Prev, Old, Sel, Events, Vanished);
-        %% a report too long to list: compare the whole mailbox instead
-        {error, too_many} -> fallback
+    Unreadable = [Raw || {other, <<"VANISHED", _/binary>> = Raw} <- Events],
+    case {Unreadable, mailio_imap_proto:expand_uid_ranges(Ranges, 100000)} of
+        {[], {ok, Vanished}} ->
+            qresync_apply(C, Account, Box, Prev, Old, Sel, Events, Vanished);
+        %% a report we cannot read, or one too long to list: it may hide
+        %% removals, so compare the whole mailbox instead
+        _ ->
+            fallback
     end.
 
 qresync_apply(C, Account, Box, Prev, Old, #{exists := Exists} = Sel, Events, Vanished) ->

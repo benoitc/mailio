@@ -39,7 +39,8 @@ Every size a server controls is bounded, so a broken or hostile server cannot ma
 | IMAP line outside a literal | 64 KiB | `max_line` | same |
 | IMAP whole response | 96 MiB | `max_response` | same |
 | IMAP responses one command collects | 100,000 of them and 96 MiB | `max_untagged`, `max_untagged_bytes` | same |
-| IMAP UIDs one sync adapter command lists | 10,000 | `listing_window` | not a limit that fails: a larger mailbox is listed in several windows, and the adapter answers `more` until it is all read |
+| IMAP UIDs one sync adapter command lists | 10,000, cut to half of `max_untagged` for FETCH and to what fits in `max_line` for SEARCH | `listing_window` | not a limit that fails: a larger mailbox is listed in several windows, and the adapter answers `more` until it is all read |
+| IMAP listing commands for one mailbox read | 100,000 | `max_list_commands` | `imap_listing_too_sparse`, nothing is changed: UIDs that are far apart cost windows, not messages |
 | IMAP `VANISHED` report the sync adapter lists one by one | 100,000 UIDs | `max_vanished`, which can only lower it | the adapter returns `resync`: read the mailbox again and keep the new state only when that worked |
 | POP3 listing reply (LIST, UIDL, CAPA) | 32 MiB | `max_list_bytes` | `pop3_response_too_large`, connection closed |
 | POP3 TOP reply | 1 MiB | `max_top_bytes` | same |

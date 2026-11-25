@@ -31,6 +31,11 @@
     a_reset_during_a_listing_is_reported/1,
     uids_are_listed_in_windows/1,
     a_mailbox_larger_than_one_command_may_collect_is_listed/1,
+    a_missing_uidnext_still_lists/1,
+    a_missing_uidnext_and_no_highest_uid_is_an_error/1,
+    unsolicited_updates_are_not_listed_as_new_mail/1,
+    windows_respect_the_line_limit/1,
+    a_sparse_mailbox_has_a_bound_on_the_work/1,
     writes_open_read_write/1
 ]).
 
@@ -51,6 +56,11 @@ all() ->
         a_reset_during_a_listing_is_reported,
         uids_are_listed_in_windows,
         a_mailbox_larger_than_one_command_may_collect_is_listed,
+        a_missing_uidnext_still_lists,
+        a_missing_uidnext_and_no_highest_uid_is_an_error,
+        unsolicited_updates_are_not_listed_as_new_mail,
+        windows_respect_the_line_limit,
+        a_sparse_mailbox_has_a_bound_on_the_work,
         writes_open_read_write
     ].
 
@@ -304,7 +314,68 @@ a_mailbox_larger_than_one_command_may_collect_is_listed(Config) ->
     {Changes, _, _} = read_pages(Conn, initial),
     ?assertEqual(16, length([A || {added, _} = A <- Changes])),
     ?assertEqual({ok, lists:seq(100, 115)}, mailio_imap:list_uids(Conn, <<"INBOX">>)),
-    %% without windows the same mailbox is more than one command may collect
+    %% a window the setting makes too wide is cut to what one command may collect
     mailio_imap:close(Conn),
     Whole = conn_with(Config, #{listing_window => 1000, max_untagged => 10}),
-    ?assertMatch({error, _}, mailio_imap:fetch_changes_since(Whole, <<"INBOX">>, initial, #{})).
+    {Changes2, _, _} = read_pages(Whole, initial),
+    ?assertEqual(16, length([A || {added, _} = A <- Changes2])).
+
+%% RFC 3501 allows a server to leave out UIDNEXT. The highest UID is then asked
+%% for, and a mailbox is never taken for an empty one.
+a_missing_uidnext_still_lists(Config) ->
+    Srv = ?config(srv, Config),
+    ok = mailio_fake_imap:set_option(Srv, no_uidnext, true),
+    Conn = conn_with(Config, #{}),
+    ?assertEqual({ok, [100, 101]}, mailio_imap:list_uids(Conn, <<"INBOX">>)),
+    {ok, Changes, State, done} = mailio_imap:fetch_changes_since(Conn, <<"INBOX">>, initial, #{}),
+    ?assertEqual([100, 101], [U || {added, #{uid := U}} <- Changes]),
+    %% the state it leaves has a UIDNEXT: one past the highest UID seen
+    ?assertEqual(102, mailio_imap_map:state_uidnext(State)).
+
+a_missing_uidnext_and_no_highest_uid_is_an_error(Config) ->
+    Srv = ?config(srv, Config),
+    ok = mailio_fake_imap:set_option(Srv, no_uidnext, true),
+    ok = mailio_fake_imap:set_option(Srv, fail_max_uid, true),
+    Conn = conn_with(Config, #{}),
+    ?assertMatch({error, _}, mailio_imap:list_uids(Conn, <<"INBOX">>)),
+    ?assertMatch({error, _}, mailio_imap:fetch_changes_since(Conn, <<"INBOX">>, initial, #{})).
+
+%% A flag update the server volunteers for a message outside the window is not
+%% new mail.
+unsolicited_updates_are_not_listed_as_new_mail(Config) ->
+    Srv = ?config(srv, Config),
+    ok = mailio_fake_imap:inject(Srv, [<<"* 7 FETCH (UID 9999 FLAGS (\\Seen))">>]),
+    Conn = conn_with(Config, #{}),
+    {ok, Changes, _, done} = mailio_imap:fetch_changes_since(Conn, <<"INBOX">>, initial, #{}),
+    ?assertEqual([100, 101], [U || {added, #{uid := U}} <- Changes]),
+    ?assertEqual([9999], [U || {updated, #{uid := U}} <- Changes]).
+
+%% A window is sized by the limits of the connection, not only by the setting.
+windows_respect_the_line_limit(Config) ->
+    Srv = ?config(srv, Config),
+    [ok = mailio_fake_imap:deliver(Srv, integer_to_binary(N)) || N <- lists:seq(1, 30)],
+    %% a window of 100000 UIDs would be a 350 000 byte SEARCH line and 100000 FETCH lines
+    Conn = conn_with(Config, #{listing_window => 100000, max_line => 200, max_untagged => 20}),
+    ?assertEqual({ok, lists:seq(100, 131)}, mailio_imap:list_uids(Conn, <<"INBOX">>)),
+    {Changes, _, _} = read_pages(Conn, initial),
+    ?assertEqual(32, length([A || {added, _} = A <- Changes])).
+
+%% UIDs that are far apart cost windows, not messages: the work has a bound.
+a_sparse_mailbox_has_a_bound_on_the_work(Config) ->
+    Srv = ?config(srv, Config),
+    ok = mailio_fake_imap:set_uidnext(Srv, 100000),
+    Conn = conn_with(Config, #{listing_window => 100, max_list_commands => 20}),
+    ?assertEqual(
+        {listing_too_sparse}, mailio_error_code(mailio_imap:list_uids(Conn, <<"INBOX">>))
+    ),
+    ?assertEqual(
+        {listing_too_sparse},
+        mailio_error_code(mailio_imap:fetch_changes_since(Conn, <<"INBOX">>, initial, #{}))
+    ),
+    %% a bound that fits the mailbox lists it
+    mailio_imap:close(Conn),
+    Conn2 = conn_with(Config, #{listing_window => 100, max_list_commands => 2000}),
+    ?assertEqual({ok, [100, 101]}, mailio_imap:list_uids(Conn2, <<"INBOX">>)).
+
+mailio_error_code({error, #{detail := #{detail := Why}}}) -> {Why};
+mailio_error_code({error, Why}) -> {Why}.

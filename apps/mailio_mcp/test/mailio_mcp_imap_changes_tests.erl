@@ -208,3 +208,14 @@ no_checkpoint_is_unsupported_test() ->
 pop3_has_no_idle_test() ->
     Acc = #{incoming => #{protocol => pop3}},
     ?assertEqual(unsupported, mailio_mcp_adapter:wait_for_change(Acc, <<"INBOX">>, #{}, 1000)).
+
+%% A VANISHED report that lists nothing is not a report of no removals: the
+%% mailbox is compared in full, and the removal is found.
+an_unreadable_vanished_report_falls_back_to_a_full_comparison_test() ->
+    with(fun(Srv, Acc) ->
+        Snap = baseline(Acc),
+        ok = mailio_fake_imap:expunge(Srv, 100),
+        ok = mailio_fake_imap:set_option(Srv, bad_vanished, true),
+        {ok, R} = changes(Acc, Snap),
+        ?assertEqual([100], maps:get(removed, R))
+    end).

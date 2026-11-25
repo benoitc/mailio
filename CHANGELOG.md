@@ -72,6 +72,21 @@
 - When the same mail is in two mailboxes and is delivered again to one, the
   mailbox no longer keeps a stale copy and a count of one after its last copy is
   gone.
+- Replaying a page after a failed fetch no longer stops the account writer: a
+  message that was already stored under the same number is simply recognised.
+- A server that leaves out the next UID when a mailbox is opened no longer makes
+  a mailbox look empty. The highest UID is asked for instead, and if that fails
+  the update stops with the mail and the position unchanged.
+- When a mailbox is recreated during a read, the store replaces what it holds
+  even when the adapter does not say which identity a message was listed under.
+- A flag update that the server volunteers for a message that was not asked for
+  is no longer taken for new mail.
+- A listing window is cut to what the connection allows for one command, and a
+  mailbox whose numbers are far apart is refused after a bound on the work
+  instead of being searched for ever.
+- A report of vanished messages without a list of numbers, or with one that is
+  not well formed, is no longer acted on in part. Both the store and the MCP
+  server compare the whole mailbox instead.
 - A server report about vanished messages that is malformed, or has a marker
   other than the one defined, is no longer taken as a list of removals. The
   limit on how long such a report may be can only be lowered, not raised.
