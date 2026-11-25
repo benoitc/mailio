@@ -26,7 +26,8 @@
     watch/3,
     unwatch/2,
     list_uids/2,
-    list_uids/3
+    list_uids/3,
+    mailbox_size/2
 ]).
 
 %% A connection handle: the FSM pid plus cached capabilities.
@@ -664,6 +665,15 @@ unwatch(_Conn, _Ref) ->
 -spec list_uids(conn(), binary()) -> {ok, [integer()]} | {error, term()}.
 list_uids(Conn, MailboxId) ->
     list_uids(Conn, MailboxId, #{}).
+
+%% How many messages the server says the mailbox holds.
+-spec mailbox_size(conn(), binary()) -> {ok, non_neg_integer()} | {error, term()}.
+mailbox_size(#{pid := Pid}, MailboxId) ->
+    case do_examine(Pid, MailboxId) of
+        {ok, #{exists := Exists}} when is_integer(Exists) -> {ok, Exists};
+        {ok, _} -> command_error({error, mailbox_size_unknown});
+        Other -> command_error(Other)
+    end.
 
 %% A listing is only an inventory if it agrees with the mailbox: the number of
 %% UIDs found must be the number of messages the server said it holds when it

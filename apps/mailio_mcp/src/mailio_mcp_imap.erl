@@ -1109,7 +1109,23 @@ full_changes(C, Account, Box, Sel, Prev, Cap, Cur) ->
             }};
         #{flags := Old} ->
             Added = lists:sort([U || U <- maps:keys(Cur), not maps:is_key(U, Old)]),
-            Removed = lists:sort([U || U <- maps:keys(Old), not maps:is_key(U, Cur)]),
+            %% A capped read lists only the newest messages. A UID below the
+            %% lowest one it lists may well still be there: only those within
+            %% what was listed are known to be gone.
+            Lowest =
+                case Cur =:= #{} of
+                    true -> 0;
+                    false -> lists:min(maps:keys(Cur))
+                end,
+            Floor =
+                case Exists > Cap of
+                    true -> Lowest;
+                    false -> 0
+                end,
+            Removed = lists:sort([
+                U
+             || U <- maps:keys(Old), not maps:is_key(U, Cur), U >= Floor
+            ]),
             Updated = lists:sort([
                 U
              || {U, F} <- maps:to_list(Cur),

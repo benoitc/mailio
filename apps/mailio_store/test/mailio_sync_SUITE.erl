@@ -63,6 +63,10 @@
     a_connection_that_gave_up_is_replaced/1,
     a_shared_read_email_is_not_unread_in_the_second_mailbox/1,
     a_mapping_of_the_intermediate_build_is_still_found/1,
+    a_full_read_that_misses_messages_removes_nothing/1,
+    an_idle_sync_that_finds_a_dead_connection_keeps_the_watch/1,
+    a_sink_answers_ok_past_the_size_limit/1,
+    a_removal_that_failed_between_the_email_and_the_counter_is_repaired/1,
 
     opaque_ids_are_synced_and_reconciled/1,
     an_unreliable_listing_does_not_remove_local_mail/1,
@@ -115,6 +119,10 @@ all() ->
         a_connection_that_gave_up_is_replaced,
         a_shared_read_email_is_not_unread_in_the_second_mailbox,
         a_mapping_of_the_intermediate_build_is_still_found,
+        a_full_read_that_misses_messages_removes_nothing,
+        an_idle_sync_that_finds_a_dead_connection_keeps_the_watch,
+        a_sink_answers_ok_past_the_size_limit,
+        a_removal_that_failed_between_the_email_and_the_counter_is_repaired,
 
         opaque_ids_are_synced_and_reconciled,
         an_unreliable_listing_does_not_remove_local_mail,
@@ -715,11 +723,13 @@ a_full_resync_removes_more_than_one_chunk_of_mappings(Config) ->
     ?assertEqual({1201, 1201}, mailbox_counts(Account, LocalId)),
     %% the server has nothing
     application:set_env(mailio_store, script, fun(_) -> {ok, [], state(1, 5000), done} end),
+    application:set_env(mailio_store, mailbox_size, 0),
     try
         {ok, S} = mailio_sync_mgr:sync_mailbox(Account, <<"INBOX">>),
         ?assertEqual(1201, maps:get(removed, S))
     after
-        application:unset_env(mailio_store, script)
+        application:unset_env(mailio_store, script),
+        application:unset_env(mailio_store, mailbox_size)
     end,
     ?assertEqual(0, length(all_emails(Db))),
     ?assertEqual({0, 0}, mailbox_counts(Account, LocalId)),
@@ -993,11 +1003,13 @@ a_removal_on_a_later_page_of_a_full_read_is_applied(Config) ->
         (<<"p1">>) -> {ok, [{removed, 100}], Final, done};
         (S) -> {ok, [], S, done}
     end),
+    application:set_env(mailio_store, mailbox_size, 1),
     try
         {ok, S} = mailio_sync_mgr:sync_mailbox(Account, <<"INBOX">>),
         ?assertEqual(1, maps:get(removed, S))
     after
-        application:unset_env(mailio_store, script)
+        application:unset_env(mailio_store, script),
+        application:unset_env(mailio_store, mailbox_size)
     end,
     ?assertEqual([<<"Second message">>], subjects(Account)),
     ?assertEqual({error, not_found}, mailio_account_writer:lookup_uid(Account, LocalId, 100)),
@@ -1020,10 +1032,12 @@ a_streamed_message_is_stored_whole(Config) ->
         Sink(Body),
         {ok, #{size => byte_size(Head) + byte_size(Body)}}
     end),
+    application:set_env(mailio_store, mailbox_size, 1),
     try
         {ok, _} = mailio_sync_mgr:sync_mailbox(Account, <<"INBOX">>)
     after
         application:unset_env(mailio_store, script),
+        application:unset_env(mailio_store, mailbox_size),
         application:unset_env(mailio_store, fetch_override)
     end,
     [Email] = all_emails(Db),
@@ -1133,6 +1147,115 @@ a_mapping_of_the_intermediate_build_is_still_found(Config) ->
     after
         application:unset_env(mailio_store, opaque_messages)
     end.
+
+%% A full read that lists one message of the two the server holds is not an
+%% inventory: nothing is removed on it, and the cursor stays.
+a_full_read_that_misses_messages_removes_nothing(Config) ->
+    Account = ?config(account, Config),
+    Db = mailio_account:db_name(Account),
+    restart_with(Config, #{}, mailio_failing_adapter),
+    {ok, _} = mailio_sync_mgr:sync_mailbox(Account, <<"INBOX">>),
+    {ok, LocalId} = ensure_inbox(Account),
+    Before = cursor(Db, LocalId),
+    application:set_env(mailio_store, script, fun
+        (initial) -> {ok, [added(100, 1)], state(1, 102), done};
+        (S) -> {ok, [resync], S, done}
+    end),
+    try
+        ?assertMatch({error, _}, mailio_sync_mgr:sync_mailbox(Account, <<"INBOX">>))
+    after
+        application:unset_env(mailio_store, script)
+    end,
+    ?assertEqual(2, length(all_emails(Db))),
+    ?assertEqual(Before, cursor(Db, LocalId)).
+
+%% The sync an IDLE wake-up runs may find the connection dead: it is replaced and
+%% the watch goes on the new one.
+an_idle_sync_that_finds_a_dead_connection_keeps_the_watch(Config) ->
+    Account = ?config(account, Config),
+    application:set_env(mailio_store, connect_count, 0),
+    restart_with(Config, #{}, mailio_failing_adapter),
+    {ok, _} = ensure_inbox(Account),
+    ok = mailio_sync_mgr:watch_inbox(Account),
+    IdlesBefore = idle_count(?config(srv, Config)),
+    Before = application:get_env(mailio_store, connect_count, 0),
+    application:set_env(mailio_store, script, fun(_) ->
+        {error, #{code => imap_command_failed, detail => response_too_large}}
+    end),
+    Mgr = mailio_registry:whereis_name({sync, Account}),
+    Mgr ! {imap_idle_event, self(), changed},
+    wait_until(fun() -> application:get_env(mailio_store, connect_count, 0) > Before end, 3000),
+    application:unset_env(mailio_store, script),
+    %% the new connection is watched
+    Srv = ?config(srv, Config),
+    wait_until(fun() -> idle_count(Srv) > IdlesBefore end, 3000),
+    application:unset_env(mailio_store, connect_count).
+
+%% The email left the mailbox and the counter write was refused: the mailbox is
+%% marked, and the next removal counts it again from the emails.
+a_removal_that_failed_between_the_email_and_the_counter_is_repaired(Config) ->
+    Account = ?config(account, Config),
+    Db = mailio_account:db_name(Account),
+    Mail = fun(N) ->
+        <<"From: a@x\r\nTo: b@y\r\nSubject: m", N/binary, "\r\nMessage-ID: <", N/binary,
+            "@x>\r\n\r\nbody ", N/binary, "\r\n">>
+    end,
+    {ok, One} = mailio_account_writer:ingest(Account, <<"mbA">>, Mail(<<"one">>), #{uid => 1}),
+    {ok, _} = mailio_account_writer:ingest(Account, <<"mbA">>, Mail(<<"two">>), #{uid => 2}),
+    {ok, _} = mailio_account_writer:ingest(Account, <<"mbB">>, Mail(<<"one">>), #{uid => 1}),
+    %% the state after the email was written and before the counter was
+    {ok, Mbx} = mailio_db:get(Db, <<?ID_MAILBOX, "mbA">>),
+    {ok, _, _} = mailio_db:put(Db, Mbx#{<<"counters_dirty">> => true}),
+    {ok, Email} = mailio_db:get(Db, <<"email/", One/binary>>),
+    {ok, _, _} = mailio_db:put(Db, mailio_email:remove_mailbox(Email, <<"mbA">>)),
+    ?assertEqual({2, 2}, mailbox_counts(Account, <<"mbA">>)),
+    %% the removal is tried again
+    ok = mailio_account_writer:remove_uid(Account, <<"mbA">>, 1),
+    ?assertEqual({1, 1}, mailbox_counts(Account, <<"mbA">>)),
+    ?assertEqual({ok, []}, mailio_fsck:check_counters(Account)),
+    {ok, Fixed} = mailio_db:get(Db, <<?ID_MAILBOX, "mbA">>),
+    ?assertNot(maps:is_key(<<"counters_dirty">>, Fixed)).
+
+idle_count(Srv) ->
+    length([
+        C
+     || C <- mailio_fake_imap:commands(Srv), re:run(C, <<"^IDLE">>, [caseless]) =/= nomatch
+    ]).
+
+%% The sink always answers ok, as its contract says, and a message past the size
+%% limit is refused when the adapter is done.
+a_sink_answers_ok_past_the_size_limit(Config) ->
+    Account = ?config(account, Config),
+    Db = mailio_account:db_name(Account),
+    restart_with(Config, #{}, mailio_failing_adapter),
+    {ok, LocalId} = ensure_inbox(Account),
+    Big = binary:copy(<<"x">>, 64),
+    application:set_env(mailio_store, sync_max_message_bytes, 16),
+    application:set_env(mailio_store, script, fun
+        (initial) -> {ok, [added(100, 1)], state(1, 101), done};
+        (S) -> {ok, [], S, done}
+    end),
+    Self = self(),
+    application:set_env(mailio_store, fetch_override, fun(_Uid, Sink) ->
+        Self ! {sink_answer, Sink([Big, Big])},
+        {ok, #{size => 128}}
+    end),
+    try
+        ?assertMatch({error, _}, mailio_sync_mgr:sync_mailbox(Account, <<"INBOX">>))
+    after
+        application:unset_env(mailio_store, script),
+        application:unset_env(mailio_store, fetch_override),
+        application:unset_env(mailio_store, sync_max_message_bytes)
+    end,
+    ?assertEqual(
+        ok,
+        receive
+            {sink_answer, A} -> A
+        after 1000 -> no_answer
+        end
+    ),
+    ?assertEqual([], all_emails(Db)),
+    ?assertEqual(none, cursor_or_none(Db, LocalId)).
 
 %% What an older version stored for `Id': the UID as it is, under the old prefix.
 to_legacy_mapping(Db, Account, LocalId, Id) ->

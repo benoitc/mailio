@@ -239,6 +239,8 @@ a_snapshot_stays_within_its_limit_test() ->
             ?assertEqual(2, maps:size(maps:get(flags, Snap))),
             ok = mailio_fake_imap:deliver(Srv, <<"Third message">>),
             {ok, R} = changes(Acc, Snap),
+            %% nothing was removed: UID 100 fell out of the capped window only
+            ?assertEqual([], maps:get(removed, R)),
             Snap2 = maps:get(snapshot, R),
             ?assert(maps:size(maps:get(flags, Snap2)) =< 2),
             ?assert(maps:get(partial, Snap2))

@@ -42,6 +42,8 @@
     mailbox_map = #{} :: #{binary() => binary()},
     watch :: term() | undefined,
     watch_mailbox :: binary() | undefined,
+    %% a watch was asked for: it is taken up again on a new connection
+    watch_wanted = false :: boolean(),
     %% reconnect schedule while the server is unreachable
     retry_min = ?RETRY_MIN :: pos_integer(),
     retry_max = ?RETRY_MAX :: pos_integer(),
@@ -141,14 +143,14 @@ handle_cast(_Msg, State) ->
 %% only connection in IDLE, which cannot also run commands, so stop the
 %% watch, resync, and resume watching.
 handle_info(reconnect, State) ->
-    {noreply, try_connect(State#state{retry_timer = undefined})};
+    {noreply, resume_watch(try_connect(State#state{retry_timer = undefined}))};
 handle_info({imap_idle_event, _Pid, _Event}, #state{conn = undefined} = State) ->
     {noreply, State};
 handle_info({imap_idle_event, _Pid, _Event}, State) ->
     State1 = stop_watch(State),
-    {_Result, State2} = do_sync_mailbox(State1#state.watch_mailbox, State1),
-    State3 = start_watch(State2),
-    {noreply, State3};
+    {Result, State2} = do_sync_mailbox(State1#state.watch_mailbox, State1),
+    %% a connection that gave up is replaced, and the watch goes on it
+    {noreply, resume_watch(retire_dead_connection(Result, State2))};
 handle_info(_Info, State) ->
     {noreply, State}.
 
@@ -399,7 +401,17 @@ full_resync(Mode, ImapName, LocalId, State, Attempts, Replace) ->
     end,
     case mailio_sync_pages:walk(Fetch, initial, page_opts(), Acc0, Step) of
         {ok, #{seen := Seen, removed := Removed, stats := Stats}, Final} ->
-            finish_resync(State, LocalId, Seen, Removed, Stats, Final);
+            case inventory_matches(State, ImapName, Seen, Removed) of
+                true ->
+                    finish_resync(State, LocalId, Seen, Removed, Stats, Final);
+                false ->
+                    %% what was listed is not what the server holds: the mailbox
+                    %% changed under the read, or the read missed messages. Nothing
+                    %% is removed on that; the read is made again.
+                    full_resync(Mode, ImapName, LocalId, State, Attempts - 1, Replace);
+                {error, _} = Error ->
+                    Error
+            end;
         {stopped, {signal, Signal}} ->
             %% remembered on disk: a restart of this process must not forget it
             Signal =:= reset andalso mark_reset(State#state.db, LocalId),
@@ -410,6 +422,22 @@ full_resync(Mode, ImapName, LocalId, State, Attempts, Replace) ->
             Error;
         {error, _} = Error ->
             Error
+    end.
+
+%% The number of messages the read listed (those still there at its end) is the
+%% number the server holds. An adapter that cannot say how many it holds cannot
+%% be checked.
+inventory_matches(#state{adapter = Adapter, conn = Conn}, ImapName, Seen, Gone) ->
+    case adapter_has(Adapter, mailbox_size, 2) of
+        false ->
+            true;
+        true ->
+            Lookup = mailio_uid_set:to_lookup(Seen),
+            Dropped = length([U || U <- maps:keys(Gone), mailio_uid_set:member(U, Lookup)]),
+            case Adapter:mailbox_size(Conn, ImapName) of
+                {ok, N} -> N =:= mailio_uid_set:size(Seen) - Dropped;
+                {error, _} = Error -> Error
+            end
     end.
 
 resync_page(State, ImapName, LocalId, Replace, Changes, #{seen := Seen, stats := Stats} = Acc) ->
@@ -738,15 +766,14 @@ fetch_raw(Adapter, Conn, ImapName, Uid, Validity) ->
     Total = atomics:new(1, []),
     %% Every chunk is kept, in the order it came, up to a limit: a message that
     %% is longer than that is refused as it arrives, not after it is held.
+    %% The sink always answers ok (its contract). Past the limit it keeps nothing
+    %% more, and the fetch ends as an error once the adapter returns.
     Sink = fun(Bytes) ->
-        Bin = iolist_to_binary(Bytes),
-        case atomics:add_get(Total, 1, byte_size(Bin)) =< Max of
-            true ->
-                Self ! {Ref, Bin},
-                ok;
-            false ->
-                {error, message_too_large}
-        end
+        case atomics:add_get(Total, 1, iolist_size(Bytes)) =< Max of
+            true -> Self ! {Ref, iolist_to_binary(Bytes)};
+            false -> ok
+        end,
+        ok
     end,
     Result =
         case {Validity, adapter_has(Adapter, fetch_message, 5)} of
@@ -830,7 +857,7 @@ do_watch(#state{caps = Caps} = State) ->
             State1 = start_watch(State),
             case State1#state.watch of
                 undefined -> {{error, watch_failed}, State1};
-                _ -> {ok, State1}
+                _ -> {ok, State1#state{watch_wanted = true}}
             end
     end.
 
@@ -847,6 +874,12 @@ start_watch(
         {error, _} -> State
     end;
 start_watch(State) ->
+    State.
+
+%% The watch of a connection that was replaced is started again.
+resume_watch(#state{watch_wanted = true, conn = Conn} = State) when Conn =/= undefined ->
+    start_watch(State);
+resume_watch(State) ->
     State.
 
 stop_watch(#state{adapter = Adapter, conn = Conn, watch = Ref} = State) when

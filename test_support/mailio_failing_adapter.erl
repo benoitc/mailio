@@ -15,6 +15,7 @@
     fetch_message/4,
     fetch_message/5,
     list_uids/2,
+    mailbox_size/2,
     watch/3,
     unwatch/2
 ]).
@@ -37,6 +38,12 @@ fetch_message(Conn, Box, Uid, Sink, Opts) ->
         undefined -> mailio_imap:fetch_message(Conn, Box, Uid, Sink, Opts)
     end.
 list_uids(Conn, Box) -> mailio_imap:list_uids(Conn, Box).
+%% what the server holds, when a scripted read lists something else
+mailbox_size(Conn, Box) ->
+    case application:get_env(mailio_store, mailbox_size) of
+        {ok, N} -> {ok, N};
+        undefined -> mailio_imap:mailbox_size(Conn, Box)
+    end.
 watch(Conn, Box, Pid) -> mailio_imap:watch(Conn, Box, Pid).
 unwatch(Conn, Ref) -> mailio_imap:unwatch(Conn, Ref).
 

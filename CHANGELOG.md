@@ -186,6 +186,17 @@
   server refuses to list flags, and its saved snapshot never grows past the
   configured size.
 - Mappings written by the intermediate build of this branch are still found.
+- A full read now checks the number of messages it listed against the number
+  the server holds before it removes anything it did not list. A read that
+  missed messages is made again, and after a few tries the sync stops with an
+  error and keeps local mail.
+- The mail changes tool no longer reports old messages as removed when its
+  snapshot only covers the newest ones.
+- A removal that fails between updating the email and updating the counter is
+  repaired by the next change to that mailbox.
+- A sync started by an IDLE notification replaces a dead connection and keeps
+  watching on the new one. The message sink handed to adapters always answers
+  ok, as documented, and a message over the size limit is refused afterwards.
 - Reading mail now opens mailboxes read-only. Only changing flags, moving and
   deleting open them for writing.
 - Unsubscribing from events no longer leaks a monitor.

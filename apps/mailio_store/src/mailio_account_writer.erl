@@ -171,6 +171,7 @@ init(AccountId) ->
     {ok, #state{account_id = AccountId, db = Db, emit_cursor = Hlc}}.
 
 handle_call({ingest, MailboxId, Raw, Opts}, _From, State) ->
+    ok = repair_dirty(State, MailboxId),
     Result = do_ingest(State#state.db, MailboxId, Raw, Opts),
     State1 = emit_events(State),
     {reply, Result, State1};
@@ -179,11 +180,17 @@ handle_call({apply_flags, MailboxId, EmailId, ServerKeywords}, _From, State) ->
     State1 = emit_events(State),
     {reply, Result, State1};
 handle_call({remove_uid, MailboxId, Uid}, _From, State) ->
-    Result = do_remove_uid(State#state.db, MailboxId, Uid),
+    Result = safely(fun() ->
+        ok = repair_dirty(State, MailboxId),
+        do_remove_uid(State#state.db, MailboxId, Uid)
+    end),
     State1 = emit_events(State),
     {reply, Result, State1};
 handle_call({remove_member, MailboxId, EmailId}, _From, State) ->
-    Result = do_remove_member(State#state.db, MailboxId, EmailId),
+    Result = safely(fun() ->
+        ok = repair_dirty(State, MailboxId),
+        do_remove_member(State#state.db, MailboxId, EmailId)
+    end),
     State1 = emit_events(State),
     {reply, Result, State1};
 handle_call({migrate_blobs, Opts}, _From, State) ->
@@ -201,6 +208,29 @@ handle_call({patch, EmailId, Patch}, _From, State) ->
     {reply, Result, State1};
 handle_call(_Req, _From, State) ->
     {reply, {error, unknown_request}, State}.
+
+%% A write that the database refuses is an error to the caller, with the work
+%% left in a state the next call repairs, not a crash that loses the reply.
+safely(Fun) ->
+    try
+        Fun()
+    catch
+        error:{badmatch, {error, Reason}} -> {error, Reason};
+        error:{badmatch, Other} -> {error, Other}
+    end.
+
+%% A removal marks the mailbox before it changes the email and clears the mark when
+%% the counter is written. A mark that is still there means a removal stopped in
+%% between and the counter may be wrong: it is counted again from the emails, once,
+%% before anything else is written to the mailbox.
+repair_dirty(#state{db = Db, account_id = AccountId}, MailboxId) ->
+    case mailio_db:get(Db, <<?ID_MAILBOX, MailboxId/binary>>) of
+        {ok, #{<<"counters_dirty">> := true}} ->
+            {Total, Unread} = maps:get(MailboxId, mailio_fsck:recompute(AccountId), {0, 0}),
+            do_set_counters(Db, MailboxId, Total, Unread);
+        _ ->
+            ok
+    end.
 
 handle_cast(_Msg, State) ->
     {noreply, State}.
@@ -312,11 +342,13 @@ do_remove_member(Db, MailboxId, EmailId) ->
             ),
             case mailio_email:in_mailbox(Email, MailboxId) of
                 true ->
-                    %% the email and the counter in one write: either both say
-                    %% the email left, or neither does
+                    %% mark, change the email, write the counter and clear the
+                    %% mark: a stop anywhere leaves the mark, and the next write
+                    %% to the mailbox counts it again from the emails
                     WasSeen = mailio_email:is_seen(Email),
-                    Counter = bumped_mailbox(Db, MailboxId, -1, seen_delta(WasSeen, true) * -1),
-                    {ok, _} = mailio_db:put_batch_strict(Db, [Email1 | Counter]);
+                    ok = mark_dirty(Db, MailboxId),
+                    {ok, _, _} = mailio_db:put(Db, Email1),
+                    ok = settle_counter(Db, MailboxId, -1, seen_delta(WasSeen, true) * -1);
                 false ->
                     ok
             end,
@@ -413,7 +445,10 @@ do_set_counters(Db, MailboxId, Total, Unread) ->
     DocId = <<?ID_MAILBOX, MailboxId/binary>>,
     case mailio_db:get(Db, DocId) of
         {ok, Doc} ->
-            Doc1 = Doc#{<<"totalEmails">> => Total, <<"unreadEmails">> => Unread},
+            Doc1 = maps:remove(
+                <<"counters_dirty">>,
+                Doc#{<<"totalEmails">> => Total, <<"unreadEmails">> => Unread}
+            ),
             {ok, _, _} = mailio_db:put(Db, Doc1),
             ok;
         {error, not_found} ->
@@ -631,6 +666,26 @@ bump_mailbox(Db, MailboxId, TotalDelta, UnreadDelta) ->
     case bumped_mailbox(Db, MailboxId, TotalDelta, UnreadDelta) of
         [Doc1] ->
             {ok, _, _} = mailio_db:put(Db, Doc1),
+            ok;
+        [] ->
+            ok
+    end.
+
+mark_dirty(Db, MailboxId) ->
+    DocId = <<?ID_MAILBOX, MailboxId/binary>>,
+    case mailio_db:get(Db, DocId) of
+        {ok, Doc} ->
+            {ok, _, _} = mailio_db:put(Db, Doc#{<<"counters_dirty">> => true}),
+            ok;
+        {error, not_found} ->
+            ok
+    end.
+
+%% The counters moved and the mark gone, in the one write of the mailbox.
+settle_counter(Db, MailboxId, TotalDelta, UnreadDelta) ->
+    case bumped_mailbox(Db, MailboxId, TotalDelta, UnreadDelta) of
+        [Doc] ->
+            {ok, _, _} = mailio_db:put(Db, maps:remove(<<"counters_dirty">>, Doc)),
             ok;
         [] ->
             ok
