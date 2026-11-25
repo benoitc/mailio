@@ -298,9 +298,11 @@ logical_length(Buffer, Pos, Limits, Scan) ->
                     true -> 1;
                     false -> 0
                 end,
+            %% The response will be at least what is here plus its CRLF, so one that
+            %% cannot end within the limit is refused now.
             case
                 Size - Pos - Pending > map_get(line, Limits) orelse
-                    Size - Pending > map_get(response, Limits)
+                    Size - Pending + 2 > map_get(response, Limits)
             of
                 true -> {error, response_too_large};
                 false -> {more, {Pos, max(Pos, Size - 1)}}
@@ -474,7 +476,7 @@ parse_vanished(Bin) ->
             case binary:split(Rest, <<")">>) of
                 [Marker, After] ->
                     case mailio_ascii:upper(mailio_ascii:trim(Marker)) of
-                        <<"EARLIER">> ->
+                        <<"EARLIER">> when After =:= <<>>; binary_part(After, 0, 1) =:= <<" ">> ->
                             {vanished, true,
                                 parse_uid_ranges(first_word(mailio_ascii:trim_leading(After)))};
                         _ ->

@@ -415,7 +415,9 @@ vanished_with_an_unknown_marker_is_not_a_removal_test() ->
             <<"* VANISHED (FOO) 5">>,
             <<"* VANISHED (EARLIER 5">>,
             <<"* VANISHED (EARLIER FOO) 5">>,
-            <<"* VANISHED ( ) 5">>
+            <<"* VANISHED ( ) 5">>,
+            %% the marker is followed by a space
+            <<"* VANISHED (EARLIER)5">>
         ]
     ].
 
@@ -432,3 +434,15 @@ max_response_applies_while_waiting_for_the_line_end_test() ->
         {error, response_too_large},
         ?P:read_response(<<First/binary, " and a long tail that never ends">>, Opts2, St)
     ).
+
+%% The CR that ends the buffer counts toward the response limit, so the answer
+%% does not depend on where the packet ended.
+max_response_counts_a_trailing_cr_test() ->
+    Opts = #{max_response => 8},
+    ?assertMatch({more, _}, ?P:read_response(<<"012345">>, Opts, start)),
+    {more, St} = ?P:read_response(<<"012345\r">>, Opts, start),
+    ?assertMatch({ok, <<"012345">>, <<>>}, ?P:read_response(<<"012345\r\n">>, Opts, St)),
+    %% one more byte and the response can no longer fit, with or without the CR
+    ?assertEqual({error, response_too_large}, ?P:read_response(<<"0123456">>, Opts, start)),
+    ?assertEqual({error, response_too_large}, ?P:read_response(<<"0123456\r">>, Opts, start)),
+    ?assertEqual({error, response_too_large}, ?P:read_response(<<"0123456\r\n">>, Opts, start)).

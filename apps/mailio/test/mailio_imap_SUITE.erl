@@ -26,6 +26,11 @@
     a_refused_listing_is_an_error/1,
     max_vanished_can_only_be_lowered/1,
     a_message_is_fetched_only_under_its_uidvalidity/1,
+    a_large_mailbox_is_listed_in_windows/1,
+    flag_changes_are_listed_in_windows/1,
+    a_reset_during_a_listing_is_reported/1,
+    uids_are_listed_in_windows/1,
+    a_mailbox_larger_than_one_command_may_collect_is_listed/1,
     writes_open_read_write/1
 ]).
 
@@ -41,6 +46,11 @@ all() ->
         a_refused_listing_is_an_error,
         max_vanished_can_only_be_lowered,
         a_message_is_fetched_only_under_its_uidvalidity,
+        a_large_mailbox_is_listed_in_windows,
+        flag_changes_are_listed_in_windows,
+        a_reset_during_a_listing_is_reported,
+        uids_are_listed_in_windows,
+        a_mailbox_larger_than_one_command_may_collect_is_listed,
         writes_open_read_write
     ].
 
@@ -214,3 +224,87 @@ a_message_is_fetched_only_under_its_uidvalidity(Config) ->
     ?assertEqual(imap_uidvalidity_changed, mailio_error:code({error, Err})),
     %% without the option the old behaviour stays
     ?assertMatch({ok, _}, mailio_imap:fetch_message(Conn, <<"INBOX">>, 100, Sink)).
+
+%% Reconnect with other settings (the fake serves one connection at a time).
+conn_with(Config, Extra) ->
+    try
+        mailio_imap:close(?config(conn, Config))
+    catch
+        _:_ -> ok
+    end,
+    Srv = ?config(srv, Config),
+    Cfg = #{
+        host => <<"127.0.0.1">>,
+        port => mailio_fake_imap:port(Srv),
+        tls => false,
+        username => <<"u">>,
+        password => <<"p">>
+    },
+    {ok, Conn} = mailio_imap:connect(maps:merge(Cfg, Extra)),
+    Conn.
+
+%% Read until the adapter says it is done, collecting the pages.
+read_pages(Conn, State) -> read_pages(Conn, State, [], 0).
+
+read_pages(Conn, State, Acc, N) when N < 100 ->
+    case mailio_imap:fetch_changes_since(Conn, <<"INBOX">>, State, #{}) of
+        {ok, Changes, Next, done} -> {lists:append(lists:reverse([Changes | Acc])), Next, N + 1};
+        {ok, Changes, Next, more} -> read_pages(Conn, Next, [Changes | Acc], N + 1)
+    end.
+
+a_large_mailbox_is_listed_in_windows(Config) ->
+    Srv = ?config(srv, Config),
+    [ok = mailio_fake_imap:deliver(Srv, integer_to_binary(N)) || N <- lists:seq(1, 3)],
+    Conn = conn_with(Config, #{listing_window => 2}),
+    {Changes, Final, Pages} = read_pages(Conn, initial),
+    ?assertEqual([100, 101, 102, 103, 104], [U || {added, #{uid := U}} <- Changes]),
+    ?assert(Pages >= 3),
+    %% every message says which UIDVALIDITY it was listed under
+    ?assertEqual([1], lists:usort([V || {added, #{uidvalidity := V}} <- Changes])),
+    %% the last state is an ordinary one, and nothing is left to list
+    ?assertEqual(105, mailio_imap_map:state_uidnext(Final)),
+    {ok, [], _, done} = mailio_imap:fetch_changes_since(Conn, <<"INBOX">>, Final, #{}).
+
+flag_changes_are_listed_in_windows(Config) ->
+    Srv = ?config(srv, Config),
+    [ok = mailio_fake_imap:deliver(Srv, integer_to_binary(N)) || N <- lists:seq(1, 3)],
+    Conn0 = conn_with(Config, #{listing_window => 2}),
+    %% the flag windows are for a server without QRESYNC: read as one without
+    #{caps := Caps} = Conn0,
+    Conn = Conn0#{caps := Caps#{qresync := false}},
+    {_, State, _} = read_pages(Conn, initial),
+    [ok = mailio_fake_imap:set_flags(Srv, U, [<<"\\Seen">>]) || U <- [100, 101, 102, 103, 104]],
+    {Changes, _Final, Pages} = read_pages(Conn, State),
+    ?assertEqual([100, 101, 102, 103, 104], lists:sort([U || {updated, #{uid := U}} <- Changes])),
+    ?assert(Pages >= 2).
+
+%% The mailbox is recreated between two calls of one listing.
+a_reset_during_a_listing_is_reported(Config) ->
+    Srv = ?config(srv, Config),
+    [ok = mailio_fake_imap:deliver(Srv, integer_to_binary(N)) || N <- lists:seq(1, 3)],
+    Conn = conn_with(Config, #{listing_window => 2}),
+    {ok, First, State, more} = mailio_imap:fetch_changes_since(Conn, <<"INBOX">>, initial, #{}),
+    ?assertNotEqual([], First),
+    ok = mailio_fake_imap:new_validity(Srv, [<<"Reborn">>]),
+    ?assertMatch(
+        {ok, [reset], _, done}, mailio_imap:fetch_changes_since(Conn, <<"INBOX">>, State, #{})
+    ).
+
+uids_are_listed_in_windows(Config) ->
+    Srv = ?config(srv, Config),
+    [ok = mailio_fake_imap:deliver(Srv, integer_to_binary(N)) || N <- lists:seq(1, 3)],
+    Conn = conn_with(Config, #{listing_window => 2}),
+    ?assertEqual({ok, [100, 101, 102, 103, 104]}, mailio_imap:list_uids(Conn, <<"INBOX">>)).
+
+%% One command may collect only so much; a window keeps each one under it.
+a_mailbox_larger_than_one_command_may_collect_is_listed(Config) ->
+    Srv = ?config(srv, Config),
+    [ok = mailio_fake_imap:deliver(Srv, integer_to_binary(N)) || N <- lists:seq(1, 14)],
+    Conn = conn_with(Config, #{listing_window => 3, max_untagged => 10}),
+    {Changes, _, _} = read_pages(Conn, initial),
+    ?assertEqual(16, length([A || {added, _} = A <- Changes])),
+    ?assertEqual({ok, lists:seq(100, 115)}, mailio_imap:list_uids(Conn, <<"INBOX">>)),
+    %% without windows the same mailbox is more than one command may collect
+    mailio_imap:close(Conn),
+    Whole = conn_with(Config, #{listing_window => 1000, max_untagged => 10}),
+    ?assertMatch({error, _}, mailio_imap:fetch_changes_since(Whole, <<"INBOX">>, initial, #{})).

@@ -255,7 +255,11 @@ do_remove_member(Db, MailboxId, EmailId) ->
     case mailio_db:get(Db, DocId) of
         {ok, Email} ->
             WasSeen = mailio_email:is_seen(Email),
-            Email1 = mailio_email:remove_mailbox(Email, MailboxId),
+            %% leaving a mailbox also forgets its UIDs: a stale one would keep a
+            %% later redelivery looking like a copy that is still there
+            Email1 = mailio_email:clear_imap_entries(
+                mailio_email:remove_mailbox(Email, MailboxId), MailboxId
+            ),
             bump_mailbox(Db, MailboxId, -1, seen_delta(WasSeen, true) * -1),
             case mailio_email:mailbox_ids(Email1) of
                 [] ->

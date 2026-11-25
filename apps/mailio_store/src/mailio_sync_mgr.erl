@@ -277,28 +277,48 @@ run_sync(
     #state{adapter = Adapter, conn = Conn, db = Db} = State
 ) ->
     RemoteState = load_cursor(Db, LocalId),
-    case Adapter:fetch_changes_since(Conn, ImapName, RemoteState, #{}) of
-        {ok, Changes, NewState, _More} ->
-            case resync_mode(Changes) of
-                none ->
-                    Stats = apply_changes(State, ImapName, LocalId, Changes),
-                    store_cursor(Db, LocalId, NewState),
+    Fetch = fun(Cursor) -> Adapter:fetch_changes_since(Conn, ImapName, Cursor, #{}) end,
+    %% Each page is applied, and only then is the cursor it leads to kept: a page
+    %% that cannot be applied leaves the cursor where it was, so it is tried again.
+    Step = fun(Changes, Next, Stats) ->
+        case resync_mode(Changes) of
+            none ->
+                case apply_changes(State, ImapName, LocalId, Changes, Stats) of
+                    {ok, Stats1} ->
+                        store_cursor(Db, LocalId, Next),
+                        {ok, Stats1};
+                    {error, _} = Error ->
+                        {stop, Error}
+                end;
+            Mode ->
+                {stop, {signal, Mode}}
+        end
+    end,
+    case mailio_sync_pages:walk(Fetch, RemoteState, page_opts(), new_stats(), Step) of
+        {ok, Stats, _Final} ->
+            {{ok, Stats}, State};
+        {stopped, {signal, Mode}} ->
+            %% The changes cannot be applied one by one. The mailbox is read in
+            %% full and brought in line first; the cursor moves only when that
+            %% worked, so a failure is retried, not skipped.
+            case full_resync(Mode, ImapName, LocalId, State) of
+                {ok, Stats, FullState} ->
+                    store_cursor(Db, LocalId, FullState),
                     {{ok, Stats}, State};
-                Mode ->
-                    %% The changes cannot be applied one by one. The mailbox is
-                    %% read in full and brought in line first; the cursor moves
-                    %% only when that worked, so a failure is retried, not skipped.
-                    case full_resync(Mode, ImapName, LocalId, State) of
-                        {ok, Stats, FullState} ->
-                            store_cursor(Db, LocalId, FullState),
-                            {{ok, Stats}, State};
-                        {error, Reason} ->
-                            {{error, Reason}, State}
-                    end
+                {error, Reason} ->
+                    {{error, Reason}, State}
             end;
+        {stopped, {error, Reason}} ->
+            {{error, Reason}, State};
         {error, Reason} ->
             {{error, Reason}, State}
     end.
+
+page_opts() ->
+    #{max_pages => mailio_config:get(sync_max_pages, 100000)}.
+
+new_stats() ->
+    #{added => 0, updated => 0, removed => 0, reset => 0}.
 
 %% `reset': the UIDs we hold mean other messages now (UIDVALIDITY changed).
 %% `resync': there were too many changes to list.
@@ -341,14 +361,19 @@ full_resync(Mode, ImapName, LocalId, State) ->
         end
     end.
 
-%% Every page of a full read of the mailbox, until the adapter says it is done.
+%% Every page of a full read, to the last one. A page that says the mailbox was
+%% recreated (`reset') while it was being read discards what was read so far and
+%% starts again: nothing from two generations is mixed.
 read_all(State, ImapName) ->
-    read_all(State, ImapName, initial, []).
+    read_all(State, ImapName, 3).
 
-read_all(#state{adapter = Adapter, conn = Conn} = State, ImapName, Cursor, Acc) ->
-    case Adapter:fetch_changes_since(Conn, ImapName, Cursor, #{}) of
-        {ok, Changes, Next, done} -> {ok, Acc ++ Changes, Next};
-        {ok, Changes, Next, more} -> read_all(State, ImapName, Next, Acc ++ Changes);
+read_all(_State, _ImapName, 0) ->
+    {error, mailbox_keeps_changing};
+read_all(#state{adapter = Adapter, conn = Conn} = State, ImapName, Attempts) ->
+    Fetch = fun(Cursor) -> Adapter:fetch_changes_since(Conn, ImapName, Cursor, #{}) end,
+    case mailio_sync_pages:collect(Fetch, initial, page_opts()) of
+        {ok, _, _} = Ok -> Ok;
+        {stopped, {signal, _}} -> read_all(State, ImapName, Attempts - 1);
         {error, _} = Error -> Error
     end.
 
@@ -412,32 +437,40 @@ same_generation(Db, EmailId, LocalId, Uid, Info) ->
             end
     end.
 
-apply_changes(State, ImapName, LocalId, Changes) ->
-    lists:foldl(
-        fun(Change, Stats) ->
-            apply_change(State, ImapName, LocalId, Change, Stats)
+apply_changes(State, ImapName, LocalId, Changes, Stats0) ->
+    {Stats, Failures} = lists:foldl(
+        fun(Change, {Stats, Failed}) ->
+            case apply_change(State, ImapName, LocalId, Change, Stats) of
+                {error, _} = Error -> {Stats, [Error | Failed]};
+                Stats1 -> {Stats1, Failed}
+            end
         end,
-        #{added => 0, updated => 0, removed => 0, reset => 0},
+        {Stats0, []},
         Changes
-    ).
+    ),
+    case Failures of
+        [] -> {ok, Stats};
+        [{error, Why} | _] -> {error, {sync_incomplete, length(Failures), Why}}
+    end.
 
 apply_change(State, ImapName, LocalId, {added, Info}, Stats) ->
     case ingest_added(State, ImapName, LocalId, Info) of
         ok -> bump(Stats, added);
-        {error, _} -> Stats
+        {error, _} = Error -> Error
     end;
 apply_change(State, _ImapName, LocalId, {updated, Info}, Stats) ->
     #state{account_id = AccountId} = State,
     Uid = maps:get(uid, Info),
     case mailio_account_writer:lookup_uid(AccountId, LocalId, Uid) of
         {ok, EmailId} ->
-            _ = mailio_account_writer:apply_flags(
-                AccountId,
-                LocalId,
-                EmailId,
-                maps:get(keywords, Info, [])
-            ),
-            bump(Stats, updated);
+            case
+                mailio_account_writer:apply_flags(
+                    AccountId, LocalId, EmailId, maps:get(keywords, Info, [])
+                )
+            of
+                ok -> bump(Stats, updated);
+                {error, _} = Error -> Error
+            end;
         {error, not_found} ->
             Stats
     end;
@@ -532,10 +565,17 @@ fetch_raw(Adapter, Conn, ImapName, Uid, Validity) ->
         ok
     end,
     Result =
-        case Validity =/= undefined andalso adapter_has(Adapter, fetch_message, 5) of
-            %% held across two reads: only valid under the same UIDVALIDITY
-            true -> Adapter:fetch_message(Conn, ImapName, Uid, Sink, #{uidvalidity => Validity});
-            false -> Adapter:fetch_message(Conn, ImapName, Uid, Sink)
+        case {Validity, adapter_has(Adapter, fetch_message, 5)} of
+            %% A UID listed under a UIDVALIDITY is only the same message under it
+            %% (RFC 3501, section 2.3.1.1). An adapter that cannot check that
+            %% cannot be trusted with the message: it is an error, and the cursor
+            %% stays, so a retry still sees the message.
+            {undefined, _} ->
+                Adapter:fetch_message(Conn, ImapName, Uid, Sink);
+            {_, true} ->
+                Adapter:fetch_message(Conn, ImapName, Uid, Sink, #{uidvalidity => Validity});
+            {_, false} ->
+                {error, {adapter_cannot_check_uidvalidity, Adapter}}
         end,
     case Result of
         {ok, _} ->

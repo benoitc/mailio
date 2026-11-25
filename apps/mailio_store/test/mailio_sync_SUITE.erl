@@ -34,7 +34,12 @@
     failed_body_fetch_keeps_the_cursor/1,
     recreated_mailbox_during_resync_replaces_reused_uids/1,
     removing_one_duplicate_keeps_the_other_uid/1,
-    removing_one_duplicate_in_a_resync_keeps_the_other_uid/1
+    removing_one_duplicate_in_a_resync_keeps_the_other_uid/1,
+    shared_mail_leaves_a_mailbox_with_its_last_uid/1,
+    a_reset_on_a_later_page_discards_the_earlier_pages/1,
+    a_repeated_cursor_ends_the_sync/1,
+    an_endless_listing_is_bounded/1,
+    an_adapter_that_cannot_check_uidvalidity_keeps_the_cursor/1
 ]).
 
 all() ->
@@ -52,7 +57,12 @@ all() ->
         failed_body_fetch_keeps_the_cursor,
         recreated_mailbox_during_resync_replaces_reused_uids,
         removing_one_duplicate_keeps_the_other_uid,
-        removing_one_duplicate_in_a_resync_keeps_the_other_uid
+        removing_one_duplicate_in_a_resync_keeps_the_other_uid,
+        shared_mail_leaves_a_mailbox_with_its_last_uid,
+        a_reset_on_a_later_page_discards_the_earlier_pages,
+        a_repeated_cursor_ends_the_sync,
+        an_endless_listing_is_bounded,
+        an_adapter_that_cannot_check_uidvalidity_keeps_the_cursor
     ].
 
 init_per_suite(Config) ->
@@ -419,6 +429,140 @@ removing_one_duplicate_in_a_resync_keeps_the_other_uid(Config) ->
     {ok, S2} = mailio_sync_mgr:sync_mailbox(Account, <<"INBOX">>),
     ?assertEqual(0, maps:get(added, S2)),
     ?assertEqual(0, maps:get(removed, S2)).
+
+%% The same mail in INBOX and Archive. When it is delivered again to INBOX and
+%% then loses its last UID there, INBOX must not still hold it or count it.
+shared_mail_leaves_a_mailbox_with_its_last_uid(Config) ->
+    Account = ?config(account, Config),
+    Db = mailio_account:db_name(Account),
+    Raw = <<"From: a@x\r\nTo: b@y\r\nSubject: shared\r\nMessage-ID: <s1@x>\r\n\r\nbody\r\n">>,
+    Inbox = <<"mbx-inbox">>,
+    Archive = <<"mbx-archive">>,
+    Total = fun(M) ->
+        {ok, Doc} = mailio_db:get(Db, <<?ID_MAILBOX, M/binary>>),
+        maps:get(<<"totalEmails">>, Doc)
+    end,
+    {ok, Id} = mailio_account_writer:ingest(Account, Inbox, Raw, #{uid => 5, uidvalidity => 1}),
+    {ok, Id} = mailio_account_writer:ingest(Account, Archive, Raw, #{uid => 9, uidvalidity => 1}),
+    ?assertEqual({1, 1}, {Total(Inbox), Total(Archive)}),
+    %% INBOX loses its only UID: the email stays in Archive only
+    ok = mailio_account_writer:remove_uid(Account, Inbox, 5),
+    ?assertEqual({0, 1}, {Total(Inbox), Total(Archive)}),
+    %% delivered to INBOX again, then gone again
+    {ok, Id} = mailio_account_writer:ingest(Account, Inbox, Raw, #{uid => 6, uidvalidity => 1}),
+    ?assertEqual({1, 1}, {Total(Inbox), Total(Archive)}),
+    ok = mailio_account_writer:remove_uid(Account, Inbox, 6),
+    ?assertEqual({0, 1}, {Total(Inbox), Total(Archive)}),
+    {ok, Email} = mailio_db:get(Db, <<?ID_EMAIL, Id/binary>>),
+    ?assertEqual([], mailio_email:imap_entries(Email, Inbox)),
+    ?assertNot(mailio_email:in_mailbox(Email, Inbox)),
+    ?assert(mailio_email:in_mailbox(Email, Archive)).
+
+state(Validity, UidNext) ->
+    mailio_imap_map:encode_state(#{uidvalidity => Validity, uidnext => UidNext, highestmodseq => 10}).
+
+added(Uid, Validity) ->
+    {added, #{uid => Uid, uidvalidity => Validity, keywords => []}}.
+
+%% A page of a full read says the mailbox was recreated. What the earlier pages
+%% listed belongs to the old one and is not used: the read starts again.
+a_reset_on_a_later_page_discards_the_earlier_pages(Config) ->
+    Account = ?config(account, Config),
+    Db = mailio_account:db_name(Account),
+    Srv = ?config(srv, Config),
+    restart_with(Config, #{}, mailio_failing_adapter),
+    {ok, _} = mailio_sync_mgr:sync_mailbox(Account, <<"INBOX">>),
+    {ok, LocalId} = inbox_local_id(Account),
+    ok = mailio_fake_imap:new_validity(Srv, [<<"Reborn one">>, <<"Reborn two">>]),
+    Calls = counters:new(1, []),
+    Final = state(2, 102),
+    application:set_env(mailio_store, script, fun
+        (S) when S =/= initial -> {ok, [resync], S, done};
+        (initial) ->
+            counters:add(Calls, 1, 1),
+            case counters:get(Calls, 1) of
+                %% first read: a page, and then the news that the mailbox changed
+                1 -> {ok, [added(100, 1)], <<"p1">>, more};
+                _ -> {ok, [added(100, 2), added(101, 2)], Final, done}
+            end;
+        (<<"p1">>) ->
+            {ok, [reset], <<"p2">>, more}
+    end),
+    try
+        {ok, _} = mailio_sync_mgr:sync_mailbox(Account, <<"INBOX">>)
+    after
+        application:unset_env(mailio_store, script)
+    end,
+    ?assertEqual(2, counters:get(Calls, 1)),
+    Subjects = lists:sort([maps:get(<<"subject">>, E) || E <- all_emails(Db)]),
+    ?assertEqual([<<"Reborn one">>, <<"Reborn two">>], Subjects),
+    {ok, Cur} = mailio_db:get(Db, <<?ID_SYNC_IMAP, LocalId/binary>>),
+    ?assertEqual(Final, maps:get(<<"remote_state">>, Cur)).
+
+%% An adapter that answers `more' with the cursor it was given is not getting
+%% anywhere: the sync ends instead of asking for ever.
+a_repeated_cursor_ends_the_sync(Config) ->
+    Account = ?config(account, Config),
+    Db = mailio_account:db_name(Account),
+    restart_with(Config, #{}, mailio_failing_adapter),
+    {ok, _} = mailio_sync_mgr:sync_mailbox(Account, <<"INBOX">>),
+    {ok, LocalId} = inbox_local_id(Account),
+    Before = cursor(Db, LocalId),
+    application:set_env(mailio_store, script, fun(Cursor) -> {ok, [], Cursor, more} end),
+    try
+        {T, R} = timer:tc(fun() -> mailio_sync_mgr:sync_mailbox(Account, <<"INBOX">>) end),
+        ?assertEqual({error, repeated_cursor}, R),
+        ?assert(T < 5000000)
+    after
+        application:unset_env(mailio_store, script)
+    end,
+    ?assertEqual(Before, cursor(Db, LocalId)).
+
+an_endless_listing_is_bounded(Config) ->
+    Account = ?config(account, Config),
+    restart_with(Config, #{}, mailio_failing_adapter),
+    {ok, _} = mailio_sync_mgr:sync_mailbox(Account, <<"INBOX">>),
+    Counter = counters:new(1, []),
+    application:set_env(mailio_store, sync_max_pages, 40),
+    application:set_env(mailio_store, script, fun(_) ->
+        counters:add(Counter, 1, 1),
+        N = counters:get(Counter, 1),
+        {ok, [], state(1, 1000 + N), more}
+    end),
+    try
+        ?assertEqual({error, too_many_pages}, mailio_sync_mgr:sync_mailbox(Account, <<"INBOX">>))
+    after
+        application:unset_env(mailio_store, script),
+        application:unset_env(mailio_store, sync_max_pages)
+    end,
+    ?assert(counters:get(Counter, 1) =< 41).
+
+%% UIDs listed under a UIDVALIDITY are only trusted to an adapter that can check
+%% it when the message is fetched. Without that, the cursor stays and the mail is
+%% still there for a retry.
+an_adapter_that_cannot_check_uidvalidity_keeps_the_cursor(Config) ->
+    Account = ?config(account, Config),
+    Db = mailio_account:db_name(Account),
+    restart_with(Config, #{}, mailio_plain_adapter),
+    {ok, LocalId0} = ensure_inbox(Account),
+    ?assertMatch({error, _}, mailio_sync_mgr:sync_mailbox(Account, <<"INBOX">>)),
+    ?assertEqual(0, length(all_emails(Db))),
+    ?assertEqual(none, cursor_or_none(Db, LocalId0)),
+    %% an adapter that can check it sees the mail on the retry
+    restart_with(Config, #{}, mailio_imap),
+    {ok, _} = mailio_sync_mgr:sync_mailbox(Account, <<"INBOX">>),
+    ?assertEqual(2, length(all_emails(Db))).
+
+ensure_inbox(Account) ->
+    %% the mailbox list is read when the sync manager connects
+    wait_until(fun() -> inbox_local_id(Account) =/= not_found end, 3000),
+    inbox_local_id(Account).
+
+cursor_or_none(Db, LocalId) ->
+    case mailio_db:get(Db, <<?ID_SYNC_IMAP, LocalId/binary>>) of
+        {ok, _} -> cursor(Db, LocalId);
+        {error, not_found} -> none
+    end.
 
 restart_with(Config, Extra) ->
     restart_with(Config, Extra, mailio_imap).

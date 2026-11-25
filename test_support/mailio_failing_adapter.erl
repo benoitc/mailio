@@ -29,7 +29,15 @@ list_uids(Conn, Box) -> mailio_imap:list_uids(Conn, Box).
 watch(Conn, Box, Pid) -> mailio_imap:watch(Conn, Box, Pid).
 unwatch(Conn, Ref) -> mailio_imap:unwatch(Conn, Ref).
 
-fetch_changes_since(Conn, Box, initial, Opts) ->
+fetch_changes_since(Conn, Box, Cursor, Opts) ->
+    %% a scripted answer, for a test that needs pages or states the server
+    %% would not give
+    case application:get_env(mailio_store, script) of
+        {ok, Script} -> Script(Cursor);
+        undefined -> unscripted(Conn, Box, Cursor, Opts)
+    end.
+
+unscripted(Conn, Box, initial, Opts) ->
     %% a hook for a test to change the server between two reads
     case application:get_env(mailio_store, before_full_read) of
         {ok, Hook} -> Hook();
@@ -39,5 +47,5 @@ fetch_changes_since(Conn, Box, initial, Opts) ->
         true -> {error, {imap, simulated_failure}};
         false -> mailio_imap:fetch_changes_since(Conn, Box, initial, Opts)
     end;
-fetch_changes_since(Conn, Box, State, Opts) ->
+unscripted(Conn, Box, State, Opts) ->
     mailio_imap:fetch_changes_since(Conn, Box, State, Opts).

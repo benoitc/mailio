@@ -416,7 +416,7 @@ handle_uid(Sock, Tag, Args, State) ->
         <<"STORE">> ->
             handle_uid_store(Sock, Tag, Rest, State);
         <<"SEARCH">> ->
-            handle_uid_search(Sock, Tag, State);
+            handle_uid_search(Sock, Tag, Rest, State);
         _ ->
             tagged(Sock, Tag, <<"BAD unsupported UID command">>),
             {continue, State}
@@ -426,7 +426,11 @@ handle_uid_fetch(Sock, Tag, Rest, #{messages := Ms} = State) ->
     {SetBin, ItemsBin} = split1(Rest),
     case changedsince(ItemsBin) of
         {ok, Since} ->
-            [send_changed(Sock, M) || {_, _, _, MS, _} = M <- Ms, MS > Since],
+            {Lo0, Hi0} = set_range(SetBin),
+            [
+                send_changed(Sock, M)
+             || {_, U0, _, MS, _} = M <- Ms, MS > Since, U0 >= Lo0, U0 =< Hi0
+            ],
             tagged(Sock, Tag, <<"OK UID FETCH done">>),
             {continue, State};
         none ->
@@ -459,11 +463,11 @@ handle_uid_fetch_data(Sock, Tag, SetBin, ItemsBin, #{messages := Ms} = State) ->
             tagged(Sock, Tag, <<"OK UID FETCH done">>),
             {continue, State};
         false ->
-            Lo = set_low(SetBin),
+            {Lo, Hi} = set_range(SetBin),
             %% like a real server: `N:*' always includes the highest
             %% message, even when N is past it (RFC 3501, section 9)
             Hits =
-                case [M || {_, Uid, _, _, _} = M <- Ms, Uid >= Lo] of
+                case [M || {_, Uid, _, _, _} = M <- Ms, Uid >= Lo, Uid =< Hi] of
                     [] when
                         Ms =/= [], binary_part(SetBin, byte_size(SetBin), -1) =:= <<"*">>
                     ->
@@ -476,8 +480,18 @@ handle_uid_fetch_data(Sock, Tag, SetBin, ItemsBin, #{messages := Ms} = State) ->
             {continue, State}
     end.
 
-handle_uid_search(Sock, Tag, #{messages := Ms} = State) ->
-    Uids = lists:join(<<" ">>, [integer_to_binary(U) || {_, U, _, _, _} <- Ms]),
+handle_uid_search(Sock, Tag, Rest, #{messages := Ms} = State) ->
+    {Lo, Hi} =
+        case
+            re:run(string:uppercase(Rest), <<"UID ([0-9:*]+)">>, [{capture, all_but_first, binary}])
+        of
+            {match, [Set]} -> set_range(Set);
+            nomatch -> {0, infinity}
+        end,
+    Uids = lists:join(<<" ">>, [
+        integer_to_binary(U)
+     || {_, U, _, _, _} <- Ms, U >= Lo, U =< Hi
+    ]),
     send(Sock, [<<"* SEARCH ">>, Uids, <<"\r\n">>]),
     tagged(Sock, Tag, <<"OK UID SEARCH done">>),
     {continue, State}.
@@ -572,6 +586,16 @@ update_flags(State, Ms, Uid, Op, Flags) ->
 %% message; BODYSTRUCTURE and header-field sections are metadata.
 is_body_fetch(ItemsBin) ->
     re:run(string:uppercase(ItemsBin), <<"BODY(\\.PEEK)?\\[\\]">>) =/= nomatch.
+
+%% The two ends of the first range of a set, `*' being no upper end.
+set_range(SetBin) ->
+    Clean = unparen(SetBin),
+    First = hd(binary:split(Clean, <<",">>, [global])),
+    case binary:split(First, <<":">>) of
+        [Lo, <<"*">>] -> {binary_to_integer(Lo), infinity};
+        [Lo, Hi] -> {binary_to_integer(Lo), binary_to_integer(Hi)};
+        [One] -> {binary_to_integer(One), binary_to_integer(One)}
+    end.
 
 set_low(SetBin) ->
     Clean = unparen(SetBin),

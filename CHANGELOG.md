@@ -58,6 +58,20 @@
 - Errors while the store reads a mailbox again, lists its local mail, updates
   flags or stores a message now stop the update before the new position is
   kept.
+- The store now reads a large mailbox in pages. A reading that makes no
+  progress, or never ends, is stopped with an error instead of keeping the
+  process busy, and the pages are put together without copying them over and
+  over. If the mailbox is recreated while it is being read, the pages read so
+  far are discarded and the reading starts again.
+- The IMAP adapter lists a mailbox in windows, so a mailbox with more messages
+  than one command may collect no longer ends the connection. This also applies
+  to listing UIDs.
+- A message the store cannot fetch no longer lets the position move past it: the
+  position stays and the next update tries again. This includes an adapter that
+  cannot check the mailbox identity when it fetches.
+- When the same mail is in two mailboxes and is delivered again to one, the
+  mailbox no longer keeps a stale copy and a count of one after its last copy is
+  gone.
 - A server report about vanished messages that is malformed, or has a marker
   other than the one defined, is no longer taken as a list of removals. The
   limit on how long such a report may be can only be lowered, not raised.

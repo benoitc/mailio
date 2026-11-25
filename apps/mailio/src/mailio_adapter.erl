@@ -43,7 +43,13 @@
         uid := term(),
         keywords := [binary()],
         internal_date => integer(),
-        size => non_neg_integer()
+        size => non_neg_integer(),
+        %% The UIDVALIDITY the message was listed under. An adapter that supplies
+        %% it must also implement fetch_message/5, so that the message is only
+        %% fetched under that UIDVALIDITY (RFC 3501, section 2.3.1.1). An adapter
+        %% whose message ids stay valid across reads leaves it out and needs only
+        %% fetch_message/4.
+        uidvalidity => non_neg_integer()
     }}
     | {updated, #{uid := term(), keywords := [binary()]}}
     %% uid
