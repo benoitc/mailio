@@ -14,7 +14,7 @@
 -module(mailio_fake_imap).
 
 -export([start/0, start/1, stop/1, port/1, commands/1]).
--export([last_flags/2, set_flags/3, deliver/2, expunge/2]).
+-export([last_flags/2, set_flags/3, deliver/2, expunge/2, new_validity/2]).
 
 -record(srv, {port, pid, ref, tab}).
 
@@ -69,6 +69,10 @@ deliver(Srv, Subject) -> call(Srv, {deliver, Subject}, ok).
 %% @doc Expunge a message by uid.
 expunge(Srv, Uid) -> call(Srv, {expunge, Uid}, ok).
 
+%% @doc The mailbox is recreated: a new UIDVALIDITY and these messages, with
+%% UIDs that start again at 100, so old UIDs now mean other messages.
+new_validity(Srv, Subjects) -> call(Srv, {new_validity, Subjects}, ok).
+
 call(#srv{pid = Pid, ref = Ref}, Msg, Reply) ->
     Pid ! {control, self(), Ref, Msg},
     receive
@@ -112,6 +116,7 @@ init_state() ->
         selected => undefined,
         idling => undefined,
         vanished => [],
+        uidvalidity => 1,
         uidnext => 102
     }.
 
@@ -162,6 +167,18 @@ handle_control(Sock, Ref, {deliver, Subject}, #{messages := Ms, uidnext := Uid} 
     Ms1 = Ms ++ [{Seq, Uid, [], Next, Raw}],
     State1 = State#{messages => Ms1, uidnext => Uid + 1},
     notify_exists(Sock, State1),
+    {{ok, Ref, ok}, State1};
+handle_control(_Sock, Ref, {new_validity, Subjects}, #{uidvalidity := V} = State) ->
+    Ms = [
+        {Seq, 99 + Seq, [], 4 + Seq, msg(<<"nv", (integer_to_binary(Seq))/binary, "@x">>, S)}
+     || {Seq, S} <- lists:zip(lists:seq(1, length(Subjects)), Subjects)
+    ],
+    State1 = State#{
+        messages => Ms,
+        vanished => [],
+        uidvalidity => V + 1,
+        uidnext => 100 + length(Subjects)
+    },
     {{ok, Ref, ok}, State1};
 handle_control(Sock, Ref, {expunge, Uid}, #{messages := Ms, vanished := V} = State) ->
     Next = highestmodseq(State) + 1,
@@ -335,8 +352,15 @@ handle_select(Sock, Tag, Args, State) ->
     Mailbox = unquote(first_token(Args)),
     send_select(Sock, State),
     case qresync_modseq(Args) of
-        {ok, Since} -> emit_qresync(Sock, State, Since);
-        none -> ok
+        {ok, Validity, Since} ->
+            %% a client that remembers another UIDVALIDITY is told nothing
+            %% about what it missed: the new validity says it all
+            case Validity =:= maps:get(uidvalidity, State, 1) of
+                true -> emit_qresync(Sock, State, Since);
+                false -> ok
+            end;
+        none ->
+            ok
     end,
     tagged(Sock, Tag, <<"OK [READ-WRITE] SELECT completed">>),
     {continue, State#{selected => Mailbox}}.
@@ -348,7 +372,8 @@ send_select(Sock, #{messages := Ms, uidnext := UidNext} = State) ->
     send(Sock, <<"* FLAGS (\\Answered \\Flagged \\Deleted \\Seen \\Draft)\r\n">>),
     send(Sock, <<"* ", N/binary, " EXISTS\r\n">>),
     send(Sock, <<"* 0 RECENT\r\n">>),
-    send(Sock, <<"* OK [UIDVALIDITY 1] UIDs valid\r\n">>),
+    Validity = integer_to_binary(maps:get(uidvalidity, State, 1)),
+    send(Sock, <<"* OK [UIDVALIDITY ", Validity/binary, "] UIDs valid\r\n">>),
     send(Sock, <<"* OK [UIDNEXT ", UN/binary, "] Predicted next UID\r\n">>),
     send(Sock, <<"* OK [HIGHESTMODSEQ ", HMS/binary, "] Highest\r\n">>).
 
@@ -368,11 +393,11 @@ qresync_modseq(Args) ->
     case
         re:run(
             string:uppercase(Args),
-            <<"QRESYNC \\([0-9]+ ([0-9]+)\\)">>,
+            <<"QRESYNC \\(([0-9]+) ([0-9]+)\\)">>,
             [{capture, all_but_first, binary}]
         )
     of
-        {match, [N]} -> {ok, binary_to_integer(N)};
+        {match, [V, N]} -> {ok, binary_to_integer(V), binary_to_integer(N)};
         nomatch -> none
     end.
 

@@ -183,3 +183,57 @@ a_response_in_small_pieces_is_framed_test() ->
     ?assertMatch({ok, [{exists, 5}], {ok, _, _}}, noop(C)),
     mailio_imap_conn:close(C),
     gen_tcp:close(L).
+
+%% After a terminal failure the connection must not keep what the command had
+%% collected.
+a_failed_connection_releases_what_it_collected_test() ->
+    {Port, _, L} = serve(fun(S, Tag) ->
+        Line = [<<"* OK ">>, binary:copy(<<"x">>, 1000), <<"\r\n">>],
+        [gen_tcp:send(S, Line) || _ <- lists:seq(1, 4000)],
+        gen_tcp:send(S, [Tag, <<" OK done\r\n">>])
+    end),
+    C = connect(Port, #{max_untagged_bytes => 2000000}),
+    ?assertEqual({error, response_too_large}, noop(C)),
+    erlang:garbage_collect(C),
+    %% the large binaries the process still points at, and its own heap
+    {binary, Bins} = process_info(C, binary),
+    Held = lists:sum([Size || {_Id, Size, _Refs} <- Bins]),
+    {memory, M} = process_info(C, memory),
+    ?assert(Held + M < 500000),
+    gen_tcp:close(L).
+
+%% An IDLE stop in progress is answered when the connection fails terminally.
+an_idle_stop_is_answered_when_the_connection_fails_test() ->
+    {ok, LSock} = gen_tcp:listen(0, [binary, {active, false}, {packet, line}, {reuseaddr, true}]),
+    {ok, Port} = inet:port(LSock),
+    spawn_link(fun() ->
+        {ok, S} = gen_tcp:accept(LSock),
+        gen_tcp:send(S, <<"* OK ready\r\n">>),
+        idle_script(S)
+    end),
+    C = connect(Port, #{max_line => 500}),
+    {ok, _, _} = mailio_imap_conn:run(
+        C, fun(T) -> {mailio_imap_proto:examine(T, <<"INBOX">>), undefined} end, 3000
+    ),
+    ok = mailio_imap_conn:idle_start(C, self()),
+    ?assertEqual({error, response_too_large}, mailio_imap_conn:idle_stop(C)),
+    gen_tcp:close(LSock).
+
+idle_script(S) ->
+    case gen_tcp:recv(S, 0, 5000) of
+        {ok, <<"DONE\r\n">>} ->
+            %% a line that never ends, longer than the limit
+            gen_tcp:send(S, binary:copy(<<"y">>, 2000)),
+            timer:sleep(500);
+        {ok, Line} ->
+            [Tag, Cmd | _] = binary:split(binary:replace(Line, <<"\r\n">>, <<>>), <<" ">>, [global]),
+            case string:uppercase(Cmd) of
+                <<"LOGIN">> -> gen_tcp:send(S, [Tag, <<" OK in\r\n">>]);
+                <<"EXAMINE">> -> gen_tcp:send(S, [<<"* 0 EXISTS\r\n">>, Tag, <<" OK done\r\n">>]);
+                <<"IDLE">> -> gen_tcp:send(S, <<"+ idling\r\n">>);
+                _ -> ok
+            end,
+            idle_script(S);
+        {error, _} ->
+            ok
+    end.

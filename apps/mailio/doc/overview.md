@@ -51,6 +51,18 @@ Every size a server controls is bounded, so a broken or hostile server cannot ma
 
 Timeouts are 30 seconds for connecting, for each POP3 and SMTP reply and for the IMAP greeting, STARTTLS and login (`command_timeout`). An IMAP command has the deadline you give `run/3`, 30 seconds by default; when the server has not answered by then you get `{error, imap_timeout}` and the connection is dropped, because a late answer could no longer be matched to its command. Credential providers have 10 seconds (`credentials_timeout`). TLS certificates and host names are verified unless you set `verify => verify_none`.
 
+## Changes that break callers
+
+These affect code that calls `mailio_imap_proto` directly, which is public API.
+
+| Before | Now |
+|---|---|
+| `parse_uid_set/1` returned every UID of a set as a list | `parse_uid_ranges/1` returns sorted, merged `{Lo, Hi}` ranges (either end may come first). `expand_uid_ranges(Ranges, Max)` returns `{ok, List}` or `{error, too_many}`, and `uid_count/1` counts them |
+| `{vanished, Earlier, [Uid]}` | `{vanished, Earlier, [{Lo, Hi}]}` |
+| `read_response/3` took a byte offset | it takes `start`, then the state it returned in `{more, State}` |
+
+The sync adapter (`mailio_adapter`) can return `resync` among its changes, next to `reset`. `reset` means the UIDs the caller holds mean other messages now; `resync` means there were too many changes to list. In both cases read the whole mailbox again and keep the new state only when that worked.
+
 ## Errors
 
 Calls return `{error, Map}` where the map has a `code` such as `smtp_transient`, a `retryable` flag and a `detail`. Use `mailio_error:code/1` and `is_retryable/1`. The IMAP connection returns bare atoms for connection-level failures (`authentication_failed`, `tls_failed`, `response_too_large`, `not_connected`), which stay terminal: a connection in one of the first three states answers every later call the same way and you start a new one.

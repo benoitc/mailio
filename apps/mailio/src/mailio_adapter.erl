@@ -48,8 +48,12 @@
     | {updated, #{uid := term(), keywords := [binary()]}}
     %% uid
     | {removed, term()}
-    %% cursor invalid (UIDVALIDITY change): full resync
-    | reset.
+    %% The cursor is invalid (UIDVALIDITY changed): every UID the caller holds
+    %% means something else now. The caller replaces its copy of the mailbox.
+    | reset
+    %% The changes are too many to list one by one: the caller reads the whole
+    %% mailbox and brings its copy in line, and only then keeps the new state.
+    | resync.
 
 %% Streaming sink for raw message bytes.
 -type fetch_sink() :: fun((iodata()) -> ok).

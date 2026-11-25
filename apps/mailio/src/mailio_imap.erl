@@ -28,12 +28,20 @@
 ]).
 
 %% A connection handle: the FSM pid plus cached capabilities.
--type conn() :: #{pid := pid(), caps := #{atom() => boolean()}}.
+-type conn() :: #{
+    pid := pid(),
+    caps := #{atom() => boolean()},
+    max_vanished => pos_integer()
+}.
 -export_type([conn/0]).
 
 %%====================================================================
 %% Lifecycle
 %%====================================================================
+
+%% The most UIDs of one VANISHED report that are listed one by one; the config
+%% key `max_vanished' changes it.
+-define(MAX_VANISHED, 100000).
 
 -spec connect(map()) -> {ok, conn()} | {error, mailio_error:error_map()}.
 connect(Config) ->
@@ -44,7 +52,11 @@ connect(Config) ->
                 {ok, Untagged, {ok, _, _}} ->
                     Caps = caps_map(collect_caps(Untagged, Pid)),
                     maybe_enable_qresync(Pid, Caps),
-                    {ok, #{pid => Pid, caps => Caps}};
+                    {ok, #{
+                        pid => Pid,
+                        caps => Caps,
+                        max_vanished => maps:get(max_vanished, Config, ?MAX_VANISHED)
+                    }};
                 {ok, _Untagged, {Status, _, Text}} ->
                     mailio_imap_conn:close(Pid),
                     {error, conn_error(Status, Text)};
@@ -112,10 +124,10 @@ to_mailbox({list, Attrs, Delim, Name}) ->
 -spec fetch_changes_since(conn(), binary(), mailio_adapter:remote_state(), map()) ->
     {ok, [mailio_adapter:change()], mailio_adapter:remote_state(), more | done}
     | {error, term()}.
-fetch_changes_since(#{pid := Pid, caps := Caps}, MailboxId, State, _Opts) ->
+fetch_changes_since(#{pid := Pid, caps := Caps} = Conn, MailboxId, State, _Opts) ->
     Prev = mailio_imap_map:decode_state(State),
     case use_qresync(Caps, Prev) of
-        true -> qresync_changes(Pid, MailboxId, Prev);
+        true -> qresync_changes(Pid, maps:get(max_vanished, Conn, ?MAX_VANISHED), MailboxId, Prev);
         false -> plain_changes(Pid, Caps, MailboxId, Prev)
     end.
 
@@ -146,18 +158,19 @@ plain_changes(Pid, Caps, MailboxId, Prev) ->
 %% for expunged UIDs and FETCH for flag changes since our mod-sequence, so
 %% we get removals and updates without extra round trips; new messages are
 %% still fetched by UID range.
-qresync_changes(Pid, MailboxId, Prev) ->
+qresync_changes(Pid, MaxVanished, MailboxId, Prev) ->
     UidValidity = maps:get(uidvalidity, Prev),
     ModSeq = maps:get(highestmodseq, Prev),
-    case do_examine_qresync(Pid, MailboxId, UidValidity, ModSeq) of
+    case do_examine_qresync(Pid, MaxVanished, MailboxId, UidValidity, ModSeq) of
         {ok, SelInfo, Vanished, Updated} ->
             New = sel_to_state(SelInfo),
             case {uidvalidity_changed(Prev, New), Vanished} of
                 {true, _} ->
                     {ok, [reset], encode(New), done};
                 {false, too_many} ->
-                    %% a report too long to list: start over rather than hold it
-                    {ok, [reset], encode(New), done};
+                    %% A report too long to list: the caller re-reads the mailbox
+                    %% and compares it with what it has.
+                    {ok, [resync], encode(New), done};
                 {false, {ok, Uids}} ->
                     Added = fetch_added(Pid, maps:get(uidnext, Prev)),
                     Removed = [{removed, U} || U <- Uids],
@@ -167,16 +180,13 @@ qresync_changes(Pid, MailboxId, Prev) ->
             command_error(Other)
     end.
 
-%% The most UIDs of one VANISHED report that are listed one by one.
--define(MAX_VANISHED, 100000).
-
-vanished_uids(Ranges) ->
-    case mailio_imap_proto:expand_uid_ranges(Ranges, ?MAX_VANISHED) of
+vanished_uids(Ranges, Max) ->
+    case mailio_imap_proto:expand_uid_ranges(Ranges, Max) of
         {ok, _} = Ok -> Ok;
         {error, too_many} -> too_many
     end.
 
-do_examine_qresync(Pid, MailboxId, UidValidity, ModSeq) ->
+do_examine_qresync(Pid, MaxVanished, MailboxId, UidValidity, ModSeq) ->
     Builder = fun(T) ->
         {mailio_imap_proto:examine_qresync(T, MailboxId, UidValidity, ModSeq), undefined}
     end,
@@ -184,7 +194,7 @@ do_examine_qresync(Pid, MailboxId, UidValidity, ModSeq) ->
         {ok, Untagged, {ok, _, _}} ->
             SelInfo = parse_select(Untagged),
             Ranges = lists:append([R || {vanished, _Earlier, R} <- Untagged]),
-            Vanished = vanished_uids(Ranges),
+            Vanished = vanished_uids(Ranges, MaxVanished),
             Updated = [
                 {updated, #{
                     uid => proplists:get_value(uid, I),

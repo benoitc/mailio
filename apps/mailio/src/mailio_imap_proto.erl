@@ -47,6 +47,10 @@
 %% Response decoding
 -export([read_response/1, read_response/2, read_response/3, parse_response/1]).
 
+%% Treat as opaque: only what read_response/3 returned, or `start`.
+-type resume() :: start | {non_neg_integer(), non_neg_integer()}.
+-export_type([resume/0]).
+
 -define(MAX_LITERAL, 67108864).
 -define(MAX_LINE, 65536).
 -define(MAX_RESPONSE, 100663296).
@@ -241,24 +245,30 @@ read_response(Buffer) ->
 -spec read_response(binary(), map()) ->
     {ok, binary(), binary()} | more | {error, response_too_large}.
 read_response(Buffer, Opts) ->
-    case read_response(Buffer, Opts, 0) of
+    case read_response(Buffer, Opts, start) of
         {more, _} -> more;
         Other -> Other
     end.
 
-%% @doc Like {@link read_response/2}, resuming a scan: when a line is not
-%% complete the answer is `{more, ScanFrom}', and passing that back with the
-%% longer buffer continues from there instead of from the first byte. A line
-%% that arrives in small pieces is then framed in linear work.
--spec read_response(binary(), map(), non_neg_integer()) ->
-    {ok, binary(), binary()} | {more, non_neg_integer()} | {error, response_too_large}.
-read_response(Buffer, Opts, ScanFrom) ->
+%% @doc Like {@link read_response/2}, resuming a scan. Start with `start'. When
+%% a response is not complete the answer is `{more, Resume}'; give `Resume'
+%% back with the longer buffer and the work continues where it stopped, instead
+%% of from the first byte. A response that arrives in small pieces, however
+%% many lines and literals it has, is then framed in linear work.
+-spec read_response(binary(), map(), resume()) ->
+    {ok, binary(), binary()} | {more, resume()} | {error, response_too_large}.
+read_response(Buffer, Opts, Resume) ->
     Limits = #{
         literal => maps:get(max_literal, Opts, ?MAX_LITERAL),
         line => maps:get(max_line, Opts, ?MAX_LINE),
         response => maps:get(max_response, Opts, ?MAX_RESPONSE)
     },
-    case logical_length(Buffer, 0, Limits, ScanFrom) of
+    {Pos, Scan} =
+        case Resume of
+            start -> {0, 0};
+            {P, S} -> {P, S}
+        end,
+    case logical_length(Buffer, Pos, Limits, Scan) of
         {more, _} = More ->
             More;
         {error, _} = Err ->
@@ -270,30 +280,38 @@ read_response(Buffer, Opts, ScanFrom) ->
     end.
 
 %% Walk physical lines, jumping over literal payloads, until a CRLF that is
-%% not preceded by a literal spec. Returns the total length up to and
-%% including that terminating CRLF.
+%% not preceded by a literal spec. `Pos' is where the physical line being read
+%% starts and `Scan' where the search for its CRLF goes on. Returns the total
+%% length up to and including that terminating CRLF.
+logical_length(Buffer, Pos, _Limits, _Scan) when byte_size(Buffer) < Pos ->
+    %% still inside a literal's payload: nothing to look at yet
+    {more, {Pos, Pos}};
 logical_length(Buffer, Pos, Limits, Scan) ->
     case find_crlf(Buffer, max(Pos, Scan)) of
         nomatch ->
-            case byte_size(Buffer) - Pos > maps:get(line, Limits) of
+            %% A CR at the very end may be the first half of the CRLF; it does not
+            %% count against the line, so the limit does not depend on where the
+            %% packet ended.
+            Size = byte_size(Buffer),
+            Pending =
+                case Size > Pos andalso binary:last(Buffer) =:= $\r of
+                    true -> 1;
+                    false -> 0
+                end,
+            case Size - Pos - Pending > map_get(line, Limits) of
                 true -> {error, response_too_large};
-                %% The hint is only valid while the buffer holds no CRLF at all. A
-                %% CR at the very end may be the first half of one.
-                false when Pos =:= 0 -> {more, max(0, byte_size(Buffer) - 1)};
-                false -> {more, 0}
+                false -> {more, {Pos, max(Pos, Size - 1)}}
             end;
         CrlfPos when CrlfPos - Pos > map_get(line, Limits) ->
             {error, response_too_large};
         CrlfPos ->
             case literal_before(Buffer, Pos, CrlfPos) of
                 {literal, N} ->
-                    DataStart = CrlfPos + 2,
-                    DataEnd = DataStart + N,
+                    DataEnd = CrlfPos + 2 + N,
                     if
                         N > map_get(literal, Limits) -> {error, response_too_large};
                         DataEnd > map_get(response, Limits) -> {error, response_too_large};
-                        byte_size(Buffer) >= DataEnd -> logical_length(Buffer, DataEnd, Limits, 0);
-                        true -> {more, 0}
+                        true -> logical_length(Buffer, DataEnd, Limits, DataEnd)
                     end;
                 none ->
                     case CrlfPos + 2 > map_get(response, Limits) of
@@ -443,17 +461,33 @@ find_list([{list, L} | _]) -> L;
 find_list([_ | Rest]) -> find_list(Rest);
 find_list([]) -> [].
 
+%% VANISHED [(EARLIER)] known-uids (RFC 7162, section 3.2.10). Read from the
+%% bytes themselves, not from tokens: the marker is not case sensitive, and a
+%% UID must be exactly what RFC 3501 allows.
 parse_vanished(Bin) ->
-    case tokenize(Bin) of
-        [{list, [{atom, <<"EARLIER">>}]} | Rest] ->
-            {vanished, true, uid_set_from_tokens(Rest)};
-        Toks ->
-            {vanished, false, uid_set_from_tokens(Toks)}
-    end.
+    Trimmed = mailio_ascii:trim_leading(Bin),
+    {Earlier, Set} =
+        case Trimmed of
+            <<"(", Rest/binary>> ->
+                case binary:split(Rest, <<")">>) of
+                    [Marker, After] ->
+                        {
+                            string:uppercase(mailio_ascii:trim(Marker)) =:= <<"EARLIER">>,
+                            mailio_ascii:trim_leading(After)
+                        };
+                    [_] ->
+                        {false, <<>>}
+                end;
+            _ ->
+                {false, Trimmed}
+        end,
+    {vanished, Earlier, parse_uid_ranges(first_word(Set))}.
 
-uid_set_from_tokens([{atom, Set} | _]) -> parse_uid_ranges(Set);
-uid_set_from_tokens([{number, N} | _]) -> parse_uid_ranges(integer_to_binary(N));
-uid_set_from_tokens(_) -> [].
+first_word(Bin) ->
+    case binary:split(Bin, [<<" ">>, <<"\t">>]) of
+        [Word | _] -> Word;
+        [] -> <<>>
+    end.
 
 %%====================================================================
 %% resp-text and codes:  "[CODE args] human text"
@@ -669,13 +703,18 @@ parse_uid_range(Part) ->
             end
     end.
 
-%% A UID is a number from 1 to 2^32-1.
-uid(Bin) when byte_size(Bin) > 0, byte_size(Bin) =< 10 ->
-    try binary_to_integer(Bin) of
-        N when N >= 1, N =< 4294967295 -> {ok, N};
-        _ -> error
-    catch
-        error:badarg -> error
+%% A UID is 1*DIGIT without a sign or a leading zero, from 1 to 2^32-1
+%% (RFC 3501, section 9: nz-number). The bytes are checked before they become a
+%% number, because the conversion alone also accepts "+2" and "01".
+uid(<<First, Rest/binary>> = Bin) when First >= $1, First =< $9, byte_size(Bin) =< 10 ->
+    case lists:all(fun(C) -> C >= $0 andalso C =< $9 end, binary_to_list(Rest)) of
+        true ->
+            case binary_to_integer(Bin) of
+                N when N =< 4294967295 -> {ok, N};
+                _ -> error
+            end;
+        false ->
+            error
     end;
 uid(_) ->
     error.

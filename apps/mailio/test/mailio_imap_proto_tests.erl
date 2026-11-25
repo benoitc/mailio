@@ -229,14 +229,14 @@ fragmented_line_is_framed_in_linear_work_test() ->
     N = 20000,
     Line = binary:copy(<<"x">>, N),
     {reductions, R0} = process_info(self(), reductions),
-    Result = feed(Line, <<>>, 0, 1),
+    Result = feed(Line, <<>>, start, 1),
     {reductions, R1} = process_info(self(), reductions),
     ?assertEqual(done, Result),
     %% a rescan from the start each time would cost about N*N/2 steps
     ?assert(R1 - R0 < N * 60).
 
-feed(<<>>, Buf, _Scan, _Step) ->
-    case ?P:read_response(<<Buf/binary, "\r\n">>, #{max_line => 100000}, 0) of
+feed(<<>>, Buf, Scan, _Step) ->
+    case ?P:read_response(<<Buf/binary, "\r\n">>, #{max_line => 100000}, Scan) of
         {ok, _, <<>>} -> done;
         Other -> Other
     end;
@@ -287,3 +287,122 @@ fetch_header_fields_with_origin_test() ->
     {ok, Line, <<>>} = mailio_imap_proto:read_response(Raw),
     {untagged, {fetch, 1, Items}} = mailio_imap_proto:parse_response(Line),
     ?assertEqual(H, proplists:get_value(<<"BODY[HEADER.FIELDS (SUBJECT)]<0>">>, Items)).
+
+%%==== framing across literals and packet boundaries ====
+
+%% Frame a response that arrives one byte at a time. Resume = keep the state
+%% the framer hands back; restart = ignore it and scan from the start each time.
+frame_by_byte(Bin, Resume) -> frame_by_byte(Bin, <<>>, start, Resume, #{}).
+
+frame_by_byte(<<>>, Buf, _St, _Mode, _Opts) ->
+    {incomplete, Buf};
+frame_by_byte(<<B, Rest/binary>>, Buf, St, Mode, Opts) ->
+    Buf1 = <<Buf/binary, B>>,
+    case ?P:read_response(Buf1, Opts, St) of
+        {ok, Line, <<>>} ->
+            {ok, Line};
+        {more, St1} ->
+            frame_by_byte(Rest, Buf1, next_state(Mode, St1), Mode, Opts);
+        Other ->
+            Other
+    end.
+
+next_state(resume, St) -> St;
+next_state(restart, _) -> start.
+
+reductions_of(Fun) ->
+    {reductions, R0} = process_info(self(), reductions),
+    Result = Fun(),
+    {reductions, R1} = process_info(self(), reductions),
+    {Result, R1 - R0}.
+
+%% A continuation line after a literal that arrives in pieces: the work must
+%% not grow with the square of the length.
+fragmented_continuation_after_a_literal_is_linear_test() ->
+    N = 20000,
+    Resp = iolist_to_binary([
+        <<"* 1 FETCH (BODY[] {5}\r\nabcde ">>, binary:copy(<<"x">>, N), <<")\r\n">>
+    ]),
+    Whole = binary:part(Resp, 0, byte_size(Resp) - 2),
+    {Result, R} = reductions_of(fun() -> frame_by_byte(Resp, resume) end),
+    ?assertEqual({ok, Whole}, Result),
+    ?assert(R < byte_size(Resp) * 60).
+
+%% Many literals in one response: earlier ones are not walked again each time.
+many_literals_are_framed_in_linear_work_test_() ->
+    {timeout, 60, fun many_literals_check/0}.
+
+many_literals_check() ->
+    Parts = [[<<" BODY[">>, integer_to_binary(I), <<"] {3}\r\nabc">>] || I <- lists:seq(1, 600)],
+    Resp = iolist_to_binary([<<"* 1 FETCH (">>, Parts, <<")\r\n">>]),
+    Whole = binary:part(Resp, 0, byte_size(Resp) - 2),
+    {Result, Resumed} = reductions_of(fun() -> frame_by_byte(Resp, resume) end),
+    ?assertEqual({ok, Whole}, Result),
+    ?assert(Resumed < byte_size(Resp) * 60),
+    %% the same input without resuming costs much more: the check can tell
+    {Result2, Restarted} = reductions_of(fun() -> frame_by_byte(Resp, restart) end),
+    ?assertEqual({ok, Whole}, Result2),
+    ?assert(Restarted > Resumed * 5).
+
+%% The same frame whatever the packet boundaries are.
+framing_does_not_depend_on_packet_boundaries_test() ->
+    Resp = <<"* 1 FETCH (BODY[1] {3}\r\nabc BODY[2] {2}\r\nde FLAGS (\\Seen))\r\n">>,
+    Whole = binary:part(Resp, 0, byte_size(Resp) - 2),
+    ?assertEqual({ok, Whole}, frame_by_byte(Resp, resume)),
+    [
+        begin
+            <<A:K/binary, B/binary>> = Resp,
+            {more, St} = ?P:read_response(A, #{}, start),
+            ?assertEqual({ok, Whole, <<>>}, ?P:read_response(<<A/binary, B/binary>>, #{}, St))
+        end
+     || K <- lists:seq(1, byte_size(Resp) - 1)
+    ].
+
+%% max_line must mean the same whether the CR and the LF arrive together or not.
+max_line_does_not_depend_on_where_the_packet_ends_test() ->
+    Opts = #{max_line => 100},
+    Line = binary:copy(<<"x">>, 100),
+    Over = binary:copy(<<"x">>, 101),
+    %% exactly at the limit: all of these are fine
+    ?assertMatch({ok, Line, <<>>}, ?P:read_response(<<Line/binary, "\r\n">>, Opts, start)),
+    ?assertMatch({more, _}, ?P:read_response(Line, Opts, start)),
+    {more, S1} = ?P:read_response(<<Line/binary, "\r">>, Opts, start),
+    ?assertMatch({ok, Line, <<>>}, ?P:read_response(<<Line/binary, "\r\n">>, Opts, S1)),
+    %% one byte over: refused in every chunking
+    ?assertEqual(
+        {error, response_too_large}, ?P:read_response(<<Over/binary, "\r\n">>, Opts, start)
+    ),
+    ?assertEqual({error, response_too_large}, ?P:read_response(Over, Opts, start)),
+    ?assertEqual({error, response_too_large}, ?P:read_response(<<Over/binary, "\r">>, Opts, start)).
+
+%%==== VANISHED on the wire path ====
+
+vanished_marker_is_case_insensitive_test() ->
+    ?assertEqual(
+        {untagged, {vanished, true, [{41, 41}, {43, 45}]}},
+        ?P:parse_response(<<"* VANISHED (earlier) 41,43:45">>)
+    ),
+    ?assertEqual(
+        {untagged, {vanished, true, [{7, 7}]}},
+        ?P:parse_response(<<"* VANISHED (EaRlIeR) 7">>)
+    ).
+
+vanished_without_marker_test() ->
+    ?assertEqual({untagged, {vanished, false, [{3, 3}]}}, ?P:parse_response(<<"* VANISHED 3">>)),
+    ?assertEqual(
+        {untagged, {vanished, false, [{1, 2}, {9, 9}]}}, ?P:parse_response(<<"* VANISHED 2:1,9">>)
+    ).
+
+%% A UID is 1*DIGIT without a sign and without a leading zero.
+vanished_rejects_things_that_are_not_uids_test() ->
+    [
+        ?assertEqual({untagged, {vanished, false, []}}, ?P:parse_response(Wire))
+     || Wire <- [
+            <<"* VANISHED 01">>,
+            <<"* VANISHED +2">>,
+            <<"* VANISHED 007">>,
+            <<"* VANISHED -3">>,
+            <<"* VANISHED 0">>,
+            <<"* VANISHED 4294967296">>
+        ]
+    ].

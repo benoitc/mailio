@@ -279,11 +279,93 @@ run_sync(
     RemoteState = load_cursor(Db, LocalId),
     case Adapter:fetch_changes_since(Conn, ImapName, RemoteState, #{}) of
         {ok, Changes, NewState, _More} ->
-            Stats = apply_changes(State, ImapName, LocalId, Changes),
-            store_cursor(Db, LocalId, NewState),
-            {{ok, Stats}, State};
+            case resync_mode(Changes) of
+                none ->
+                    Stats = apply_changes(State, ImapName, LocalId, Changes),
+                    store_cursor(Db, LocalId, NewState),
+                    {{ok, Stats}, State};
+                Mode ->
+                    %% The changes cannot be applied one by one. The mailbox is
+                    %% read in full and brought in line first; the cursor moves
+                    %% only when that worked, so a failure is retried, not skipped.
+                    case full_resync(Mode, ImapName, LocalId, State) of
+                        {ok, Stats, FullState} ->
+                            store_cursor(Db, LocalId, FullState),
+                            {{ok, Stats}, State};
+                        {error, Reason} ->
+                            {{error, Reason}, State}
+                    end
+            end;
         {error, Reason} ->
             {{error, Reason}, State}
+    end.
+
+%% `reset': the UIDs we hold mean other messages now (UIDVALIDITY changed).
+%% `resync': there were too many changes to list.
+resync_mode(Changes) ->
+    case {lists:member(reset, Changes), lists:member(resync, Changes)} of
+        {true, _} -> reset;
+        {false, true} -> resync;
+        {false, false} -> none
+    end.
+
+full_resync(Mode, ImapName, LocalId, State) ->
+    #state{adapter = Adapter, conn = Conn, db = Db, account_id = AccountId} = State,
+    case Adapter:fetch_changes_since(Conn, ImapName, initial, #{}) of
+        {ok, Changes, FullState, _More} ->
+            Server = [Info || {added, Info} <- Changes],
+            ServerUids = sets:from_list([maps:get(uid, I) || I <- Server]),
+            Removed = lists:foldl(
+                fun({Uid, EmailId, DocId}, N) ->
+                    case Mode =:= reset orelse not sets:is_element(Uid, ServerUids) of
+                        true ->
+                            _ = mailio_account_writer:remove_member(AccountId, LocalId, EmailId),
+                            _ = mailio_db:delete(Db, DocId),
+                            N + 1;
+                        false ->
+                            N
+                    end
+                end,
+                0,
+                local_uidmaps(Db, LocalId)
+            ),
+            {Added, Updated, Failed} = lists:foldl(
+                fun(Info, {A, U, F}) ->
+                    case sync_one(State, ImapName, LocalId, Info) of
+                        added -> {A + 1, U, F};
+                        updated -> {A, U + 1, F};
+                        {error, _} -> {A, U, F + 1}
+                    end
+                end,
+                {0, 0, 0},
+                Server
+            ),
+            case Failed of
+                0 ->
+                    {ok, #{added => Added, updated => Updated, removed => Removed, reset => 1},
+                        FullState};
+                _ ->
+                    {error, {resync_incomplete, Failed}}
+            end;
+        {error, _} = Error ->
+            Error
+    end.
+
+%% One message of a full read: known ones get their flags, new ones are fetched.
+sync_one(State, ImapName, LocalId, Info) ->
+    #state{account_id = AccountId} = State,
+    Uid = maps:get(uid, Info),
+    case mailio_account_writer:lookup_uid(AccountId, LocalId, Uid) of
+        {ok, EmailId} ->
+            _ = mailio_account_writer:apply_flags(
+                AccountId, LocalId, EmailId, maps:get(keywords, Info, [])
+            ),
+            updated;
+        {error, not_found} ->
+            case ingest_added(State, ImapName, LocalId, Info) of
+                ok -> added;
+                {error, _} = Error -> Error
+            end
     end.
 
 apply_changes(State, ImapName, LocalId, Changes) ->
@@ -296,20 +378,9 @@ apply_changes(State, ImapName, LocalId, Changes) ->
     ).
 
 apply_change(State, ImapName, LocalId, {added, Info}, Stats) ->
-    #state{adapter = Adapter, conn = Conn, account_id = AccountId} = State,
-    Uid = maps:get(uid, Info),
-    case fetch_raw(Adapter, Conn, ImapName, Uid) of
-        {ok, Raw} ->
-            Opts = #{
-                keywords => maps:get(keywords, Info, []),
-                uid => Uid,
-                uidvalidity => maps:get(uidvalidity, Info, 0),
-                received_at => maps:get(internal_date, Info, undefined)
-            },
-            _ = mailio_account_writer:ingest(AccountId, LocalId, Raw, drop_undefined(Opts)),
-            bump(Stats, added);
-        {error, _} ->
-            Stats
+    case ingest_added(State, ImapName, LocalId, Info) of
+        ok -> bump(Stats, added);
+        {error, _} -> Stats
     end;
 apply_change(State, _ImapName, LocalId, {updated, Info}, Stats) ->
     #state{account_id = AccountId} = State,
@@ -335,10 +406,28 @@ apply_change(State, _ImapName, LocalId, {removed, Uid}, Stats) ->
         {error, not_found} ->
             Stats
     end;
-apply_change(_State, _ImapName, _LocalId, reset, Stats) ->
-    %% Full-resync signalling: handled by the next fetch returning all
-    %% messages as `added' (content-addressed ids make this idempotent).
+apply_change(_State, _ImapName, _LocalId, Signal, Stats) when
+    Signal =:= reset; Signal =:= resync
+->
+    %% handled by run_sync before any change is applied
     bump(Stats, reset).
+
+ingest_added(State, ImapName, LocalId, Info) ->
+    #state{adapter = Adapter, conn = Conn, account_id = AccountId} = State,
+    Uid = maps:get(uid, Info),
+    case fetch_raw(Adapter, Conn, ImapName, Uid) of
+        {ok, Raw} ->
+            Opts = #{
+                keywords => maps:get(keywords, Info, []),
+                uid => Uid,
+                uidvalidity => maps:get(uidvalidity, Info, 0),
+                received_at => maps:get(internal_date, Info, undefined)
+            },
+            _ = mailio_account_writer:ingest(AccountId, LocalId, Raw, drop_undefined(Opts)),
+            ok;
+        {error, _} = Error ->
+            Error
+    end.
 
 %%====================================================================
 %% Reconcile (no-QRESYNC expunge detection)

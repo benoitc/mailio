@@ -64,7 +64,7 @@
     %% absolute (monotonic ms) time by which the running command must be answered
     deadline :: integer() | undefined,
     %% resume point of the framer for a line that is still arriving
-    scan = 0 :: non_neg_integer(),
+    scan = start :: mailio_imap_proto:resume(),
     %% what the running command has collected so far, and the size of the last frame
     acc_count = 0 :: non_neg_integer(),
     acc_bytes = 0 :: non_neg_integer(),
@@ -313,7 +313,7 @@ upgrade(#data{sock = Sock, config = Config} = Data) ->
     case ssl:connect(Sock, mailio_tls_opts(Config), ?CONNECT_TIMEOUT) of
         {ok, SslSock} ->
             {next_state, auth,
-                set_active(Data#data{transport = ssl, sock = SslSock, buffer = <<>>})};
+                set_active(Data#data{transport = ssl, sock = SslSock, buffer = <<>>, scan = start})};
         {error, _Reason} ->
             {next_state, tls_failed, Data}
     end.
@@ -399,18 +399,28 @@ tls_failed(_Type, _Event, Data) ->
 %% State: response_too_large (terminal: the server sent more than allowed)
 %%====================================================================
 
-response_too_large(enter, _Old, #data{transport = T, sock = Sock, from = From} = Data) ->
+response_too_large(enter, _Old, #data{transport = T, sock = Sock} = Data) ->
     _ =
         case Sock of
             undefined -> ok;
             _ -> catch_close(T, Sock)
         end,
-    Replies =
-        case From of
-            undefined -> [];
-            _ -> [{reply, From, {error, response_too_large}}]
-        end,
-    {keep_state, Data#data{sock = undefined, buffer = <<>>, from = undefined}, Replies};
+    %% Answer whoever waits, and let go of what the command had collected: a
+    %% caller that keeps this connection must not keep the data with it.
+    {Settled, Replies} = pending_replies(Data, response_too_large),
+    {keep_state,
+        Settled#data{
+            sock = undefined,
+            buffer = <<>>,
+            scan = start,
+            untagged = [],
+            literal = undefined,
+            tag = undefined,
+            deadline = undefined,
+            acc_count = 0,
+            acc_bytes = 0
+        },
+        Replies};
 response_too_large({call, From}, _Req, Data) ->
     {keep_state, Data, [{reply, From, {error, response_too_large}}]};
 response_too_large(_Type, _Event, Data) ->
@@ -565,7 +575,7 @@ backoff(enter, _Old, #data{backoff = B} = Data) ->
     {keep_state, Data, [{state_timeout, B, retry}]};
 backoff(state_timeout, retry, #data{backoff = B} = Data) ->
     NextB = min(B * 2, ?BACKOFF_MAX),
-    {next_state, connect, Data#data{backoff = NextB, buffer = <<>>}};
+    {next_state, connect, Data#data{backoff = NextB, buffer = <<>>, scan = start}};
 backoff({call, From}, _Req, Data) ->
     {keep_state, Data, [{reply, From, {error, not_connected}}]};
 backoff(_Type, _Event, Data) ->
@@ -645,7 +655,7 @@ take_one(#data{buffer = Buf, config = Config, scan = Scan} = Data) ->
             {error, response_too_large};
         {ok, Line, Rest} ->
             Resp = mailio_imap_proto:parse_response(Line),
-            {ok, Resp, Data#data{buffer = Rest, scan = 0, last_size = byte_size(Line)}}
+            {ok, Resp, Data#data{buffer = Rest, scan = start, last_size = byte_size(Line)}}
     end.
 
 more_data(Data) -> {more, Data}.
@@ -727,7 +737,7 @@ drop(#data{transport = T, sock = Sock} = Data, Replies, Why) ->
     {Cleared, Pending} = pending_replies(Data, Why),
     {next_state, backoff,
         Cleared#data{
-            sock = undefined, buffer = <<>>, scan = 0, tag = undefined, deadline = undefined
+            sock = undefined, buffer = <<>>, scan = start, tag = undefined, deadline = undefined
         },
         Replies ++ Pending}.
 

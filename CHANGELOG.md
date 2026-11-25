@@ -14,8 +14,39 @@
 - The MCP server stops at start with a clear message when its config file
   cannot be read.
 
+### Changed
+
+- Breaking, for code that uses the IMAP protocol module directly: a list of
+  vanished messages is now reported as ranges instead of a list of every
+  number, and the function that expanded a set of UIDs into a list is gone. A
+  short replacement parses a set into ranges and another expands ranges up to a
+  limit you choose. [The library overview](apps/mailio/doc/overview.md) shows
+  what to use.
+- The sync adapter reports one more kind of change, telling the caller to read
+  the whole mailbox again, for a server report that is too long to list.
+
 ### Fixed
 
+- A POP3 or SMTP connection that fails while it is being set up is now closed.
+  A finished SMTP submission is closed too. Before, each left a socket open for
+  as long as the caller lived.
+- A credential provider that loops, hangs or crashes can no longer freeze a
+  connection or the caller. Each provider call has a depth and a time limit.
+- An IMAP command that the server never answers now ends with a timeout
+  instead of waiting for ever, and a call that waited behind it is not sent
+  late. A lost IDLE answer or a disconnect during IDLE no longer leaves the
+  caller waiting.
+- An IMAP connection no longer holds on to what a failed command had
+  collected, and one command can no longer collect without a limit.
+- A list of vanished messages that is very large is no longer expanded in
+  memory, and a range written from the larger number to the smaller one is read
+  correctly instead of crashing the reader.
+- When the server reports too many changes to list, or the mailbox is
+  recreated with a new identity, the store now reads the mailbox again and
+  brings its copy in line before it keeps the new position. Before, the new
+  position was kept and the missed changes were never applied.
+- A line that arrives in many small pieces is no longer re-read from the start
+  each time.
 - Checking a mailbox for new mail no longer reports the newest message again
   when nothing changed. Real servers return the last message for any range that
   starts past the end.
