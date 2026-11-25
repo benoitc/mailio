@@ -15,7 +15,7 @@
 
 -export([start/0, start/1, stop/1, port/1, commands/1]).
 -export([last_flags/2, set_flags/3, deliver/2, expunge/2, new_validity/2, set_failure/3]).
--export([set_option/3, inject/2, set_uidnext/2]).
+-export([set_option/3, inject/2, set_uidnext/2, set_search/2]).
 
 -record(srv, {port, pid, ref, tab}).
 
@@ -79,11 +79,21 @@ set_failure(Srv, Kind, Bool) when
 
 %% @doc Server behaviour switches: `no_uidnext' (EXAMINE does not report UIDNEXT,
 %% which RFC 3501 allows), `fail_max_uid' (UID FETCH * answers NO) and
-%% `bad_vanished' (a QRESYNC answer with a VANISHED line that lists nothing).
+%% `bad_vanished' (a QRESYNC answer with a VANISHED line that lists nothing) and
+%% `no_exists' (EXAMINE does not report EXISTS). `set_search/2' makes UID SEARCH
+%% answer badly.
 set_option(Srv, Option, Bool) when
-    Option =:= no_uidnext; Option =:= fail_max_uid; Option =:= bad_vanished
+    Option =:= no_uidnext;
+    Option =:= no_exists;
+    Option =:= fail_max_uid;
+    Option =:= bad_vanished
 ->
     call(Srv, {set_option, Option, Bool}, ok).
+
+%% @doc How UID SEARCH answers: `normal', `none' (tagged OK and no SEARCH line)
+%% or `junk' (a SEARCH line with a number that is not one).
+set_search(Srv, Mode) when Mode =:= normal; Mode =:= none; Mode =:= junk ->
+    call(Srv, {set_search, Mode}, ok).
 
 %% @doc The UIDNEXT the server reports, for a mailbox whose UIDs are far apart.
 set_uidnext(Srv, N) -> call(Srv, {set_uidnext, N}, ok).
@@ -193,6 +203,8 @@ handle_control(Sock, Ref, {deliver, Subject}, #{messages := Ms, uidnext := Uid} 
     {{ok, Ref, ok}, State1};
 handle_control(_Sock, Ref, {set_option, Option, Bool}, State) ->
     {{ok, Ref, ok}, State#{{opt, Option} => Bool}};
+handle_control(_Sock, Ref, {set_search, Mode}, State) ->
+    {{ok, Ref, ok}, State#{search_mode => Mode}};
 handle_control(_Sock, Ref, {set_uidnext, N}, State) ->
     {{ok, Ref, ok}, State#{uidnext => N}};
 handle_control(_Sock, Ref, {inject, Lines}, State) ->
@@ -401,7 +413,10 @@ send_select(Sock, #{messages := Ms, uidnext := UidNext} = State) ->
     HMS = integer_to_binary(highestmodseq(State)),
     UN = integer_to_binary(UidNext),
     send(Sock, <<"* FLAGS (\\Answered \\Flagged \\Deleted \\Seen \\Draft)\r\n">>),
-    send(Sock, <<"* ", N/binary, " EXISTS\r\n">>),
+    case maps:get({opt, no_exists}, State, false) of
+        true -> ok;
+        false -> send(Sock, <<"* ", N/binary, " EXISTS\r\n">>)
+    end,
     send(Sock, <<"* 0 RECENT\r\n">>),
     Validity = integer_to_binary(maps:get(uidvalidity, State, 1)),
     send(Sock, <<"* OK [UIDVALIDITY ", Validity/binary, "] UIDs valid\r\n">>),
@@ -558,7 +573,11 @@ handle_uid_search(Sock, Tag, Rest, #{messages := Ms} = State) ->
         integer_to_binary(U)
      || {_, U, _, _, _} <- Ms, U >= Lo, U =< Hi
     ]),
-    send(Sock, [<<"* SEARCH ">>, Uids, <<"\r\n">>]),
+    case maps:get(search_mode, State, normal) of
+        normal -> send(Sock, [<<"* SEARCH ">>, Uids, <<"\r\n">>]);
+        none -> ok;
+        junk -> send(Sock, [<<"* SEARCH 5 abc 7\r\n">>])
+    end,
     tagged(Sock, Tag, <<"OK UID SEARCH done">>),
     {continue, State}.
 

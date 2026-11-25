@@ -36,6 +36,10 @@
     unsolicited_updates_are_not_listed_as_new_mail/1,
     windows_respect_the_line_limit/1,
     a_sparse_mailbox_has_a_bound_on_the_work/1,
+    a_window_without_a_search_answer_is_an_error/1,
+    a_search_answer_with_junk_is_an_error/1,
+    an_explicit_empty_search_is_a_listing_of_nothing/1,
+    a_mailbox_of_unknown_size_is_not_an_empty_one/1,
     writes_open_read_write/1
 ]).
 
@@ -61,6 +65,10 @@ all() ->
         unsolicited_updates_are_not_listed_as_new_mail,
         windows_respect_the_line_limit,
         a_sparse_mailbox_has_a_bound_on_the_work,
+        a_window_without_a_search_answer_is_an_error,
+        a_search_answer_with_junk_is_an_error,
+        an_explicit_empty_search_is_a_listing_of_nothing,
+        a_mailbox_of_unknown_size_is_not_an_empty_one,
         writes_open_read_write
     ].
 
@@ -379,3 +387,34 @@ a_sparse_mailbox_has_a_bound_on_the_work(Config) ->
 
 mailio_error_code({error, #{detail := #{detail := Why}}}) -> {Why};
 mailio_error_code({error, Why}) -> {Why}.
+
+%% A tagged OK that carries no SEARCH line says nothing: it must not read as a
+%% mailbox with no mail, which reconcile would answer by removing it all.
+a_window_without_a_search_answer_is_an_error(Config) ->
+    Srv = ?config(srv, Config),
+    ok = mailio_fake_imap:set_search(Srv, none),
+    Conn = conn_with(Config, #{}),
+    ?assertMatch({error, _}, mailio_imap:list_uids(Conn, <<"INBOX">>)).
+
+a_search_answer_with_junk_is_an_error(Config) ->
+    Srv = ?config(srv, Config),
+    ok = mailio_fake_imap:set_search(Srv, junk),
+    Conn = conn_with(Config, #{}),
+    ?assertMatch({error, _}, mailio_imap:list_uids(Conn, <<"INBOX">>)).
+
+%% A window with no UIDs in it is answered by `* SEARCH' with nothing after it.
+an_explicit_empty_search_is_a_listing_of_nothing(Config) ->
+    Srv = ?config(srv, Config),
+    [ok = mailio_fake_imap:expunge(Srv, U) || U <- [100, 101]],
+    Conn = conn_with(Config, #{}),
+    ?assertEqual({ok, []}, mailio_imap:list_uids(Conn, <<"INBOX">>)).
+
+%% Neither EXISTS nor UIDNEXT: the size is not known, which is not the same as
+%% nothing in it.
+a_mailbox_of_unknown_size_is_not_an_empty_one(Config) ->
+    Srv = ?config(srv, Config),
+    ok = mailio_fake_imap:set_option(Srv, no_uidnext, true),
+    ok = mailio_fake_imap:set_option(Srv, no_exists, true),
+    Conn = conn_with(Config, #{}),
+    ?assertMatch({error, _}, mailio_imap:list_uids(Conn, <<"INBOX">>)),
+    ?assertMatch({error, _}, mailio_imap:fetch_changes_since(Conn, <<"INBOX">>, initial, #{})).

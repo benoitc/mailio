@@ -424,7 +424,13 @@ vanished_with_an_unknown_marker_is_not_a_removal_test() ->
             <<"* VANISHED (EARLIER)">>,
             <<"* VANISHED (EARLIER) ">>,
             <<"* VANISHED ">>,
-            <<"* VANISHED (EARLIER) abc">>
+            <<"* VANISHED (EARLIER) abc">>,
+            %% more than one set, or a marker that is not exactly (EARLIER)
+            <<"* VANISHED (EARLIER) 5 7">>,
+            <<"* VANISHED 5 7">>,
+            <<"* VANISHED ( EARLIER ) 5">>,
+            <<"* VANISHED (EARLIER ) 5">>,
+            <<"* VANISHED ( EARLIER) 5">>
         ]
     ].
 
@@ -453,3 +459,21 @@ max_response_counts_a_trailing_cr_test() ->
     ?assertEqual({error, response_too_large}, ?P:read_response(<<"0123456">>, Opts, start)),
     ?assertEqual({error, response_too_large}, ?P:read_response(<<"0123456\r">>, Opts, start)),
     ?assertEqual({error, response_too_large}, ?P:read_response(<<"0123456\r\n">>, Opts, start)).
+
+vanished_still_reads_what_is_well_formed_test() ->
+    ?assertEqual(
+        {untagged, {vanished, true, [{5, 5}]}}, ?P:parse_response(<<"* VANISHED (earlier) 5">>)
+    ),
+    ?assertEqual(
+        {untagged, {vanished, true, [{5, 7}]}}, ?P:parse_response(<<"* VANISHED (EARLIER) 5:7">>)
+    ),
+    ?assertEqual({untagged, {vanished, false, [{5, 5}]}}, ?P:parse_response(<<"* VANISHED 5 ">>)).
+
+%% A SEARCH answer is numbers only; one that is not is not read in part.
+search_answer_is_read_whole_test() ->
+    ?assertEqual({untagged, {search, [5, 7]}}, ?P:parse_response(<<"* SEARCH 5 7">>)),
+    ?assertEqual({untagged, {search, []}}, ?P:parse_response(<<"* SEARCH">>)),
+    ?assertEqual({untagged, {search, []}}, ?P:parse_response(<<"* SEARCH ">>)),
+    ?assertMatch(
+        {untagged, {other, <<"SEARCH", _/binary>>}}, ?P:parse_response(<<"* SEARCH 5 abc 7">>)
+    ).

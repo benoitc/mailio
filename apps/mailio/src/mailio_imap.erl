@@ -674,8 +674,21 @@ list_uid_windows(Pid, From, Upto, Window, AccRev) ->
     Criteria = [<<"UID ">>, integer_to_binary(From), <<":">>, integer_to_binary(To)],
     case run(Pid, fun(T) -> {mailio_imap_proto:uid_search(T, Criteria), undefined} end) of
         {ok, Untagged, {ok, _, _}} ->
-            Uids = lists:append([Us || {search, Us} <- Untagged]),
-            list_uid_windows(Pid, To + 1, Upto, Window, [Uids | AccRev]);
+            %% The server must have answered: an OK with no SEARCH line, or one
+            %% that is not all numbers, says nothing about the mailbox. Only an
+            %% explicit, empty `* SEARCH' is a window with no mail in it.
+            case
+                {[Us || {search, Us} <- Untagged], [
+                    R
+                 || {other, <<"SEARCH", _/binary>> = R} <- Untagged
+                ]}
+            of
+                {[_ | _] = Answers, []} ->
+                    Uids = [U || U <- lists:append(Answers), U >= From, U =< To],
+                    list_uid_windows(Pid, To + 1, Upto, Window, [Uids | AccRev]);
+                _ ->
+                    command_error({error, search_answer_incomplete})
+            end;
         Other ->
             command_error(Other)
     end.
@@ -694,12 +707,18 @@ examine_listing(Pid, MailboxId) ->
 ensure_uidnext(_Pid, #{uidnext := N} = Sel) when is_integer(N) ->
     {ok, Sel};
 ensure_uidnext(Pid, Sel) ->
-    case maps:get(exists, Sel, 0) of
+    case maps:get(exists, Sel, undefined) of
         0 ->
             {ok, Sel#{uidnext => 1}};
+        undefined ->
+            %% neither UIDNEXT nor EXISTS: nothing says whether the mailbox is
+            %% empty, and a listing of nothing would be taken for the truth
+            {error, mailbox_size_unknown};
         _ ->
-            %% one past the highest UID: never lower than the real UIDNEXT, so
-            %% at worst a message is listed twice, never missed
+            %% One past the highest UID present. It can be lower than the real
+            %% UIDNEXT (the highest message may have been expunged), but every
+            %% message in the mailbox is at or below the highest, so none is
+            %% missed; the UIDs in between were never delivered to anyone.
             case max_uid(Pid) of
                 {ok, Highest} -> {ok, Sel#{uidnext => Highest + 1}};
                 Other -> Other
@@ -743,7 +762,8 @@ parse_select(Untagged) ->
             uidvalidity => undefined,
             uidnext => undefined,
             highestmodseq => undefined,
-            exists => 0,
+            %% not known until the server says: no EXISTS is not an empty mailbox
+            exists => undefined,
             flags => []
         },
         Untagged

@@ -39,6 +39,11 @@
     a_reset_on_a_later_page_discards_the_earlier_pages/1,
     a_reset_is_kept_when_the_adapter_names_no_uidvalidity/1,
     a_retry_after_a_failed_fetch_stores_both_messages/1,
+    a_retry_after_the_mailbox_was_recreated_replaces_the_first_message/1,
+    a_retry_after_an_expunge_removes_the_first_message/1,
+    a_retry_after_flags_were_cleared_updates_the_first_message/1,
+    a_full_read_beyond_the_listing_limit_stops/1,
+    an_unreliable_listing_does_not_remove_local_mail/1,
     a_repeated_cursor_ends_the_sync/1,
     an_endless_listing_is_bounded/1,
     an_adapter_that_cannot_check_uidvalidity_keeps_the_cursor/1
@@ -64,6 +69,11 @@ all() ->
         a_reset_on_a_later_page_discards_the_earlier_pages,
         a_reset_is_kept_when_the_adapter_names_no_uidvalidity,
         a_retry_after_a_failed_fetch_stores_both_messages,
+        a_retry_after_the_mailbox_was_recreated_replaces_the_first_message,
+        a_retry_after_an_expunge_removes_the_first_message,
+        a_retry_after_flags_were_cleared_updates_the_first_message,
+        a_full_read_beyond_the_listing_limit_stops,
+        an_unreliable_listing_does_not_remove_local_mail,
         a_repeated_cursor_ends_the_sync,
         an_endless_listing_is_bounded,
         an_adapter_that_cannot_check_uidvalidity_keeps_the_cursor
@@ -559,6 +569,90 @@ a_retry_after_a_failed_fetch_stores_both_messages(Config) ->
     %% the writer was not taken down by the replay
     ?assertEqual(WriterBefore, whereis_writer(Account)),
     ?assert(is_process_alive(WriterBefore)).
+
+%% The first sync stores the first message and fails on the second. Before the
+%% retry the server changes. The retry must leave the store the way the server is.
+partly_synced(Config) ->
+    Account = ?config(account, Config),
+    Srv = ?config(srv, Config),
+    {ok, LocalId} = ensure_inbox(Account),
+    ok = mailio_fake_imap:set_failure(Srv, {body, 101}, true),
+    ?assertMatch({error, _}, mailio_sync_mgr:sync_mailbox(Account, <<"INBOX">>)),
+    ?assertEqual(1, length(all_emails(mailio_account:db_name(Account)))),
+    LocalId.
+
+finish_retry(Config) ->
+    Account = ?config(account, Config),
+    Srv = ?config(srv, Config),
+    ok = mailio_fake_imap:set_failure(Srv, {body, 101}, false),
+    {ok, _} = mailio_sync_mgr:sync_mailbox(Account, <<"INBOX">>),
+    %% nothing is left to report afterwards
+    {ok, S} = mailio_sync_mgr:sync_mailbox(Account, <<"INBOX">>),
+    ?assertEqual({0, 0, 0}, {maps:get(added, S), maps:get(removed, S), maps:get(updated, S)}).
+
+mailbox_counts(Account, LocalId) ->
+    {ok, Mbx} = mailio_db:get(mailio_account:db_name(Account), <<?ID_MAILBOX, LocalId/binary>>),
+    {maps:get(<<"totalEmails">>, Mbx), maps:get(<<"unreadEmails">>, Mbx)}.
+
+subjects(Account) ->
+    lists:sort([maps:get(<<"subject">>, E) || E <- all_emails(mailio_account:db_name(Account))]).
+
+a_retry_after_the_mailbox_was_recreated_replaces_the_first_message(Config) ->
+    Account = ?config(account, Config),
+    Srv = ?config(srv, Config),
+    LocalId = partly_synced(Config),
+    ok = mailio_fake_imap:new_validity(Srv, [<<"Reborn one">>, <<"Reborn two">>]),
+    finish_retry(Config),
+    ?assertEqual([<<"Reborn one">>, <<"Reborn two">>], subjects(Account)),
+    ?assertEqual({2, 2}, mailbox_counts(Account, LocalId)).
+
+a_retry_after_an_expunge_removes_the_first_message(Config) ->
+    Account = ?config(account, Config),
+    Srv = ?config(srv, Config),
+    LocalId = partly_synced(Config),
+    ok = mailio_fake_imap:expunge(Srv, 100),
+    finish_retry(Config),
+    ?assertEqual([<<"Second message">>], subjects(Account)),
+    ?assertEqual({1, 1}, mailbox_counts(Account, LocalId)).
+
+a_retry_after_flags_were_cleared_updates_the_first_message(Config) ->
+    Account = ?config(account, Config),
+    Srv = ?config(srv, Config),
+    LocalId = partly_synced(Config),
+    %% message 100 was read; now it is not
+    ok = mailio_fake_imap:set_flags(Srv, 100, []),
+    finish_retry(Config),
+    ?assertEqual(2, length(subjects(Account))),
+    ?assertEqual({2, 2}, mailbox_counts(Account, LocalId)).
+
+%% A full read keeps the UIDs it has seen, and the number of them is limited.
+a_full_read_beyond_the_listing_limit_stops(Config) ->
+    Account = ?config(account, Config),
+    Db = mailio_account:db_name(Account),
+    {ok, LocalId} = ensure_inbox(Account),
+    application:set_env(mailio_store, sync_max_listed_uids, 1),
+    try
+        ?assertMatch({error, _}, mailio_sync_mgr:sync_mailbox(Account, <<"INBOX">>))
+    after
+        application:unset_env(mailio_store, sync_max_listed_uids)
+    end,
+    ?assertEqual(none, cursor_or_none(Db, LocalId)),
+    {ok, _} = mailio_sync_mgr:sync_mailbox(Account, <<"INBOX">>),
+    ?assertEqual(2, length(all_emails(Db))).
+
+%% A listing that does not say what is there is not a listing of nothing.
+an_unreliable_listing_does_not_remove_local_mail(Config) ->
+    Account = ?config(account, Config),
+    Db = mailio_account:db_name(Account),
+    Srv = ?config(srv, Config),
+    {ok, _} = mailio_sync_mgr:sync_mailbox(Account, <<"INBOX">>),
+    ?assertEqual(2, length(all_emails(Db))),
+    [ok = mailio_fake_imap:set_search(Srv, Mode) || Mode <- [none]],
+    ?assertMatch({error, _}, mailio_sync_mgr:reconcile_mailbox(Account, <<"INBOX">>)),
+    ?assertEqual(2, length(all_emails(Db))),
+    ok = mailio_fake_imap:set_search(Srv, junk),
+    ?assertMatch({error, _}, mailio_sync_mgr:reconcile_mailbox(Account, <<"INBOX">>)),
+    ?assertEqual(2, length(all_emails(Db))).
 
 whereis_writer(Account) ->
     {ok, Pid} = mailio_registry:lookup({writer, Account}),

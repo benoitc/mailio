@@ -391,9 +391,11 @@ maybe_write_uidmap(Db, MailboxId, Opts, EmailId) ->
                 %% the same message again (a replayed page): nothing to write
                 {ok, #{<<"emailId">> := EmailId}} ->
                     ok;
-                %% the UID now belongs to another message
-                {ok, #{<<"_rev">> := Rev}} ->
-                    {ok, _, _} = mailio_db:put(Db, Doc#{<<"_rev">> => Rev}),
+                %% The UID now belongs to another message: the one that held it
+                %% loses it (and its place in the mailbox, if it had no other).
+                {ok, #{<<"emailId">> := _Other}} ->
+                    _ = do_remove_uid(Db, MailboxId, Uid),
+                    {ok, _, _} = mailio_db:put(Db, Doc),
                     ok;
                 {error, not_found} ->
                     {ok, _, _} = mailio_db:put(Db, Doc),

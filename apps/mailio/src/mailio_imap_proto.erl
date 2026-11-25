@@ -416,7 +416,11 @@ keyword_response(<<"LSUB">>, Rest) ->
 keyword_response(<<"STATUS">>, Rest) ->
     parse_status(Rest);
 keyword_response(<<"SEARCH">>, Rest) ->
-    {search, [N || {number, N} <- tokenize(Rest)]};
+    %% numbers only: an answer with anything else in it is not read in part
+    case [T || T <- tokenize(Rest), not is_number_token(T)] of
+        [] -> {search, [N || {number, N} <- tokenize(Rest)]};
+        _ -> {other, <<"SEARCH ", Rest/binary>>}
+    end;
 keyword_response(<<"VANISHED">>, Rest) ->
     parse_vanished(Rest);
 keyword_response(Status, Rest) when
@@ -472,17 +476,17 @@ find_list([]) -> [].
 parse_vanished(Bin) ->
     Trimmed = mailio_ascii:trim_leading(Bin),
     case Trimmed of
-        <<"(", Rest/binary>> ->
-            case binary:split(Rest, <<")">>) of
-                [Marker, After] ->
-                    case mailio_ascii:upper(mailio_ascii:trim(Marker)) of
-                        <<"EARLIER">> when After =:= <<>>; binary_part(After, 0, 1) =:= <<" ">> ->
-                            vanished_report(true, Bin, mailio_ascii:trim_leading(After));
+        <<"(", _/binary>> ->
+            %% the marker is exactly (EARLIER), in any case, then a space
+            case Trimmed of
+                <<Marker:9/binary, After/binary>> ->
+                    case {mailio_ascii:upper(Marker), After} of
+                        {<<"(EARLIER)">>, <<" ", _/binary>>} ->
+                            vanished_report(true, Bin, After);
                         _ ->
-                            %% a marker we do not know: not a removal we may act on
                             {other, <<"VANISHED ", Bin/binary>>}
                     end;
-                [_] ->
+                _ ->
                     {other, <<"VANISHED ", Bin/binary>>}
             end;
         _ ->
@@ -492,16 +496,19 @@ parse_vanished(Bin) ->
 %% The UIDs are required, and all of them must be well formed: a report that is
 %% not read in full is not acted on in part.
 vanished_report(Earlier, Whole, Rest) ->
-    case parse_uid_ranges_strict(first_word(Rest)) of
-        {ok, Ranges} -> {vanished, Earlier, Ranges};
-        error -> {other, <<"VANISHED ", Whole/binary>>}
+    %% one set and nothing after it (spaces apart)
+    case binary:split(mailio_ascii:trim(Rest), [<<" ">>, <<"\t">>]) of
+        [Set] when Set =/= <<>> ->
+            case parse_uid_ranges_strict(Set) of
+                {ok, Ranges} -> {vanished, Earlier, Ranges};
+                error -> {other, <<"VANISHED ", Whole/binary>>}
+            end;
+        _ ->
+            {other, <<"VANISHED ", Whole/binary>>}
     end.
 
-first_word(Bin) ->
-    case binary:split(Bin, [<<" ">>, <<"\t">>]) of
-        [Word | _] -> Word;
-        [] -> <<>>
-    end.
+is_number_token({number, _}) -> true;
+is_number_token(_) -> false.
 
 %%====================================================================
 %% resp-text and codes:  "[CODE args] human text"

@@ -84,6 +84,14 @@
 - A listing window is cut to what the connection allows for one command, and a
   mailbox whose numbers are far apart is refused after a bound on the work
   instead of being searched for ever.
+- The store's first read of a mailbox now also brings in line what an earlier
+  read that failed halfway had stored: mail removed on the server meanwhile is
+  removed, a recreated mailbox replaces the messages, and flags are corrected,
+  before the position is kept. A full read no longer keeps all the pages in
+  memory, only the numbers it has seen, and stops with an error past a limit.
+- A search for the UIDs of a mailbox that is not answered in full is now an
+  error, and so is a mailbox whose size the server does not give: neither is
+  taken for an empty mailbox, and local mail is not removed on their account.
 - A report of vanished messages without a list of numbers, or with one that is
   not well formed, is no longer acted on in part. Both the store and the MCP
   server compare the whole mailbox instead.

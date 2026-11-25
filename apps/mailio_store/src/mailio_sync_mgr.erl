@@ -276,42 +276,41 @@ run_sync(
     LocalId,
     #state{adapter = Adapter, conn = Conn, db = Db} = State
 ) ->
-    RemoteState = load_cursor(Db, LocalId),
-    Fetch = fun(Cursor) -> Adapter:fetch_changes_since(Conn, ImapName, Cursor, #{}) end,
-    %% Each page is applied, and only then is the cursor it leads to kept: a page
-    %% that cannot be applied leaves the cursor where it was, so it is tried again.
-    Step = fun(Changes, Next, Stats) ->
-        case resync_mode(Changes) of
-            none ->
-                case apply_changes(State, ImapName, LocalId, Changes, Stats) of
-                    {ok, Stats1} ->
-                        store_cursor(Db, LocalId, Next),
-                        {ok, Stats1};
-                    {error, _} = Error ->
-                        {stop, Error}
-                end;
-            Mode ->
-                {stop, {signal, Mode}}
-        end
-    end,
-    case mailio_sync_pages:walk(Fetch, RemoteState, page_opts(), new_stats(), Step) of
-        {ok, Stats, _Final} ->
-            {{ok, Stats}, State};
-        {stopped, {signal, Mode}} ->
-            %% The changes cannot be applied one by one. The mailbox is read in
-            %% full and brought in line first; the cursor moves only when that
-            %% worked, so a failure is retried, not skipped.
-            case full_resync(Mode, ImapName, LocalId, State) of
-                {ok, Stats, FullState} ->
-                    store_cursor(Db, LocalId, FullState),
+    case load_cursor(Db, LocalId) of
+        initial ->
+            %% A first read is a full read, and it also brings in line what an
+            %% earlier one that failed halfway left behind: what was stored then
+            %% may have changed on the server since.
+            full_sync(resync, ImapName, LocalId, State);
+        RemoteState ->
+            Fetch = fun(Cursor) -> Adapter:fetch_changes_since(Conn, ImapName, Cursor, #{}) end,
+            %% Each page is applied, and only then is the cursor it leads to kept: a
+            %% page that cannot be applied leaves the cursor where it was, so it is
+            %% tried again.
+            Step = fun(Changes, Next, Stats) ->
+                case resync_mode(Changes) of
+                    none ->
+                        case apply_changes(State, ImapName, LocalId, Changes, Stats) of
+                            {ok, Stats1} ->
+                                store_cursor(Db, LocalId, Next),
+                                {ok, Stats1};
+                            {error, _} = Error ->
+                                {stop, Error}
+                        end;
+                    Mode ->
+                        {stop, {signal, Mode}}
+                end
+            end,
+            case mailio_sync_pages:walk(Fetch, RemoteState, page_opts(), new_stats(), Step) of
+                {ok, Stats, _Final} ->
                     {{ok, Stats}, State};
+                {stopped, {signal, Mode}} ->
+                    full_sync(Mode, ImapName, LocalId, State);
+                {stopped, {error, Reason}} ->
+                    {{error, Reason}, State};
                 {error, Reason} ->
                     {{error, Reason}, State}
-            end;
-        {stopped, {error, Reason}} ->
-            {{error, Reason}, State};
-        {error, Reason} ->
-            {{error, Reason}, State}
+            end
     end.
 
 page_opts() ->
@@ -329,59 +328,81 @@ resync_mode(Changes) ->
         {false, false} -> none
     end.
 
-full_resync(Mode, ImapName, LocalId, State) ->
-    #state{account_id = AccountId} = State,
-    maybe
-        %% Everything is read first, to the last page. Nothing is touched
-        %% until the server has answered in full.
-        {ok, Changes, FullState, ResetSeen} ?= read_all(State, ImapName),
-        {ok, Local} ?= local_uidmaps(State#state.db, LocalId),
-        Server = [Info || {added, Info} <- Changes],
-        ServerUids = sets:from_list([maps:get(uid, I) || I <- Server]),
-        %% A mailbox recreated while it was being read means the UIDs held here
-        %% are other messages, whatever the adapter said at the start.
-        Replace = Mode =:= reset orelse ResetSeen,
-        Gone = [
-            Uid
-         || {Uid, _EmailId, _DocId} <- Local,
-            Replace orelse not sets:is_element(Uid, ServerUids)
-        ],
-        Removed = [remove_local_uid(AccountId, LocalId, Uid) || Uid <- Gone],
-        Results = [sync_one(State, ImapName, LocalId, Info) || Info <- Server],
-        Failed = [R || {error, _} = R <- Results],
-        case Failed of
-            [] ->
-                {ok,
-                    #{
-                        added => length([ok || added <- Results]),
-                        updated => length([ok || updated <- Results]),
-                        removed => length([ok || ok <- Removed]),
-                        reset => 1
-                    },
-                    FullState};
-            [{error, Why} | _] ->
-                {error, {resync_incomplete, length(Failed), Why}}
-        end
+%% The mailbox is read in full and brought in line, and only then is the cursor
+%% it leads to kept: a failure is retried, not skipped.
+full_sync(Mode, ImapName, LocalId, #state{db = Db} = State) ->
+    case full_resync(Mode, ImapName, LocalId, State) of
+        {ok, Stats, FullState} ->
+            store_cursor(Db, LocalId, FullState),
+            {{ok, Stats}, State};
+        {error, Reason} ->
+            {{error, Reason}, State}
     end.
 
-%% Every page of a full read, to the last one. A page that says the mailbox was
-%% recreated (`reset') while it was being read discards what was read so far and
-%% starts again: nothing from two generations is mixed.
-read_all(State, ImapName) ->
-    read_all(State, ImapName, 3, false).
+%% Pages are applied as they come and not kept, so the memory a full read needs
+%% is the UIDs seen (as ranges, and with a limit), not the mailbox. When the
+%% pages end, whatever the store holds that the server did not list is removed.
+%% A page that says the mailbox was recreated (`reset') starts the read again
+%% and, from then on, every UID held is replaced: nothing from two generations is
+%% mixed, whatever the adapter said about identities.
+full_resync(Mode, ImapName, LocalId, State) ->
+    full_resync(Mode, ImapName, LocalId, State, 3, Mode =:= reset).
 
-read_all(_State, _ImapName, 0, _ResetSeen) ->
+full_resync(_Mode, _ImapName, _LocalId, _State, 0, _Replace) ->
     {error, mailbox_keeps_changing};
-read_all(#state{adapter = Adapter, conn = Conn} = State, ImapName, Attempts, ResetSeen) ->
+full_resync(Mode, ImapName, LocalId, State, Attempts, Replace) ->
+    #state{adapter = Adapter, conn = Conn} = State,
     Fetch = fun(Cursor) -> Adapter:fetch_changes_since(Conn, ImapName, Cursor, #{}) end,
-    case mailio_sync_pages:collect(Fetch, initial, page_opts()) of
-        {ok, Changes, Final} ->
-            {ok, Changes, Final, ResetSeen};
-        %% remember that the mailbox was recreated: what is held must be replaced
+    Limit = mailio_config:get(sync_max_listed_uids, 10000000),
+    Acc0 = #{seen => mailio_uid_set:new(Limit), stats => new_stats()},
+    Step = fun(Changes, _Next, Acc) ->
+        case resync_mode(Changes) of
+            none -> resync_page(State, ImapName, LocalId, Replace, Changes, Acc);
+            Signal -> {stop, {signal, Signal}}
+        end
+    end,
+    case mailio_sync_pages:walk(Fetch, initial, page_opts(), Acc0, Step) of
+        {ok, #{seen := Seen, stats := Stats}, Final} ->
+            finish_resync(State, LocalId, Seen, Stats, Final);
         {stopped, {signal, Signal}} ->
-            read_all(State, ImapName, Attempts - 1, ResetSeen orelse Signal =:= reset);
+            full_resync(
+                Mode, ImapName, LocalId, State, Attempts - 1, Replace orelse Signal =:= reset
+            );
+        {stopped, {error, _} = Error} ->
+            Error;
         {error, _} = Error ->
             Error
+    end.
+
+resync_page(State, ImapName, LocalId, Replace, Changes, #{seen := Seen, stats := Stats} = Acc) ->
+    resync_page(State, ImapName, LocalId, Replace, [I || {added, I} <- Changes], Seen, Stats, Acc).
+
+resync_page(_State, _ImapName, _LocalId, _Replace, [], Seen, Stats, Acc) ->
+    {ok, Acc#{seen := Seen, stats := Stats}};
+resync_page(State, ImapName, LocalId, Replace, [Info | Rest], Seen, Stats, Acc) ->
+    case mailio_uid_set:add(maps:get(uid, Info), Seen) of
+        {error, too_many} ->
+            {stop, {error, mailbox_too_large_to_resync}};
+        {ok, Seen1} ->
+            case sync_one(State, ImapName, LocalId, Info, Replace) of
+                {error, Why} ->
+                    {stop, {error, {resync_incomplete, Why}}};
+                Done ->
+                    resync_page(
+                        State, ImapName, LocalId, Replace, Rest, Seen1, bump(Stats, Done), Acc
+                    )
+            end
+    end.
+
+%% What the server listed is in line. What is held and was not listed is gone.
+finish_resync(State, LocalId, Seen, Stats, Final) ->
+    #state{account_id = AccountId, db = Db} = State,
+    maybe
+        {ok, Local} ?= local_uidmaps(Db, LocalId),
+        Listed = mailio_uid_set:to_lookup(Seen),
+        Gone = [Uid || {Uid, _EmailId, _DocId} <- Local, not mailio_uid_set:member(Uid, Listed)],
+        Removed = length([ok || Uid <- Gone, remove_local_uid(AccountId, LocalId, Uid) =:= ok]),
+        {ok, Stats#{removed => Removed, reset => 1}, Final}
     end.
 
 remove_local_uid(AccountId, LocalId, Uid) ->
@@ -393,10 +414,12 @@ remove_local_uid(AccountId, LocalId, Uid) ->
 %% One message of a full read. A UID we already know is only the same message if
 %% it was seen under the same UIDVALIDITY: a recreated mailbox reuses numbers
 %% for other messages, so an old mapping is dropped and the message fetched.
-sync_one(State, ImapName, LocalId, Info) ->
+sync_one(State, ImapName, LocalId, Info, Replace) ->
     #state{account_id = AccountId, db = Db} = State,
     Uid = maps:get(uid, Info),
     case mailio_account_writer:lookup_uid(AccountId, LocalId, Uid) of
+        {ok, _EmailId} when Replace ->
+            replace_one(State, ImapName, LocalId, Info);
         {ok, EmailId} ->
             case same_generation(Db, EmailId, LocalId, Uid, Info) of
                 true ->

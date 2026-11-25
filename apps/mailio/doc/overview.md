@@ -40,7 +40,7 @@ Every size a server controls is bounded, so a broken or hostile server cannot ma
 | IMAP whole response | 96 MiB | `max_response` | same |
 | IMAP responses one command collects | 100,000 of them and 96 MiB | `max_untagged`, `max_untagged_bytes` | same |
 | IMAP UIDs one sync adapter command lists | 10,000, cut to half of `max_untagged` for FETCH and to what fits in `max_line` for SEARCH | `listing_window` | not a limit that fails: a larger mailbox is listed in several windows, and the adapter answers `more` until it is all read |
-| IMAP listing commands for one mailbox read | 100,000 | `max_list_commands` | `imap_listing_too_sparse`, nothing is changed: UIDs that are far apart cost windows, not messages |
+| IMAP listing commands for one mailbox read | 100,000 | `max_list_commands` | `imap_listing_too_sparse`, nothing is changed: UIDs that are far apart cost windows, not messages. It counts the windows of data; the EXAMINE of each call and the query for the highest UID are not in it |
 | IMAP `VANISHED` report the sync adapter lists one by one | 100,000 UIDs | `max_vanished`, which can only lower it | the adapter returns `resync`: read the mailbox again and keep the new state only when that worked |
 | POP3 listing reply (LIST, UIDL, CAPA) | 32 MiB | `max_list_bytes` | `pop3_response_too_large`, connection closed |
 | POP3 TOP reply | 1 MiB | `max_top_bytes` | same |
@@ -69,7 +69,7 @@ The sync adapter (`mailio_adapter`) reports more than before:
 - Every `added` change carries the `uidvalidity` it was listed under.
 - `fetch_message/5` takes `#{uidvalidity => V}` and refuses (`imap_uidvalidity_changed`) when the mailbox has another one. It is optional in `mailio_adapter`, but an adapter whose `added` changes carry `uidvalidity` must implement it: the store refuses to fetch such a message through `fetch_message/4`.
 - A mailbox is listed in windows of `listing_window` UIDs, and a read that does not fit in one call answers `more` with a state to continue from. The state carries where the listing stopped, so it may be kept between calls.
-- A listing or flag fetch the server refuses is now an error. It used to be an empty answer with a new state.
+- A listing or flag fetch the server refuses is now an error, and so is a UID search that does not answer in full: a tagged OK with no `* SEARCH` line, or one with something other than numbers in it, is not a mailbox with no mail (an explicit, empty `* SEARCH` is). It used to be an empty answer with a new state.
 
 The rest of this section is about `reset` and `resync`. `reset` means the UIDs the caller holds mean other messages now; `resync` means there were too many changes to list. In both cases read the whole mailbox again and keep the new state only when that worked.
 
