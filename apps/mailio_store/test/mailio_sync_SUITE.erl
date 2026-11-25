@@ -29,7 +29,12 @@
     idle_push_triggers_sync/1,
     oversized_vanished_resynchronizes/1,
     failed_resync_keeps_the_cursor/1,
-    validity_change_replaces_the_mailbox/1
+    validity_change_replaces_the_mailbox/1,
+    failed_listing_keeps_mail_and_cursor/1,
+    failed_body_fetch_keeps_the_cursor/1,
+    recreated_mailbox_during_resync_replaces_reused_uids/1,
+    removing_one_duplicate_keeps_the_other_uid/1,
+    removing_one_duplicate_in_a_resync_keeps_the_other_uid/1
 ]).
 
 all() ->
@@ -42,7 +47,12 @@ all() ->
         idle_push_triggers_sync,
         oversized_vanished_resynchronizes,
         failed_resync_keeps_the_cursor,
-        validity_change_replaces_the_mailbox
+        validity_change_replaces_the_mailbox,
+        failed_listing_keeps_mail_and_cursor,
+        failed_body_fetch_keeps_the_cursor,
+        recreated_mailbox_during_resync_replaces_reused_uids,
+        removing_one_duplicate_keeps_the_other_uid,
+        removing_one_duplicate_in_a_resync_keeps_the_other_uid
     ].
 
 init_per_suite(Config) ->
@@ -287,6 +297,128 @@ validity_change_replaces_the_mailbox(Config) ->
     ?assertEqual([<<"Brand new one">>, <<"Brand new two">>], Subjects),
     {ok, S2} = mailio_sync_mgr:sync_mailbox(Account, <<"INBOX">>),
     ?assertEqual(0, maps:get(added, S2)).
+
+%% The server answers the listing with NO, on the wire, after EXAMINE worked.
+%% Nothing may be removed and the cursor must stay where it was.
+failed_listing_keeps_mail_and_cursor(Config) ->
+    Account = ?config(account, Config),
+    Db = mailio_account:db_name(Account),
+    Srv = ?config(srv, Config),
+    restart_with(Config, #{max_vanished => 1}),
+    ok = mailio_fake_imap:deliver(Srv, <<"Third message">>),
+    ok = mailio_fake_imap:deliver(Srv, <<"Fourth message">>),
+    {ok, _} = mailio_sync_mgr:sync_mailbox(Account, <<"INBOX">>),
+    ?assertEqual(4, length(all_emails(Db))),
+    {ok, LocalId} = inbox_local_id(Account),
+    Before = cursor(Db, LocalId),
+    ok = mailio_fake_imap:expunge(Srv, 100),
+    ok = mailio_fake_imap:expunge(Srv, 101),
+    ok = mailio_fake_imap:set_failure(Srv, meta, true),
+    ?assertMatch({error, _}, mailio_sync_mgr:sync_mailbox(Account, <<"INBOX">>)),
+    ?assertEqual(4, length(all_emails(Db))),
+    ?assertEqual(Before, cursor(Db, LocalId)),
+    {ok, Mbx} = mailio_db:get(Db, <<?ID_MAILBOX, LocalId/binary>>),
+    ?assertEqual(4, maps:get(<<"totalEmails">>, Mbx)),
+    %% once the server answers again, the work is done
+    ok = mailio_fake_imap:set_failure(Srv, meta, false),
+    {ok, _} = mailio_sync_mgr:sync_mailbox(Account, <<"INBOX">>),
+    ?assertEqual(2, length(all_emails(Db))).
+
+%% A message that cannot be fetched stops the resync before the cursor moves.
+failed_body_fetch_keeps_the_cursor(Config) ->
+    Account = ?config(account, Config),
+    Db = mailio_account:db_name(Account),
+    Srv = ?config(srv, Config),
+    restart_with(Config, #{max_vanished => 1}),
+    {ok, _} = mailio_sync_mgr:sync_mailbox(Account, <<"INBOX">>),
+    {ok, LocalId} = inbox_local_id(Account),
+    Before = cursor(Db, LocalId),
+    ok = mailio_fake_imap:expunge(Srv, 100),
+    ok = mailio_fake_imap:expunge(Srv, 101),
+    ok = mailio_fake_imap:deliver(Srv, <<"Needs fetching">>),
+    ok = mailio_fake_imap:set_failure(Srv, body, true),
+    ?assertMatch({error, _}, mailio_sync_mgr:sync_mailbox(Account, <<"INBOX">>)),
+    ?assertEqual(Before, cursor(Db, LocalId)),
+    ok = mailio_fake_imap:set_failure(Srv, body, false),
+    {ok, _} = mailio_sync_mgr:sync_mailbox(Account, <<"INBOX">>),
+    ?assertEqual([<<"Needs fetching">>], [maps:get(<<"subject">>, E) || E <- all_emails(Db)]).
+
+%% The mailbox is recreated after the server reported too many changes and
+%% before the full read: the UIDs it reuses are other messages.
+recreated_mailbox_during_resync_replaces_reused_uids(Config) ->
+    Account = ?config(account, Config),
+    Db = mailio_account:db_name(Account),
+    Srv = ?config(srv, Config),
+    restart_with(Config, #{max_vanished => 1}, mailio_failing_adapter),
+    ok = mailio_fake_imap:deliver(Srv, <<"Third message">>),
+    ok = mailio_fake_imap:deliver(Srv, <<"Fourth message">>),
+    {ok, _} = mailio_sync_mgr:sync_mailbox(Account, <<"INBOX">>),
+    ?assertEqual(4, length(all_emails(Db))),
+    ok = mailio_fake_imap:expunge(Srv, 102),
+    ok = mailio_fake_imap:expunge(Srv, 103),
+    application:set_env(mailio_store, before_full_read, fun() ->
+        ok = mailio_fake_imap:new_validity(Srv, [<<"Reborn one">>, <<"Reborn two">>])
+    end),
+    try
+        {ok, _} = mailio_sync_mgr:sync_mailbox(Account, <<"INBOX">>)
+    after
+        application:unset_env(mailio_store, before_full_read)
+    end,
+    Subjects = lists:sort([maps:get(<<"subject">>, E) || E <- all_emails(Db)]),
+    %% uids 100 and 101 now belong to the new messages: no old body is kept
+    ?assertEqual([<<"Reborn one">>, <<"Reborn two">>], Subjects),
+    {ok, S2} = mailio_sync_mgr:sync_mailbox(Account, <<"INBOX">>),
+    ?assertEqual(0, maps:get(added, S2)),
+    ?assertEqual(0, maps:get(removed, S2)).
+
+%% Two UIDs holding the same mail are one email. Losing one UID must not
+%% remove the email while the other UID is still on the server.
+removing_one_duplicate_keeps_the_other_uid(Config) ->
+    Account = ?config(account, Config),
+    Db = mailio_account:db_name(Account),
+    Srv = ?config(srv, Config),
+    ok = mailio_fake_imap:deliver(Srv, <<"Twice">>),
+    ok = mailio_fake_imap:deliver(Srv, <<"Twice">>),
+    {ok, _} = mailio_sync_mgr:sync_mailbox(Account, <<"INBOX">>),
+    {ok, LocalId} = inbox_local_id(Account),
+    ?assertEqual(3, length(all_emails(Db))),
+    ok = mailio_fake_imap:expunge(Srv, 102),
+    {ok, S} = mailio_sync_mgr:sync_mailbox(Account, <<"INBOX">>),
+    ?assertEqual(1, maps:get(removed, S)),
+    ?assertEqual(3, length(all_emails(Db))),
+    {ok, Mbx} = mailio_db:get(Db, <<?ID_MAILBOX, LocalId/binary>>),
+    ?assertEqual(3, maps:get(<<"totalEmails">>, Mbx)),
+    %% the second one goes too: now the email is gone
+    ok = mailio_fake_imap:expunge(Srv, 103),
+    {ok, _} = mailio_sync_mgr:sync_mailbox(Account, <<"INBOX">>),
+    ?assertEqual(2, length(all_emails(Db))),
+    {ok, Mbx2} = mailio_db:get(Db, <<?ID_MAILBOX, LocalId/binary>>),
+    ?assertEqual(2, maps:get(<<"totalEmails">>, Mbx2)).
+
+removing_one_duplicate_in_a_resync_keeps_the_other_uid(Config) ->
+    Account = ?config(account, Config),
+    Db = mailio_account:db_name(Account),
+    Srv = ?config(srv, Config),
+    restart_with(Config, #{max_vanished => 1}),
+    ok = mailio_fake_imap:deliver(Srv, <<"Twice">>),
+    ok = mailio_fake_imap:deliver(Srv, <<"Twice">>),
+    {ok, _} = mailio_sync_mgr:sync_mailbox(Account, <<"INBOX">>),
+    {ok, LocalId} = inbox_local_id(Account),
+    ok = mailio_fake_imap:expunge(Srv, 100),
+    ok = mailio_fake_imap:expunge(Srv, 102),
+    {ok, _} = mailio_sync_mgr:sync_mailbox(Account, <<"INBOX">>),
+    Subjects = lists:sort([maps:get(<<"subject">>, E) || E <- all_emails(Db)]),
+    ?assertEqual([<<"Second message">>, <<"Twice">>], Subjects),
+    %% the surviving UID still maps to the email, and the email knows only it
+    {ok, EmailId} = mailio_account_writer:lookup_uid(Account, LocalId, 103),
+    {ok, Twice} = mailio_db:get(Db, <<?ID_EMAIL, EmailId/binary>>),
+    ?assertEqual([103], [maps:get(<<"uid">>, E) || E <- mailio_email:imap_entries(Twice, LocalId)]),
+    ?assertEqual({error, not_found}, mailio_account_writer:lookup_uid(Account, LocalId, 102)),
+    {ok, Mbx} = mailio_db:get(Db, <<?ID_MAILBOX, LocalId/binary>>),
+    ?assertEqual(2, maps:get(<<"totalEmails">>, Mbx)),
+    {ok, S2} = mailio_sync_mgr:sync_mailbox(Account, <<"INBOX">>),
+    ?assertEqual(0, maps:get(added, S2)),
+    ?assertEqual(0, maps:get(removed, S2)).
 
 restart_with(Config, Extra) ->
     restart_with(Config, Extra, mailio_imap).

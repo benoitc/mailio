@@ -298,7 +298,10 @@ logical_length(Buffer, Pos, Limits, Scan) ->
                     true -> 1;
                     false -> 0
                 end,
-            case Size - Pos - Pending > map_get(line, Limits) of
+            case
+                Size - Pos - Pending > map_get(line, Limits) orelse
+                    Size - Pending > map_get(response, Limits)
+            of
                 true -> {error, response_too_large};
                 false -> {more, {Pos, max(Pos, Size - 1)}}
             end;
@@ -466,22 +469,24 @@ find_list([]) -> [].
 %% UID must be exactly what RFC 3501 allows.
 parse_vanished(Bin) ->
     Trimmed = mailio_ascii:trim_leading(Bin),
-    {Earlier, Set} =
-        case Trimmed of
-            <<"(", Rest/binary>> ->
-                case binary:split(Rest, <<")">>) of
-                    [Marker, After] ->
-                        {
-                            string:uppercase(mailio_ascii:trim(Marker)) =:= <<"EARLIER">>,
-                            mailio_ascii:trim_leading(After)
-                        };
-                    [_] ->
-                        {false, <<>>}
-                end;
-            _ ->
-                {false, Trimmed}
-        end,
-    {vanished, Earlier, parse_uid_ranges(first_word(Set))}.
+    case Trimmed of
+        <<"(", Rest/binary>> ->
+            case binary:split(Rest, <<")">>) of
+                [Marker, After] ->
+                    case mailio_ascii:upper(mailio_ascii:trim(Marker)) of
+                        <<"EARLIER">> ->
+                            {vanished, true,
+                                parse_uid_ranges(first_word(mailio_ascii:trim_leading(After)))};
+                        _ ->
+                            %% a marker we do not know: not a removal we may act on
+                            {other, <<"VANISHED ", Bin/binary>>}
+                    end;
+                [_] ->
+                    {other, <<"VANISHED ", Bin/binary>>}
+            end;
+        _ ->
+            {vanished, false, parse_uid_ranges(first_word(Trimmed))}
+    end.
 
 first_word(Bin) ->
     case binary:split(Bin, [<<" ">>, <<"\t">>]) of

@@ -406,3 +406,29 @@ vanished_rejects_things_that_are_not_uids_test() ->
             <<"* VANISHED 4294967296">>
         ]
     ].
+
+%% A marker that is not (EARLIER) must not turn into removals.
+vanished_with_an_unknown_marker_is_not_a_removal_test() ->
+    [
+        ?assertMatch({untagged, {other, <<"VANISHED ", _/binary>>}}, ?P:parse_response(Wire))
+     || Wire <- [
+            <<"* VANISHED (FOO) 5">>,
+            <<"* VANISHED (EARLIER 5">>,
+            <<"* VANISHED (EARLIER FOO) 5">>,
+            <<"* VANISHED ( ) 5">>
+        ]
+    ].
+
+%% The whole-response limit counts while waiting for the end of a line, too.
+max_response_applies_while_waiting_for_the_line_end_test() ->
+    Opts = #{max_response => 8},
+    ?assertEqual({error, response_too_large}, ?P:read_response(<<"0123456789">>, Opts, start)),
+    ?assertMatch({more, _}, ?P:read_response(<<"0123">>, Opts, start)),
+    %% after a literal, a line that has no end yet counts from the start of the response
+    Opts2 = #{max_response => 30},
+    First = <<"* 1 FETCH (BODY[] {3}\r\nabc">>,
+    {more, St} = ?P:read_response(First, Opts2, start),
+    ?assertEqual(
+        {error, response_too_large},
+        ?P:read_response(<<First/binary, " and a long tail that never ends">>, Opts2, St)
+    ).

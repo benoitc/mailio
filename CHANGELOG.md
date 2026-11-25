@@ -47,6 +47,25 @@
   position was kept and the missed changes were never applied.
 - A line that arrives in many small pieces is no longer re-read from the start
   each time.
+- A listing that the IMAP server refuses is now an error. Before, it counted as
+  an empty mailbox, and the store could delete local mail and keep the new
+  position.
+- A mailbox recreated while the store was reading it again no longer leaves
+  old messages under reused numbers: a message is only trusted under the
+  identity it was listed with.
+- When two copies of the same mail are in a mailbox and one is deleted on the
+  server, the store keeps the mail and its count while the other copy exists.
+- Errors while the store reads a mailbox again, lists its local mail, updates
+  flags or stores a message now stop the update before the new position is
+  kept.
+- A server report about vanished messages that is malformed, or has a marker
+  other than the one defined, is no longer taken as a list of removals. The
+  limit on how long such a report may be can only be lowered, not raised.
+- The limit on one whole response now also applies while the end of a line is
+  still awaited.
+- An IMAP connection that drops, or is greeted with something that is not a
+  greeting, closes its socket and releases what the interrupted command had
+  collected.
 - Checking a mailbox for new mail no longer reports the newest message again
   when nothing changed. Real servers return the last message for any range that
   starts past the end.

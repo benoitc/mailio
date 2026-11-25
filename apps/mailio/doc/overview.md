@@ -39,7 +39,7 @@ Every size a server controls is bounded, so a broken or hostile server cannot ma
 | IMAP line outside a literal | 64 KiB | `max_line` | same |
 | IMAP whole response | 96 MiB | `max_response` | same |
 | IMAP responses one command collects | 100,000 of them and 96 MiB | `max_untagged`, `max_untagged_bytes` | same |
-| IMAP `VANISHED` report the adapter lists one by one | 100,000 UIDs | fixed | the adapter reports a reset and you resynchronise |
+| IMAP `VANISHED` report the sync adapter lists one by one | 100,000 UIDs | `max_vanished`, which can only lower it | the adapter returns `resync`: read the mailbox again and keep the new state only when that worked |
 | POP3 listing reply (LIST, UIDL, CAPA) | 32 MiB | `max_list_bytes` | `pop3_response_too_large`, connection closed |
 | POP3 TOP reply | 1 MiB | `max_top_bytes` | same |
 | POP3 RETR reply | the `MaxBytes` you pass, plus 64 KiB | argument | same |
@@ -61,7 +61,14 @@ These affect code that calls `mailio_imap_proto` directly, which is public API.
 | `{vanished, Earlier, [Uid]}` | `{vanished, Earlier, [{Lo, Hi}]}` |
 | `read_response/3` took a byte offset | it takes `start`, then the state it returned in `{more, State}` |
 
-The sync adapter (`mailio_adapter`) can return `resync` among its changes, next to `reset`. `reset` means the UIDs the caller holds mean other messages now; `resync` means there were too many changes to list. In both cases read the whole mailbox again and keep the new state only when that worked.
+The sync adapter (`mailio_adapter`) reports more than before:
+
+- It can return `resync` among its changes, next to `reset`.
+- Every `added` change carries the `uidvalidity` it was listed under.
+- `fetch_message/5` takes `#{uidvalidity => V}` and refuses (`imap_uidvalidity_changed`) when the mailbox has another one.
+- A listing or flag fetch the server refuses is now an error. It used to be an empty answer with a new state.
+
+The rest of this section is about `reset` and `resync`. `reset` means the UIDs the caller holds mean other messages now; `resync` means there were too many changes to list. In both cases read the whole mailbox again and keep the new state only when that worked.
 
 ## Errors
 

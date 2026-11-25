@@ -237,3 +237,41 @@ idle_script(S) ->
         {error, _} ->
             ok
     end.
+
+%% A server that does not greet is dropped, socket and all.
+an_unexpected_greeting_closes_the_socket_test() ->
+    Test = self(),
+    {ok, L} = gen_tcp:listen(0, [binary, {active, false}, {packet, line}, {reuseaddr, true}]),
+    {ok, Port} = inet:port(L),
+    spawn_link(fun() ->
+        {ok, S} = gen_tcp:accept(L),
+        gen_tcp:send(S, <<"* BYE go away\r\n">>),
+        %% the client must close its end soon
+        Test ! {closed, gen_tcp:recv(S, 0, 3000)}
+    end),
+    C = connect(Port, #{}),
+    receive
+        {closed, R} -> ?assertEqual({error, closed}, R)
+    after 5000 -> ?assert(false)
+    end,
+    ?assert(is_process_alive(C)),
+    mailio_imap_conn:close(C),
+    gen_tcp:close(L).
+
+%% After a disconnect, while the connection waits to reconnect, it does not
+%% keep what the interrupted command had collected.
+a_disconnect_releases_what_was_collected_test() ->
+    {Port, _, L} = serve(fun(S, _Tag) ->
+        Line = [<<"* OK ">>, binary:copy(<<"x">>, 1000), <<"\r\n">>],
+        [gen_tcp:send(S, Line) || _ <- lists:seq(1, 2000)],
+        %% no tagged answer: the connection drops
+        gen_tcp:close(S)
+    end),
+    C = connect(Port, #{}),
+    ?assertMatch({error, _}, noop(C)),
+    erlang:garbage_collect(C),
+    {binary, Bins} = process_info(C, binary),
+    Held = lists:sum([Size || {_Id, Size, _Refs} <- Bins]),
+    {memory, M} = process_info(C, memory),
+    ?assert(Held + M < 500000),
+    gen_tcp:close(L).

@@ -23,6 +23,9 @@
     set_keywords/1,
     reads_open_read_only/1,
     unchanged_mailbox_reports_nothing/1,
+    a_refused_listing_is_an_error/1,
+    max_vanished_can_only_be_lowered/1,
+    a_message_is_fetched_only_under_its_uidvalidity/1,
     writes_open_read_write/1
 ]).
 
@@ -35,6 +38,9 @@ all() ->
         set_keywords,
         reads_open_read_only,
         unchanged_mailbox_reports_nothing,
+        a_refused_listing_is_an_error,
+        max_vanished_can_only_be_lowered,
+        a_message_is_fetched_only_under_its_uidvalidity,
         writes_open_read_write
     ].
 
@@ -159,3 +165,52 @@ unchanged_mailbox_reports_nothing(Config) ->
     {ok, [_, _], State, done} = mailio_imap:fetch_changes_since(Conn, <<"INBOX">>, initial, #{}),
     {ok, [], State2, done} = mailio_imap:fetch_changes_since(Conn, <<"INBOX">>, State, #{}),
     {ok, [], _, done} = mailio_imap:fetch_changes_since(Conn, <<"INBOX">>, State2, #{}).
+
+%% A listing the server answers with NO must be an error, never an empty list
+%% with a new cursor: the mail it did not list would not be asked for again.
+a_refused_listing_is_an_error(Config) ->
+    Conn = ?config(conn, Config),
+    Srv = ?config(srv, Config),
+    {ok, _, State, done} = mailio_imap:fetch_changes_since(Conn, <<"INBOX">>, initial, #{}),
+    ok = mailio_fake_imap:deliver(Srv, <<"More mail">>),
+    ok = mailio_fake_imap:set_failure(Srv, meta, true),
+    ?assertMatch({error, _}, mailio_imap:fetch_changes_since(Conn, <<"INBOX">>, initial, #{})),
+    ?assertMatch({error, _}, mailio_imap:fetch_changes_since(Conn, <<"INBOX">>, State, #{})),
+    ok = mailio_fake_imap:set_failure(Srv, meta, false),
+    {ok, Changes, _, done} = mailio_imap:fetch_changes_since(Conn, <<"INBOX">>, State, #{}),
+    ?assertEqual([102], [Uid || {added, #{uid := Uid}} <- Changes]).
+
+max_vanished_can_only_be_lowered(Config) ->
+    Srv = ?config(srv, Config),
+    %% the fake server serves one connection at a time
+    mailio_imap:close(?config(conn, Config)),
+    Cfg = #{
+        host => <<"127.0.0.1">>,
+        port => mailio_fake_imap:port(Srv),
+        tls => false,
+        username => <<"u">>,
+        password => <<"p">>
+    },
+    Max = fun(Extra) ->
+        {ok, C} = mailio_imap:connect(maps:merge(Cfg, Extra)),
+        V = maps:get(max_vanished, C),
+        mailio_imap:close(C),
+        V
+    end,
+    ?assertEqual(100000, Max(#{})),
+    ?assertEqual(100000, Max(#{max_vanished => 50000000})),
+    ?assertEqual(5, Max(#{max_vanished => 5})).
+
+a_message_is_fetched_only_under_its_uidvalidity(Config) ->
+    Conn = ?config(conn, Config),
+    Srv = ?config(srv, Config),
+    Sink = fun(_) -> ok end,
+    ?assertMatch(
+        {ok, _},
+        mailio_imap:fetch_message(Conn, <<"INBOX">>, 100, Sink, #{uidvalidity => 1})
+    ),
+    ok = mailio_fake_imap:new_validity(Srv, [<<"Other one">>]),
+    {error, Err} = mailio_imap:fetch_message(Conn, <<"INBOX">>, 100, Sink, #{uidvalidity => 1}),
+    ?assertEqual(imap_uidvalidity_changed, mailio_error:code({error, Err})),
+    %% without the option the old behaviour stays
+    ?assertMatch({ok, _}, mailio_imap:fetch_message(Conn, <<"INBOX">>, 100, Sink)).

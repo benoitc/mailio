@@ -18,6 +18,7 @@
     list_mailboxes/1,
     fetch_changes_since/4,
     fetch_message/4,
+    fetch_message/5,
     set_keywords/5,
     move/4,
     append/4,
@@ -39,8 +40,8 @@
 %% Lifecycle
 %%====================================================================
 
-%% The most UIDs of one VANISHED report that are listed one by one; the config
-%% key `max_vanished' changes it.
+%% The most UIDs of one VANISHED report that are listed one by one. The config
+%% key `max_vanished' can only lower it.
 -define(MAX_VANISHED, 100000).
 
 -spec connect(map()) -> {ok, conn()} | {error, mailio_error:error_map()}.
@@ -55,7 +56,9 @@ connect(Config) ->
                     {ok, #{
                         pid => Pid,
                         caps => Caps,
-                        max_vanished => maps:get(max_vanished, Config, ?MAX_VANISHED)
+                        max_vanished => min(
+                            maps:get(max_vanished, Config, ?MAX_VANISHED), ?MAX_VANISHED
+                        )
                     }};
                 {ok, _Untagged, {Status, _, Text}} ->
                     mailio_imap_conn:close(Pid),
@@ -146,9 +149,14 @@ plain_changes(Pid, Caps, MailboxId, Prev) ->
                 true ->
                     {ok, [reset], encode(New), done};
                 false ->
-                    Added = fetch_added(Pid, maps:get(uidnext, Prev)),
-                    Updated = fetch_updated(Pid, Caps, maps:get(highestmodseq, Prev)),
-                    {ok, Added ++ Updated, encode(New), done}
+                    Validity = maps:get(uidvalidity, New),
+                    maybe
+                        {ok, Added} ?= fetch_added(Pid, maps:get(uidnext, Prev), Validity),
+                        {ok, Updated} ?= fetch_updated(Pid, Caps, maps:get(highestmodseq, Prev)),
+                        {ok, Added ++ Updated, encode(New), done}
+                    else
+                        {error, _} = Error -> Error
+                    end
             end;
         Other ->
             command_error(Other)
@@ -172,9 +180,13 @@ qresync_changes(Pid, MaxVanished, MailboxId, Prev) ->
                     %% and compares it with what it has.
                     {ok, [resync], encode(New), done};
                 {false, {ok, Uids}} ->
-                    Added = fetch_added(Pid, maps:get(uidnext, Prev)),
-                    Removed = [{removed, U} || U <- Uids],
-                    {ok, Added ++ Updated ++ Removed, encode(New), done}
+                    case fetch_added(Pid, maps:get(uidnext, Prev), maps:get(uidvalidity, New)) of
+                        {ok, Added} ->
+                            Removed = [{removed, U} || U <- Uids],
+                            {ok, Added ++ Updated ++ Removed, encode(New), done};
+                        {error, _} = Error ->
+                            Error
+                    end
             end;
         Other ->
             command_error(Other)
@@ -194,7 +206,12 @@ do_examine_qresync(Pid, MaxVanished, MailboxId, UidValidity, ModSeq) ->
         {ok, Untagged, {ok, _, _}} ->
             SelInfo = parse_select(Untagged),
             Ranges = lists:append([R || {vanished, _Earlier, R} <- Untagged]),
-            Vanished = vanished_uids(Ranges, MaxVanished),
+            Vanished =
+                case [Raw || {other, <<"VANISHED", _/binary>> = Raw} <- Untagged] of
+                    [] -> vanished_uids(Ranges, MaxVanished);
+                    %% a report we cannot read may hide removals: read it all again
+                    _ -> too_many
+                end,
             Updated = [
                 {updated, #{
                     uid => proplists:get_value(uid, I),
@@ -209,33 +226,37 @@ do_examine_qresync(Pid, MaxVanished, MailboxId, UidValidity, ModSeq) ->
     end.
 
 %% Added: messages with UID >= the previously seen UIDNEXT (or all, initially).
-fetch_added(Pid, undefined) ->
-    fetch_range(Pid, {range, 1, '*'});
-fetch_added(Pid, PrevUidNext) ->
+%% A listing the server refused is an error: the caller must not take the new
+%% cursor, or the mail that was not listed would never be asked for again.
+fetch_added(Pid, undefined, Validity) ->
+    fetch_range(Pid, {range, 1, '*'}, Validity);
+fetch_added(Pid, PrevUidNext, Validity) ->
     %% `N:*' always includes the highest message, even when N is past it
     %% (RFC 3501, section 9), so drop what we have already seen.
-    [
-        Change
-     || {added, #{uid := Uid}} = Change <- fetch_range(Pid, {range, PrevUidNext, '*'}),
-        Uid >= PrevUidNext
-    ].
+    case fetch_range(Pid, {range, PrevUidNext, '*'}, Validity) of
+        {ok, Changes} ->
+            {ok, [C || {added, #{uid := Uid}} = C <- Changes, Uid >= PrevUidNext]};
+        {error, _} = Error ->
+            Error
+    end.
 
-fetch_range(Pid, SeqSet) ->
+fetch_range(Pid, SeqSet, Validity) ->
     Items = [<<"UID">>, <<"FLAGS">>, <<"INTERNALDATE">>, <<"RFC822.SIZE">>],
     case run(Pid, fun(T) -> {mailio_imap_proto:uid_fetch(T, SeqSet, Items), undefined} end) of
         {ok, Untagged, {ok, _, _}} ->
-            [
-                added_change(Items0)
+            {ok, [
+                added_change(Items0, Validity)
              || {fetch, _Seq, Items0} <- Untagged,
                 proplists:is_defined(uid, Items0)
-            ];
-        _ ->
-            []
+            ]};
+        Other ->
+            command_error(Other)
     end.
 
-added_change(Items) ->
+added_change(Items, Validity) ->
     {added, #{
         uid => proplists:get_value(uid, Items),
+        uidvalidity => Validity,
         keywords => keywords_of(Items),
         internal_date => internaldate_epoch(Items),
         size => proplists:get_value(size, Items, 0)
@@ -243,11 +264,11 @@ added_change(Items) ->
 
 %% Updated flags via CONDSTORE CHANGEDSINCE, when available.
 fetch_updated(_Pid, _Caps, undefined) ->
-    [];
+    {ok, []};
 fetch_updated(Pid, Caps, PrevModSeq) ->
     case maps:get(condstore, Caps, false) orelse maps:get(qresync, Caps, false) of
         false ->
-            [];
+            {ok, []};
         true ->
             %% CHANGEDSINCE is a FETCH modifier appended after the item list.
             Cmd = fun(T) ->
@@ -263,16 +284,16 @@ fetch_updated(Pid, Caps, PrevModSeq) ->
             end,
             case run(Pid, Cmd) of
                 {ok, Untagged, {ok, _, _}} ->
-                    [
+                    {ok, [
                         {updated, #{
                             uid => proplists:get_value(uid, I),
                             keywords => keywords_of(I)
                         }}
                      || {fetch, _Seq, I} <- Untagged,
                         proplists:is_defined(uid, I)
-                    ];
-                _ ->
-                    []
+                    ]};
+                Other ->
+                    command_error(Other)
             end
     end.
 
@@ -282,8 +303,22 @@ fetch_updated(Pid, Caps, PrevModSeq) ->
 
 -spec fetch_message(conn(), binary(), term(), mailio_adapter:fetch_sink()) ->
     {ok, #{size := non_neg_integer()}} | {error, term()}.
-fetch_message(#{pid := Pid}, MailboxId, Uid, Sink) ->
+fetch_message(Conn, MailboxId, Uid, Sink) ->
+    fetch_message(Conn, MailboxId, Uid, Sink, #{}).
+
+%% @doc Like fetch_message/4. With `uidvalidity' in `Opts' the message is only
+%% fetched when the mailbox still has that UIDVALIDITY; a UID means nothing
+%% under another one (RFC 3501, section 2.3.1.1), so the answer is
+%% `{error, uidvalidity_changed}'.
+-spec fetch_message(conn(), binary(), term(), mailio_adapter:fetch_sink(), map()) ->
+    {ok, #{size := non_neg_integer()}} | {error, term()}.
+fetch_message(#{pid := Pid}, MailboxId, Uid, Sink, Opts) ->
     case do_examine(Pid, MailboxId) of
+        {ok, Sel} when
+            is_map_key(uidvalidity, Opts),
+            map_get(uidvalidity, Opts) =/= map_get(uidvalidity, Sel)
+        ->
+            {error, mailio_error_map(imap_uidvalidity_changed, uidvalidity_changed)};
         {ok, _} ->
             Items = [<<"BODY.PEEK[]">>],
             case run(Pid, fun(T) -> {mailio_imap_proto:uid_fetch(T, Uid, Items), undefined} end) of

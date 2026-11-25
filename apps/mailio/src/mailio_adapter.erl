@@ -91,6 +91,19 @@
 ) ->
     {ok, #{size := non_neg_integer()}} | {error, mailio_error:error_map()}.
 
+%% Like fetch_message/4, and only when the mailbox still has the UIDVALIDITY in
+%% `Opts' (`#{uidvalidity => V}'); otherwise an error. A caller that holds a UID
+%% across two reads uses it so that a recreated mailbox cannot hand it another
+%% message.
+-callback fetch_message(
+    conn(),
+    MailboxId :: binary(),
+    Uid :: term(),
+    fetch_sink(),
+    Opts :: map()
+) ->
+    {ok, #{size := non_neg_integer()}} | {error, mailio_error:error_map()}.
+
 -callback set_keywords(
     conn(),
     MailboxId :: binary(),
@@ -133,4 +146,6 @@
 -callback list_uids(conn(), MailboxId :: binary()) ->
     {ok, [term()]} | {error, mailio_error:error_map()}.
 
--optional_callbacks([watch/3, unwatch/2, append/4, move/4, expunge/3, list_uids/2]).
+-optional_callbacks([
+    watch/3, unwatch/2, append/4, move/4, expunge/3, list_uids/2, fetch_message/5
+]).

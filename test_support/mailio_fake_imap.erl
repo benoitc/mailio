@@ -14,7 +14,7 @@
 -module(mailio_fake_imap).
 
 -export([start/0, start/1, stop/1, port/1, commands/1]).
--export([last_flags/2, set_flags/3, deliver/2, expunge/2, new_validity/2]).
+-export([last_flags/2, set_flags/3, deliver/2, expunge/2, new_validity/2, set_failure/3]).
 
 -record(srv, {port, pid, ref, tab}).
 
@@ -68,6 +68,11 @@ deliver(Srv, Subject) -> call(Srv, {deliver, Subject}, ok).
 
 %% @doc Expunge a message by uid.
 expunge(Srv, Uid) -> call(Srv, {expunge, Uid}, ok).
+
+%% @doc Make a kind of UID FETCH answer `NO': `meta' (the listing of UIDs and
+%% flags) or `body' (a message body).
+set_failure(Srv, Kind, Bool) when Kind =:= meta; Kind =:= body ->
+    call(Srv, {set_failure, Kind, Bool}, ok).
 
 %% @doc The mailbox is recreated: a new UIDVALIDITY and these messages, with
 %% UIDs that start again at 100, so old UIDs now mean other messages.
@@ -168,6 +173,8 @@ handle_control(Sock, Ref, {deliver, Subject}, #{messages := Ms, uidnext := Uid} 
     State1 = State#{messages => Ms1, uidnext => Uid + 1},
     notify_exists(Sock, State1),
     {{ok, Ref, ok}, State1};
+handle_control(_Sock, Ref, {set_failure, Kind, Bool}, State) ->
+    {{ok, Ref, ok}, State#{{fail, Kind} => Bool}};
 handle_control(_Sock, Ref, {new_validity, Subjects}, #{uidvalidity := V} = State) ->
     Ms = [
         {Seq, 99 + Seq, [], 4 + Seq, msg(<<"nv", (integer_to_binary(Seq))/binary, "@x">>, S)}
@@ -423,32 +430,50 @@ handle_uid_fetch(Sock, Tag, Rest, #{messages := Ms} = State) ->
             tagged(Sock, Tag, <<"OK UID FETCH done">>),
             {continue, State};
         none ->
-            case is_body_fetch(ItemsBin) of
-                true ->
-                    Uid = set_low(SetBin),
-                    case lists:keyfind(Uid, 2, Ms) of
-                        {Seq, Uid, _F, _MS, Raw} -> send_body(Sock, Seq, Uid, Raw);
-                        false -> ok
-                    end,
-                    tagged(Sock, Tag, <<"OK UID FETCH done">>),
+            case
+                {
+                    is_body_fetch(ItemsBin),
+                    maps:get({fail, body}, State, false),
+                    maps:get({fail, meta}, State, false)
+                }
+            of
+                {true, true, _} ->
+                    tagged(Sock, Tag, <<"NO cannot read the message">>),
                     {continue, State};
-                false ->
-                    Lo = set_low(SetBin),
-                    %% like a real server: `N:*' always includes the highest
-                    %% message, even when N is past it (RFC 3501, section 9)
-                    Hits =
-                        case [M || {_, Uid, _, _, _} = M <- Ms, Uid >= Lo] of
-                            [] when
-                                Ms =/= [], binary_part(SetBin, byte_size(SetBin), -1) =:= <<"*">>
-                            ->
-                                [lists:last(Ms)];
-                            Found ->
-                                Found
-                        end,
-                    [send_meta(Sock, M) || M <- Hits],
-                    tagged(Sock, Tag, <<"OK UID FETCH done">>),
-                    {continue, State}
+                {false, _, true} ->
+                    tagged(Sock, Tag, <<"NO cannot list">>),
+                    {continue, State};
+                _ ->
+                    handle_uid_fetch_data(Sock, Tag, SetBin, ItemsBin, State)
             end
+    end.
+
+handle_uid_fetch_data(Sock, Tag, SetBin, ItemsBin, #{messages := Ms} = State) ->
+    case is_body_fetch(ItemsBin) of
+        true ->
+            Uid = set_low(SetBin),
+            case lists:keyfind(Uid, 2, Ms) of
+                {Seq, Uid, _F, _MS, Raw} -> send_body(Sock, Seq, Uid, Raw);
+                false -> ok
+            end,
+            tagged(Sock, Tag, <<"OK UID FETCH done">>),
+            {continue, State};
+        false ->
+            Lo = set_low(SetBin),
+            %% like a real server: `N:*' always includes the highest
+            %% message, even when N is past it (RFC 3501, section 9)
+            Hits =
+                case [M || {_, Uid, _, _, _} = M <- Ms, Uid >= Lo] of
+                    [] when
+                        Ms =/= [], binary_part(SetBin, byte_size(SetBin), -1) =:= <<"*">>
+                    ->
+                        [lists:last(Ms)];
+                    Found ->
+                        Found
+                end,
+            [send_meta(Sock, M) || M <- Hits],
+            tagged(Sock, Tag, <<"OK UID FETCH done">>),
+            {continue, State}
     end.
 
 handle_uid_search(Sock, Tag, #{messages := Ms} = State) ->

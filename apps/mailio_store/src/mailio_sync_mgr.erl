@@ -310,61 +310,105 @@ resync_mode(Changes) ->
     end.
 
 full_resync(Mode, ImapName, LocalId, State) ->
-    #state{adapter = Adapter, conn = Conn, db = Db, account_id = AccountId} = State,
-    case Adapter:fetch_changes_since(Conn, ImapName, initial, #{}) of
-        {ok, Changes, FullState, _More} ->
-            Server = [Info || {added, Info} <- Changes],
-            ServerUids = sets:from_list([maps:get(uid, I) || I <- Server]),
-            Removed = lists:foldl(
-                fun({Uid, EmailId, DocId}, N) ->
-                    case Mode =:= reset orelse not sets:is_element(Uid, ServerUids) of
-                        true ->
-                            _ = mailio_account_writer:remove_member(AccountId, LocalId, EmailId),
-                            _ = mailio_db:delete(Db, DocId),
-                            N + 1;
-                        false ->
-                            N
-                    end
-                end,
-                0,
-                local_uidmaps(Db, LocalId)
-            ),
-            {Added, Updated, Failed} = lists:foldl(
-                fun(Info, {A, U, F}) ->
-                    case sync_one(State, ImapName, LocalId, Info) of
-                        added -> {A + 1, U, F};
-                        updated -> {A, U + 1, F};
-                        {error, _} -> {A, U, F + 1}
-                    end
-                end,
-                {0, 0, 0},
-                Server
-            ),
-            case Failed of
-                0 ->
-                    {ok, #{added => Added, updated => Updated, removed => Removed, reset => 1},
-                        FullState};
-                _ ->
-                    {error, {resync_incomplete, Failed}}
-            end;
-        {error, _} = Error ->
-            Error
+    #state{account_id = AccountId} = State,
+    maybe
+        %% Everything is read first, to the last page. Nothing is touched
+        %% until the server has answered in full.
+        {ok, Changes, FullState} ?= read_all(State, ImapName),
+        {ok, Local} ?= local_uidmaps(State#state.db, LocalId),
+        Server = [Info || {added, Info} <- Changes],
+        ServerUids = sets:from_list([maps:get(uid, I) || I <- Server]),
+        Gone = [
+            Uid
+         || {Uid, _EmailId, _DocId} <- Local,
+            Mode =:= reset orelse not sets:is_element(Uid, ServerUids)
+        ],
+        Removed = [remove_local_uid(AccountId, LocalId, Uid) || Uid <- Gone],
+        Results = [sync_one(State, ImapName, LocalId, Info) || Info <- Server],
+        Failed = [R || {error, _} = R <- Results],
+        case Failed of
+            [] ->
+                {ok,
+                    #{
+                        added => length([ok || added <- Results]),
+                        updated => length([ok || updated <- Results]),
+                        removed => length([ok || ok <- Removed]),
+                        reset => 1
+                    },
+                    FullState};
+            [{error, Why} | _] ->
+                {error, {resync_incomplete, length(Failed), Why}}
+        end
     end.
 
-%% One message of a full read: known ones get their flags, new ones are fetched.
+%% Every page of a full read of the mailbox, until the adapter says it is done.
+read_all(State, ImapName) ->
+    read_all(State, ImapName, initial, []).
+
+read_all(#state{adapter = Adapter, conn = Conn} = State, ImapName, Cursor, Acc) ->
+    case Adapter:fetch_changes_since(Conn, ImapName, Cursor, #{}) of
+        {ok, Changes, Next, done} -> {ok, Acc ++ Changes, Next};
+        {ok, Changes, Next, more} -> read_all(State, ImapName, Next, Acc ++ Changes);
+        {error, _} = Error -> Error
+    end.
+
+remove_local_uid(AccountId, LocalId, Uid) ->
+    case mailio_account_writer:remove_uid(AccountId, LocalId, Uid) of
+        ok -> ok;
+        {error, not_found} -> already_gone
+    end.
+
+%% One message of a full read. A UID we already know is only the same message if
+%% it was seen under the same UIDVALIDITY: a recreated mailbox reuses numbers
+%% for other messages, so an old mapping is dropped and the message fetched.
 sync_one(State, ImapName, LocalId, Info) ->
-    #state{account_id = AccountId} = State,
+    #state{account_id = AccountId, db = Db} = State,
     Uid = maps:get(uid, Info),
     case mailio_account_writer:lookup_uid(AccountId, LocalId, Uid) of
         {ok, EmailId} ->
-            _ = mailio_account_writer:apply_flags(
-                AccountId, LocalId, EmailId, maps:get(keywords, Info, [])
-            ),
-            updated;
+            case same_generation(Db, EmailId, LocalId, Uid, Info) of
+                true ->
+                    case
+                        mailio_account_writer:apply_flags(
+                            AccountId, LocalId, EmailId, maps:get(keywords, Info, [])
+                        )
+                    of
+                        ok -> updated;
+                        {error, _} -> replace_one(State, ImapName, LocalId, Info)
+                    end;
+                false ->
+                    replace_one(State, ImapName, LocalId, Info)
+            end;
         {error, not_found} ->
-            case ingest_added(State, ImapName, LocalId, Info) of
-                ok -> added;
-                {error, _} = Error -> Error
+            fetch_one(State, ImapName, LocalId, Info)
+    end.
+
+replace_one(State, ImapName, LocalId, Info) ->
+    _ = mailio_account_writer:remove_uid(State#state.account_id, LocalId, maps:get(uid, Info)),
+    fetch_one(State, ImapName, LocalId, Info).
+
+fetch_one(State, ImapName, LocalId, Info) ->
+    case ingest_added(State, ImapName, LocalId, Info) of
+        ok -> added;
+        {error, _} = Error -> Error
+    end.
+
+same_generation(Db, EmailId, LocalId, Uid, Info) ->
+    case maps:find(uidvalidity, Info) of
+        error ->
+            true;
+        {ok, Validity} ->
+            case mailio_db:get(Db, <<?ID_EMAIL, EmailId/binary>>) of
+                {ok, Email} ->
+                    lists:any(
+                        fun(E) ->
+                            maps:get(<<"uid">>, E, undefined) =:= Uid andalso
+                                maps:get(<<"uidvalidity">>, E, undefined) =:= Validity
+                        end,
+                        mailio_email:imap_entries(Email, LocalId)
+                    );
+                {error, not_found} ->
+                    false
             end
     end.
 
@@ -399,12 +443,9 @@ apply_change(State, _ImapName, LocalId, {updated, Info}, Stats) ->
     end;
 apply_change(State, _ImapName, LocalId, {removed, Uid}, Stats) ->
     #state{account_id = AccountId} = State,
-    case mailio_account_writer:lookup_uid(AccountId, LocalId, Uid) of
-        {ok, EmailId} ->
-            _ = mailio_account_writer:remove_member(AccountId, LocalId, EmailId),
-            bump(Stats, removed);
-        {error, not_found} ->
-            Stats
+    case mailio_account_writer:remove_uid(AccountId, LocalId, Uid) of
+        ok -> bump(Stats, removed);
+        {error, not_found} -> Stats
     end;
 apply_change(_State, _ImapName, _LocalId, Signal, Stats) when
     Signal =:= reset; Signal =:= resync
@@ -415,7 +456,7 @@ apply_change(_State, _ImapName, _LocalId, Signal, Stats) when
 ingest_added(State, ImapName, LocalId, Info) ->
     #state{adapter = Adapter, conn = Conn, account_id = AccountId} = State,
     Uid = maps:get(uid, Info),
-    case fetch_raw(Adapter, Conn, ImapName, Uid) of
+    case fetch_raw(Adapter, Conn, ImapName, Uid, maps:get(uidvalidity, Info, undefined)) of
         {ok, Raw} ->
             Opts = #{
                 keywords => maps:get(keywords, Info, []),
@@ -423,8 +464,10 @@ ingest_added(State, ImapName, LocalId, Info) ->
                 uidvalidity => maps:get(uidvalidity, Info, 0),
                 received_at => maps:get(internal_date, Info, undefined)
             },
-            _ = mailio_account_writer:ingest(AccountId, LocalId, Raw, drop_undefined(Opts)),
-            ok;
+            case mailio_account_writer:ingest(AccountId, LocalId, Raw, drop_undefined(Opts)) of
+                {ok, _} -> ok;
+                {error, _} = Error -> Error
+            end;
         {error, _} = Error ->
             Error
     end.
@@ -444,65 +487,57 @@ do_reconcile(ImapName, #state{mailbox_map = Map} = State) ->
 run_reconcile(
     ImapName,
     LocalId,
-    #state{
-        adapter = Adapter,
-        conn = Conn,
-        db = Db,
-        account_id = AccountId
-    } = State
+    #state{adapter = Adapter, conn = Conn, db = Db, account_id = AccountId} = State
 ) ->
     case erlang:function_exported(Adapter, list_uids, 2) of
         false ->
             {{error, not_supported}, State};
         true ->
-            case Adapter:list_uids(Conn, ImapName) of
-                {ok, ServerUids} ->
-                    ServerSet = sets:from_list(ServerUids),
-                    Local = local_uidmaps(Db, LocalId),
-                    Removed = lists:foldl(
-                        fun({Uid, EmailId, DocId}, N) ->
-                            case sets:is_element(Uid, ServerSet) of
-                                true ->
-                                    N;
-                                false ->
-                                    _ = mailio_account_writer:remove_member(
-                                        AccountId, LocalId, EmailId
-                                    ),
-                                    _ = mailio_db:delete(Db, DocId),
-                                    N + 1
-                            end
-                        end,
-                        0,
-                        Local
-                    ),
-                    {{ok, #{removed => Removed}}, State};
-                {error, Reason} ->
-                    {{error, Reason}, State}
+            maybe
+                {ok, ServerUids} ?= Adapter:list_uids(Conn, ImapName),
+                {ok, Local} ?= local_uidmaps(Db, LocalId),
+                ServerSet = sets:from_list(ServerUids),
+                Removed = length([
+                    ok
+                 || {Uid, _EmailId, _DocId} <- Local,
+                    not sets:is_element(Uid, ServerSet),
+                    remove_local_uid(AccountId, LocalId, Uid) =:= ok
+                ]),
+                {{ok, #{removed => Removed}}, State}
+            else
+                {error, Reason} -> {{error, Reason}, State}
             end
     end.
 
 %% All {Uid, EmailId, UidmapDocId} the store knows for a local mailbox,
-%% enumerated by the `uidmap/<mailbox>/' id namespace.
+%% enumerated by the `uidmap/<mailbox>/' id namespace. A listing that fails is an
+%% error, never an empty list: an empty list would read as "everything is gone".
 local_uidmaps(Db, LocalId) ->
     Prefix = <<?ID_UIDMAP, LocalId/binary, "/">>,
     case mailio_db:by_id_prefix(Db, Prefix) of
         {ok, Docs} ->
-            [
+            {ok, [
                 {maps:get(<<"uid">>, D), maps:get(<<"emailId">>, D), maps:get(<<"id">>, D)}
              || D <- Docs, maps:is_key(<<"uid">>, D)
-            ];
-        _ ->
-            []
+            ]};
+        {error, _} = Error ->
+            Error
     end.
 
-fetch_raw(Adapter, Conn, ImapName, Uid) ->
+fetch_raw(Adapter, Conn, ImapName, Uid, Validity) ->
     Self = self(),
     Ref = make_ref(),
     Sink = fun(Bytes) ->
         Self ! {Ref, iolist_to_binary(Bytes)},
         ok
     end,
-    case Adapter:fetch_message(Conn, ImapName, Uid, Sink) of
+    Result =
+        case Validity =/= undefined andalso adapter_has(Adapter, fetch_message, 5) of
+            %% held across two reads: only valid under the same UIDVALIDITY
+            true -> Adapter:fetch_message(Conn, ImapName, Uid, Sink, #{uidvalidity => Validity});
+            false -> Adapter:fetch_message(Conn, ImapName, Uid, Sink)
+        end,
+    case Result of
         {ok, _} ->
             receive
                 {Ref, Raw} -> {ok, Raw}
@@ -511,6 +546,10 @@ fetch_raw(Adapter, Conn, ImapName, Uid) ->
         {error, _} = Err ->
             Err
     end.
+
+adapter_has(Adapter, Fun, Arity) ->
+    _ = code:ensure_loaded(Adapter),
+    erlang:function_exported(Adapter, Fun, Arity).
 
 %%====================================================================
 %% Cursor persistence

@@ -24,7 +24,8 @@
 
 -include("mailio_store.hrl").
 
--export([start_link/1, ingest/4, apply_flags/4, remove_member/3, gc_blobs/2, migrate_blobs/2]).
+-export([start_link/1, ingest/4, apply_flags/4, remove_member/3, remove_uid/3]).
+-export([gc_blobs/2, migrate_blobs/2]).
 -export([set_counters/4, patch/3]).
 -export([uidmap_id/3, lookup_uid/3]).
 -export([init/1, handle_call/3, handle_cast/2, handle_info/2, terminate/2]).
@@ -62,6 +63,12 @@ apply_flags(AccountId, MailboxId, EmailId, ServerKeywords) ->
 -spec remove_member(binary(), binary(), binary()) -> ok | {error, term()}.
 remove_member(AccountId, MailboxId, EmailId) ->
     gen_server:call(via(AccountId), {remove_member, MailboxId, EmailId}, 30000).
+
+%% @doc One UID of a mailbox is gone: drop its mapping, and the email's
+%% membership only if no other UID of the mailbox still refers to it.
+-spec remove_uid(binary(), binary(), term()) -> ok | {error, not_found}.
+remove_uid(AccountId, MailboxId, Uid) ->
+    gen_server:call(via(AccountId), {remove_uid, MailboxId, Uid}, 30000).
 
 %% @doc Sweep blobs orphaned longer than `GraceSecs', in the writer process
 %% so it cannot race a concurrent re-ingest. Returns the count swept.
@@ -126,6 +133,10 @@ handle_call({ingest, MailboxId, Raw, Opts}, _From, State) ->
     {reply, Result, State1};
 handle_call({apply_flags, MailboxId, EmailId, ServerKeywords}, _From, State) ->
     Result = do_apply_flags(State#state.db, MailboxId, EmailId, ServerKeywords),
+    State1 = emit_events(State),
+    {reply, Result, State1};
+handle_call({remove_uid, MailboxId, Uid}, _From, State) ->
+    Result = do_remove_uid(State#state.db, MailboxId, Uid),
     State1 = emit_events(State),
     {reply, Result, State1};
 handle_call({remove_member, MailboxId, EmailId}, _From, State) ->
@@ -210,6 +221,31 @@ do_apply_flags(Db, _MailboxId, EmailId, ServerKeywords) ->
             NowSeen = lists:member(?KW_SEEN, New),
             adjust_unread(Db, mailio_email:mailbox_ids(Email1), WasSeen, NowSeen),
             ok;
+        {error, not_found} ->
+            {error, not_found}
+    end.
+
+%% One UID of a mailbox is gone from the server. Two UIDs can hold the same mail
+%% (one email), so the email stays a member of the mailbox, with its counter,
+%% for as long as another UID of that mailbox still refers to it.
+do_remove_uid(Db, MailboxId, Uid) ->
+    MapId = uidmap_id(<<>>, MailboxId, Uid),
+    case mailio_db:get(Db, MapId) of
+        {ok, #{<<"emailId">> := EmailId}} ->
+            _ = mailio_db:delete(Db, MapId),
+            case mailio_db:get(Db, <<?ID_EMAIL, EmailId/binary>>) of
+                {ok, Email} ->
+                    Left = mailio_email:remove_imap_entry(Email, MailboxId, Uid),
+                    case mailio_email:imap_entries(Left, MailboxId) of
+                        [] ->
+                            do_remove_member(Db, MailboxId, EmailId);
+                        _ ->
+                            {ok, _, _} = mailio_db:put(Db, Left),
+                            ok
+                    end;
+                {error, not_found} ->
+                    ok
+            end;
         {error, not_found} ->
             {error, not_found}
     end.

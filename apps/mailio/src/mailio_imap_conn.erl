@@ -266,7 +266,8 @@ greeting(info, {Tag, Sock, Bin}, #data{sock = Sock} = Data) when
         {ok, {untagged, {status_resp, preauth, _, _}}, Data2} ->
             {next_state, ready, Data2};
         {ok, _Other, Data2} ->
-            {next_state, backoff, Data2};
+            %% not a greeting: give the connection up, socket and all
+            drop(Data2);
         {error, response_too_large} ->
             {next_state, response_too_large, Data1};
         {more, Data2} ->
@@ -737,7 +738,15 @@ drop(#data{transport = T, sock = Sock} = Data, Replies, Why) ->
     {Cleared, Pending} = pending_replies(Data, Why),
     {next_state, backoff,
         Cleared#data{
-            sock = undefined, buffer = <<>>, scan = start, tag = undefined, deadline = undefined
+            sock = undefined,
+            buffer = <<>>,
+            scan = start,
+            tag = undefined,
+            deadline = undefined,
+            untagged = [],
+            literal = undefined,
+            acc_count = 0,
+            acc_bytes = 0
         },
         Replies ++ Pending}.
 

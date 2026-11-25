@@ -29,7 +29,7 @@
     set_keyword/3,
     is_seen/1
 ]).
--export([imap_entries/2, add_imap_entry/3]).
+-export([imap_entries/2, add_imap_entry/3, remove_imap_entry/3]).
 
 %% JMAP Email facade
 -export([get/3, query/2, changes/3, set/3]).
@@ -148,6 +148,15 @@ add_imap_entry(Email, MailboxId, Entry) ->
     ],
     Imap2 = Imap#{MailboxId => [Entry | Pruned]},
     Email#{?MAILIO_NS => Ns#{<<"imap">> => Imap2}}.
+
+%% @doc Drop the entries of one UID from a mailbox, whatever UIDVALIDITY they
+%% carry: after a new UIDVALIDITY the same number can be another message.
+-spec remove_imap_entry(email(), binary(), term()) -> email().
+remove_imap_entry(Email, MailboxId, Uid) ->
+    Ns = maps:get(?MAILIO_NS, Email, #{}),
+    Imap = maps:get(<<"imap">>, Ns, #{}),
+    Kept = [E || E <- maps:get(MailboxId, Imap, []), maps:get(<<"uid">>, E, undefined) =/= Uid],
+    Email#{?MAILIO_NS => Ns#{<<"imap">> => Imap#{MailboxId => Kept}}}.
 
 %%====================================================================
 %% JMAP Email/get
