@@ -25,8 +25,8 @@ These modules exist for the `mailio_store` application and are public only becau
 
 | Module | What it is for |
 |---|---|
-| `mailio_adapter`, `mailio_imap`, `mailio_imap_map` | The sync contract the store uses, and its IMAP implementation |
-| `mailio_events`, `mailio_registry` | Process registry and event bus used by the store |
+| `mailio_adapter`, `mailio_imap`, `mailio_imap_map` | The sync contract the store uses, and its IMAP implementation. Sharing one `mailio_imap` handle between processes is supported; the rest of its functions follow the store |
+| `mailio_events`, `mailio_registry` | Process registry and event bus. Internal support for `mailio_store`; they stay here for this release and may move before `mailio_store` is published |
 | `mailio_id`, `mailio_ascii`, `mailio_credentials_static` | Helpers |
 
 ## What the library does about a hostile server
@@ -81,7 +81,28 @@ The rest of this section is about `reset` and `resync`. `reset` means the UIDs t
 
 ## Sharing one connection
 
-The IMAP adapter lets several processes use one handle. A call that selects a mailbox and then acts on it (reading a message, changing flags, moving, expunging, listing, starting IDLE) holds the connection for the whole call, so it never acts on a mailbox somebody else selected in between. Callers wait for their turn in the order they asked, for up to two minutes, and a caller that dies gives its turn up. If you use `mailio_imap_conn` directly you select and send on your own, so give each connection one user or use `mailio_imap_lock` the same way. A connection started with `start_link/1` is linked to the process that started it and goes down with it; to keep one for a long time start it under your own supervisor with `mailio_imap_conn:child_spec/1`. A supervisor puts the start arguments in its reports, so the config you give it may not hold a password or a token: keep the credential under a name with `mailio_credentials:register_ref(Name, Cred)` and give `credentials => {ref, Name}` (or a `{token_fun, Fun}`): the connection looks it up in its own worker each time it logs in. Any other `credentials` value is refused, because it could be the secret or hold it, and the error does not repeat it.
+If several processes need the same IMAP server, use `mailio_imap` and share its handle. A call that selects a mailbox and then acts on it (reading a message, changing flags, moving, expunging, listing, starting IDLE) holds the connection for the whole call, so it never acts on a mailbox somebody else selected in between. Callers wait for their turn in the order they asked, for up to two minutes, and a caller that dies gives its turn up. How the turns are kept is an internal detail (`mailio_imap_lock`): do not call it yourself.
+
+A raw `mailio_imap_conn` has one owner. It sends whatever you give it, and the selected mailbox is part of its state, so give each connection to one process. [Design decisions of the IMAP adapter](design-decisions.md) explains why.
+
+## Supervised connections
+
+A connection started with `start_link/1` is linked to the process that started it and goes down with it. To keep one for a long time, start it under your own supervisor with `mailio_imap_conn:child_spec/1`. The connection reconnects on its own; the supervisor restarts it only when it crashes.
+
+A supervisor writes the start arguments of its children in its reports, so they must not hold a secret. Keep the credential under a name and give the name:
+
+```erlang
+ok = mailio_credentials:register_ref(my_account, {password, <<"me">>, <<"secret">>}),
+Spec = mailio_imap_conn:child_spec(#{
+    host => <<"imap.example.org">>, port => 993, tls => true,
+    credentials => {ref, my_account}
+}).
+```
+
+- The connection looks the credential up in its own worker each time it logs in.
+- To replace it (a password change), call `register_ref/2` again with the same name: the next login uses the new one.
+- To remove it, call `forget_ref/1`. A connection that logs in after that fails with `credentials_failed`.
+- `credentials` may also be a `{token_fun, Fun}` with a zero-argument fun. Any other value, and a `password`, `token` or `secret` in the config, is refused with `secret_in_child_spec`; the error does not repeat the value.
 
 `expunge/3` removes the UIDs you name and no other message, with `UID EXPUNGE`. A server without UIDPLUS has only `EXPUNGE`, which would also take every message another client flagged `\\Deleted` at that moment, so the call returns `imap_operation_unsupported` before it changes anything. Moving a message uses `UID MOVE` when the server has MOVE, and copy then `UID EXPUNGE` when it has UIDPLUS; with neither it is refused the same way.
 
