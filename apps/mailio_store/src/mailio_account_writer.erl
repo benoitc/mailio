@@ -29,7 +29,7 @@
 -export([set_counters/4, patch/3]).
 -export([uidmap_id/3, lookup_uid/3]).
 -ifdef(TEST).
--export([deleted/1]).
+-export([deleted/1, repair_dirty/3]).
 -endif.
 -export([init/1, handle_call/3, handle_cast/2, handle_info/2, terminate/2]).
 
@@ -270,15 +270,24 @@ email_mailboxes(Db, EmailId) ->
         {error, not_found} -> []
     end.
 
-repair_dirty(#state{db = Db, account_id = AccountId}, MailboxId) ->
-    case mailio_db:get(Db, <<?ID_MAILBOX, MailboxId/binary>>) of
+repair_dirty(State, MailboxId) ->
+    repair_dirty(State, MailboxId, fun mailio_db:get/2).
+
+%% A mailbox that cannot be read is an error, never "nothing to repair": the mark
+%% stays, and the write that found it stops.
+repair_dirty(#state{db = Db, account_id = AccountId}, MailboxId, Get) ->
+    case Get(Db, <<?ID_MAILBOX, MailboxId/binary>>) of
         {ok, Mbx} when
             is_map_key(<<"counters_dirty">>, Mbx); is_map_key(?INGEST_MARK, Mbx)
         ->
             {Total, Unread} = maps:get(MailboxId, mailio_fsck:recompute(AccountId), {0, 0}),
             do_set_counters(Db, MailboxId, Total, Unread);
-        _ ->
-            ok
+        {ok, _} ->
+            ok;
+        {error, not_found} ->
+            ok;
+        {error, _} = Error ->
+            Error
     end.
 
 handle_cast(_Msg, State) ->
@@ -314,11 +323,11 @@ do_ingest(Db, MailboxId, Raw, Opts) ->
 %% keywords, then bump the mailbox counter if this is a new membership.
 merge_existing(Db, Existing, MailboxId, Opts) ->
     AlreadyMember = mailio_email:in_mailbox(Existing, MailboxId),
-    WasSeen = mailio_email:is_seen(Existing),
+    WasSeen = mailio_email:is_read(Existing),
     E1 = mailio_email:add_mailbox(Existing, MailboxId),
     E2 = apply_keywords(E1, maps:get(keywords, Opts, [])),
     E3 = add_imap_entry(E2, MailboxId, Opts),
-    NowSeen = mailio_email:is_seen(E3),
+    NowSeen = mailio_email:is_read(E3),
     %% Counters change on a new membership, or when the email became read or
     %% unread. The mailboxes are marked first and cleared last, so that a stop
     %% in between is found and counted again by the next write to them.
@@ -347,7 +356,7 @@ do_apply_flags(Db, _MailboxId, EmailId, ServerKeywords) ->
     DocId = <<?ID_EMAIL, EmailId/binary>>,
     case mailio_db:get(Db, DocId) of
         {ok, Email} ->
-            WasSeen = mailio_email:is_seen(Email),
+            WasSeen = mailio_email:is_read(Email),
             Existing = mailio_email:keywords(Email),
             LocalOnly = [
                 K
@@ -356,7 +365,7 @@ do_apply_flags(Db, _MailboxId, EmailId, ServerKeywords) ->
             ],
             New = lists:usort(ServerKeywords ++ LocalOnly),
             Email1 = Email#{<<"keywords">> => keywords_map(New)},
-            NowSeen = lists:member(?KW_SEEN, New),
+            NowSeen = lists:member(?KW_SEEN, New) orelse lists:member(?KW_DRAFT, New),
             %% the counters move only when the email became read or unread: then the
             %% mailboxes are marked first and cleared once they are written
             Touched =
@@ -416,7 +425,7 @@ do_remove_member(Db, MailboxId, EmailId) ->
                     %% mark, change the email, write the counter and clear the
                     %% mark: a stop anywhere leaves the mark, and the next write
                     %% to the mailbox counts it again from the emails
-                    WasSeen = mailio_email:is_seen(Email),
+                    WasSeen = mailio_email:is_read(Email),
                     ok = mark_dirty(Db, MailboxId),
                     {ok, _, _} = mailio_db:put(Db, Email1),
                     ok = settle_counter(Db, MailboxId, -1, seen_delta(WasSeen, true) * -1);
@@ -452,7 +461,7 @@ do_patch(Db, EmailId, Patch) ->
     DocId = <<?ID_EMAIL, EmailId/binary>>,
     case mailio_db:get(Db, DocId) of
         {ok, Email} ->
-            OldSeen = mailio_email:is_seen(Email),
+            OldSeen = mailio_email:is_read(Email),
             OldMbx = mailio_email:mailbox_ids(Email),
             NewKw = apply_set(
                 mailio_email:keywords(Email),
@@ -466,7 +475,7 @@ do_patch(Db, EmailId, Patch) ->
                 maps:get(add_mailboxes, Patch, []),
                 maps:get(remove_mailboxes, Patch, [])
             ),
-            NewSeen = lists:member(?KW_SEEN, NewKw),
+            NewSeen = lists:member(?KW_SEEN, NewKw) orelse lists:member(?KW_DRAFT, NewKw),
             %% a patch that changes membership or the read state moves counters:
             %% the mailboxes are marked before anything is written and cleared
             %% after the counters are
@@ -843,7 +852,8 @@ bumped_mailbox(Db, MailboxId, TotalDelta, UnreadDelta) ->
 seen_delta(IsSeen, _Was) when IsSeen -> 0;
 seen_delta(_IsSeen, _Was) -> 1.
 
-is_seen_kw(Keywords) -> maps:is_key(?KW_SEEN, Keywords).
+%% not counted as unread: seen, or a draft (RFC 8621, section 2)
+is_seen_kw(Keywords) -> maps:is_key(?KW_SEEN, Keywords) orelse maps:is_key(?KW_DRAFT, Keywords).
 
 %%====================================================================
 %% Keyword / imap helpers
