@@ -115,19 +115,17 @@ resolver(Caller, Ref, Cred, MaxDepth, Timeout) ->
     {Worker, WorkerMon} = spawn_monitor(fun() ->
         Resolver ! {result, self(), chase(Cred, MaxDepth)}
     end),
-    Deadline = erlang:send_after(Timeout, self(), deadline),
     receive
         {result, Worker, Result} ->
-            _ = erlang:cancel_timer(Deadline),
             Caller ! {Ref, Result};
         {'DOWN', WorkerMon, process, Worker, Reason} ->
-            _ = erlang:cancel_timer(Deadline),
             Caller ! {Ref, {error, {credentials_failed, Reason}}};
-        deadline ->
-            exit(Worker, kill),
-            Caller ! {Ref, {error, credentials_timeout}};
         {'DOWN', CallerMon, process, Caller, _} ->
             exit(Worker, kill)
+    after Timeout ->
+        %% `Timeout' is any Erlang timeout, `infinity' included
+        exit(Worker, kill),
+        Caller ! {Ref, {error, credentials_timeout}}
     end.
 
 %% one step at a time, `Left' steps at most

@@ -78,6 +78,7 @@
     a_flag_update_repairs_a_mailbox_whose_counter_write_failed/1,
     a_flag_update_that_fails_at_the_counter_is_repaired_by_the_retry/1,
     a_patch_that_fails_at_the_counter_is_repaired_by_the_retry/1,
+    a_move_that_fails_at_the_source_counter_is_repaired_in_both_mailboxes/1,
 
     a_delivery_to_another_mailbox_repairs_the_shared_email_s_first_mailbox/1,
 
@@ -147,6 +148,7 @@ all() ->
         a_flag_update_repairs_a_mailbox_whose_counter_write_failed,
         a_flag_update_that_fails_at_the_counter_is_repaired_by_the_retry,
         a_patch_that_fails_at_the_counter_is_repaired_by_the_retry,
+        a_move_that_fails_at_the_source_counter_is_repaired_in_both_mailboxes,
 
         a_delivery_to_another_mailbox_repairs_the_shared_email_s_first_mailbox,
 
@@ -1487,6 +1489,40 @@ a_patch_that_fails_at_the_counter_is_repaired_by_the_retry(Config) ->
     failing_counter_then_retry(Config, <<"patchfail">>, fun(Account, EmailId) ->
         mailio_account_writer:patch(Account, EmailId, #{add_keywords => [<<"$seen">>]})
     end).
+
+%% An unread email is moved from one mailbox to another and the write of the first
+%% mailbox's counter fails. The retry names only the mailbox it is in now, and
+%% the one it left must be repaired as well.
+a_move_that_fails_at_the_source_counter_is_repaired_in_both_mailboxes(Config) ->
+    Account = ?config(account, Config),
+    Db = mailio_account:db_name(Account),
+    Raw = <<"From: a@x\r\nTo: b@y\r\nSubject: move\r\nMessage-ID: <mv@x>\r\n\r\nbody\r\n">>,
+    {ok, EmailId} = mailio_account_writer:ingest(Account, <<"mbSrc">>, Raw, #{uid => 1}),
+    {ok, _} = mailio_account_writer:ingest(
+        Account,
+        <<"mbDst">>,
+        <<"From: c@x\r\nSubject: other\r\nMessage-ID: <o2@x>\r\n\r\nx\r\n">>,
+        #{uid => 9}
+    ),
+    {ok, Mbx} = mailio_db:get(Db, <<?ID_MAILBOX, "mbSrc">>),
+    {ok, _, _} = mailio_db:put(Db, Mbx#{<<"unreadEmails">> => <<"not a number">>}),
+    process_flag(trap_exit, true),
+    Move = fun() ->
+        mailio_account_writer:patch(Account, EmailId, #{set_mailboxes => [<<"mbDst">>]})
+    end,
+    try
+        Move()
+    catch
+        exit:_ -> ok
+    end,
+    wait_until(fun() -> mailio_registry:whereis_name({writer, Account}) =/= undefined end, 3000),
+    {ok, Broken} = mailio_db:get(Db, <<?ID_MAILBOX, "mbSrc">>),
+    {ok, _, _} = mailio_db:put(Db, Broken#{<<"unreadEmails">> => 1}),
+    %% the retry names the destination only
+    ?assertEqual(ok, Move()),
+    ?assertEqual({0, 0}, mailbox_counts(Account, <<"mbSrc">>)),
+    ?assertEqual({2, 2}, mailbox_counts(Account, <<"mbDst">>)),
+    ?assertEqual({ok, []}, mailio_fsck:check_counters(Account)).
 
 idle_count(Srv) ->
     length([

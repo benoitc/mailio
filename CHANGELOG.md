@@ -33,6 +33,11 @@
 
 ### Fixed
 
+- A mailbox that an email was moved out of is counted again by the retry of a
+  move that failed half way, even though the retry names only the new mailbox.
+- A credential lookup works with an unlimited time limit, and still stops with
+  its caller.
+
 - Deleting or moving a message now checks what the current connection offers
   before it marks anything, so a connection that was made again to a server
   without UID removal no longer leaves a message marked as deleted.

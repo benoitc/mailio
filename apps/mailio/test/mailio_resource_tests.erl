@@ -369,3 +369,11 @@ a_caller_that_dies_cancels_the_lookup_test() ->
         {'DOWN', WorkerMon, process, Worker, _} -> ok
     after 500 -> error(worker_still_running)
     end.
+
+%% `infinity' is a timeout like any other.
+an_infinite_timeout_resolves_test() ->
+    Cred = {password, <<"u">>, <<"p">>},
+    ?assertEqual(
+        {ok, Cred},
+        mailio_credentials:resolve({token_fun, fun() -> {ok, Cred} end}, #{timeout => infinity})
+    ).

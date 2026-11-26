@@ -187,6 +187,7 @@ init(AccountId) ->
     Db = mailio_account:db_name(AccountId),
     {ok, _} = mailio_db:ensure_db(Db),
     {ok, _Changes, Hlc} = mailio_db:changes(Db, first),
+    ok = load_dirty(Db),
     {ok, #state{account_id = AccountId, db = Db, emit_cursor = Hlc}}.
 
 handle_call({ingest, MailboxId, Raw, Opts}, _From, State) ->
@@ -207,14 +208,14 @@ handle_call({apply_flags, MailboxId, EmailId, ServerKeywords}, _From, State) ->
     {reply, Result, State1};
 handle_call({remove_uid, MailboxId, Uid}, _From, State) ->
     Result = safely(fun() ->
-        ok = repair_dirty(State, MailboxId),
+        ok = repair_marked(State, [MailboxId]),
         do_remove_uid(State#state.db, MailboxId, Uid)
     end),
     State1 = emit_events(State),
     {reply, Result, State1};
 handle_call({remove_member, MailboxId, EmailId}, _From, State) ->
     Result = safely(fun() ->
-        ok = repair_dirty(State, MailboxId),
+        ok = repair_marked(State, [MailboxId]),
         do_remove_member(State#state.db, MailboxId, EmailId)
     end),
     State1 = emit_events(State),
@@ -259,7 +260,8 @@ safely(Fun) ->
 %% Every mailbox a write can change counters of is repaired first, and a mark is
 %% only ever cleared by the write that counted it again or moved the counters.
 repair_marked(State, Mailboxes) ->
-    lists:foreach(fun(M) -> ok = repair_dirty(State, M) end, lists:usort(Mailboxes)).
+    All = lists:usort(Mailboxes ++ maps:keys(get_dirty())),
+    lists:foreach(fun(M) -> ok = repair_dirty(State, M) end, All).
 
 %% the mailboxes an email is in, none if it is not stored
 email_mailboxes(Db, EmailId) ->
@@ -529,7 +531,7 @@ do_set_counters(Db, MailboxId, Total, Unread) ->
                 Doc#{<<"totalEmails">> => Total, <<"unreadEmails">> => Unread}
             ),
             {ok, _, _} = mailio_db:put(Db, Doc1),
-            ok;
+            track_dirty(MailboxId, Doc1);
         {error, not_found} ->
             {error, not_found}
     end.
@@ -757,11 +759,39 @@ mark_dirty(Db, MailboxId, Key) ->
     DocId = <<?ID_MAILBOX, MailboxId/binary>>,
     case mailio_db:get(Db, DocId) of
         {ok, Doc} ->
-            {ok, _, _} = mailio_db:put(Db, Doc#{Key => true}),
-            ok;
+            Doc1 = Doc#{Key => true},
+            {ok, _, _} = mailio_db:put(Db, Doc1),
+            track_dirty(MailboxId, Doc1);
         {error, not_found} ->
             ok
     end.
+
+%% The mailboxes that carry a mark are kept in the writer, so that a retry finds
+%% them all: a write names only the mailboxes it is about, and a mark can be on
+%% one that the retry no longer names (the one an email was moved out of). The
+%% marks are on disk, and the writer reads them again when it starts.
+-define(DIRTY_KEY, mailio_writer_dirty).
+
+track_dirty(MailboxId, Doc) ->
+    Known = get_dirty(),
+    case is_map_key(<<"counters_dirty">>, Doc) orelse is_map_key(?INGEST_MARK, Doc) of
+        true -> put(?DIRTY_KEY, Known#{MailboxId => true});
+        false -> put(?DIRTY_KEY, maps:remove(MailboxId, Known))
+    end,
+    ok.
+
+get_dirty() ->
+    case get(?DIRTY_KEY) of
+        undefined -> #{};
+        Known -> Known
+    end.
+
+load_dirty(Db) ->
+    {ok, Docs} = mailio_db:by_id_prefix(Db, <<?ID_MAILBOX>>),
+    put(?DIRTY_KEY, #{}),
+    lists:foreach(
+        fun(#{<<"id">> := <<?ID_MAILBOX, M/binary>>} = Doc) -> track_dirty(M, Doc) end, Docs
+    ).
 
 mark_ingesting(Db, Mailboxes) ->
     lists:foreach(fun(M) -> ok = mark_dirty(Db, M, ?INGEST_MARK) end, Mailboxes).
@@ -772,7 +802,9 @@ clear_ingesting(Db, Mailboxes) ->
             DocId = <<?ID_MAILBOX, M/binary>>,
             case mailio_db:get(Db, DocId) of
                 {ok, #{?INGEST_MARK := _} = Doc} ->
-                    {ok, _, _} = mailio_db:put(Db, maps:remove(?INGEST_MARK, Doc));
+                    Doc1 = maps:remove(?INGEST_MARK, Doc),
+                    {ok, _, _} = mailio_db:put(Db, Doc1),
+                    track_dirty(M, Doc1);
                 _ ->
                     ok
             end
@@ -784,8 +816,9 @@ clear_ingesting(Db, Mailboxes) ->
 settle_counter(Db, MailboxId, TotalDelta, UnreadDelta) ->
     case bumped_mailbox(Db, MailboxId, TotalDelta, UnreadDelta) of
         [Doc] ->
-            {ok, _, _} = mailio_db:put(Db, maps:remove(<<"counters_dirty">>, Doc)),
-            ok;
+            Doc1 = maps:remove(<<"counters_dirty">>, Doc),
+            {ok, _, _} = mailio_db:put(Db, Doc1),
+            track_dirty(MailboxId, Doc1);
         [] ->
             ok
     end.
