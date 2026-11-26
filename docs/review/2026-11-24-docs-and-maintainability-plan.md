@@ -242,3 +242,56 @@ A second review of the library found problems in resource use, IMAP liveness, sy
 - The overview now has a section on sharing one IMAP connection and a table of the limits and timeouts, and `usage.md` and the overview say that `tls` defaults to `starttls`.
 - The registry and event tables are written only by their owners, and a long-lived IMAP connection has a child specification for a supervisor.
 - The release items above are unchanged: license text, repository link, maintainers and the version bump are still the maintainer's step, and the release waits for the documentation review of the merged `main`.
+
+## Update for `main` at `22e5dea`, 2026-11-26
+
+This is the plan for the release that follows the second review of `mailio` (pull requests 1 and 2). No source code was changed. The release (version bumps, CHANGELOG release sections, Hex publish) waits until you have said which of the findings below must be fixed first.
+
+### What changed since the plan above
+
+Source is now 19,541 lines (was 16,650), tests and fakes 15,675 (was 9,262). Most of the growth is correctness and hardening work in three modules. The CHANGELOG `Unreleased` section is 302 lines and mixes the first and second review, which is too long to be release notes as it stands.
+
+Done since the first plan: the library overview, limits table, usage guide, `docs/architecture.md`, ExDoc and package metadata. Dialyzer is at zero warnings and CI enforces it. Still open: the questions to you (below), the top-level reading path, `docs/map.md`, the guides, and the release items (maintainers, version bump).
+
+### Measurements
+
+| Module | Lines | Clause heads | What it holds now |
+|---|---|---|---|
+| `mailio_mcp_imap` | 1,218 | ~85 | unchanged shape: IMAP access, change detection and snapshot for the MCP tools |
+| `mailio_imap` | 1,023 | ~89 | adapter: listing windows, QRESYNC and plain reads, mutations, expunge rules, mailbox sessions |
+| `mailio_sync_mgr` | 963 | ~88 | account process: connection, incremental sync, full resync, reconcile, cursor and reset marker, IDLE watch |
+| `mailio_account_writer` | 960 | ~82 | ingest, flags, patch, removal, UID mappings, counters, repair marks |
+| `mailio_imap_conn` | 932 | ~108 | connection state machine: handshake, negotiation, commands, IDLE, reconnect |
+| `mailio_imap_proto` | 892 | | wire format |
+
+New small modules with one job each: `mailio_imap_lock` (turns on one connection), `mailio_uid_set` (UIDs as ranges), `mailio_sync_pages` (walking paged reads), `mailio_credentials` (resolving a credential chain).
+
+### Findings
+
+| # | Module | Primary problem | Why it is hard to read | What would help |
+|---|---|---|---|---|
+| D1 | `mailio_account_writer` | module organisation | Four jobs in one file: storing mail, UID mappings with a legacy namespace, counters, and the repair-mark protocol. The repair protocol (marks, the tracked set, recount) is a design that is explained nowhere except in comments | Document the counter protocol first. A split into a counters module is likely to help; it touches `mailio_sync_SUITE`, `mailio_fsck` and `mailio_account_writer` only |
+| D2 | `mailio_sync_mgr` | module organisation | The process, the full resync, the reconcile and the cursor handling share one file. A reader has to hold five concepts (cursor, reset marker, resync, replace, inventory check) to change one | Document the sync states as a table in `apps/mailio_store/doc/sync.md`. A split of the full resync is possible but is not urgent |
+| D3 | `mailio_imap` | code complexity | Listing windows, the two read paths and the mutations are interleaved; `list_windows` has a cost model that is only in comments | A diagram of one read and a "change the listing" guide |
+| D4 | `mailio_mcp_imap` | module organisation | Same finding as M1 in the first plan: it duplicates, for the MCP snapshot, ideas the store solves differently (capped snapshots, counts, change detection) | Needs your answer to question 1 of the first plan |
+| D5 | docs | documentation | Decisions that were made in the review are only in commit messages and the CHANGELOG: sessions on a shared connection, QRESYNC enabled on every login, UIDVALIDITY checked on full reads, expunge refused without UIDPLUS, credentials kept by name for supervised connections | One page, "Design decisions of the IMAP adapter", with the reason for each and the test that holds it |
+| D6 | CHANGELOG | documentation | The `Unreleased` section lists every fix of the two reviews as separate entries (302 lines) | Group by what a user sees before the release section is written; this is the maintainer's release step |
+| D7 | tests | navigation | 48 test modules, no map from a behaviour to the test that holds it. The scripted servers in `test_support` and in `mailio_imap_session_tests` are the real specification of several rules | Add the behaviour to test table to `docs/map.md` |
+
+### New concepts that need a page
+
+The counter repair marks; the mailbox generation (UIDVALIDITY) as part of every full read; the UID mapping namespaces and the old form; credentials by name for a supervised connection; the connection lock and when a caller waits. Each is one short page in task style: what it is, when you meet it, how to change it, which test holds it.
+
+### Questions for you
+
+1. Questions 1 to 4 of the first plan are still open. Question 1 (which of `mailio_store` and `mailio_mcp` is the product) now also decides what to do with D4.
+2. Is the counter repair protocol (marks written before a change, cleared after, recount on the next write) the design you want to keep, or should counters be derived on read? It costs two extra mailbox writes on a change that moves counters and keeps a set in the writer process.
+3. Is `mailio_imap_lock` a library feature (documented, covered by the version promise) or an internal detail of `mailio_imap`? Today it is exported and documented in the overview.
+4. Should supervised connections be a documented feature? `child_spec/1` and `register_ref/2` exist because of a review finding and have a narrow contract.
+
+### Suggested order
+
+1. Answer the questions above (you).
+2. Decide which of D1 to D7 block the release. Suggested: D5 and D6 block (they are release notes and the reasons users will ask for); D1 to D4 and D7 can wait.
+3. Write the reading path and the map (`README.md`, `docs/concepts.md`, `docs/map.md`).
+4. Then the release step: version bumps and CHANGELOG release sections for `mailio`, `mailio_store` and `mailio_mcp`, each from the grouped `Unreleased` entries.
