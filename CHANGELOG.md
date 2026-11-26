@@ -33,6 +33,12 @@
 
 ### Fixed
 
+- A mailbox that cannot be read while its counters are being repaired is now an
+  error that keeps the repair mark, not a repair that is taken as done.
+- Drafts are no longer counted in the unread count of a mailbox, in the counter
+  the store keeps and in the recount, and a message that becomes or stops being
+  a draft moves the count.
+
 - A mailbox that an email was moved out of is counted again by the retry of a
   move that failed half way, even though the retry names only the new mailbox.
 - A credential lookup works with an unlimited time limit, and still stops with

@@ -91,7 +91,7 @@ repair_blobs(AccountId, Opts) ->
 %%====================================================================
 
 tally_email(Email, Acc) ->
-    Seen = mailio_email:is_seen(Email),
+    Seen = mailio_email:is_read(Email),
     Mailboxes = mailio_email:mailbox_ids(Email),
     lists:foldl(
         fun(MailboxId, A) ->

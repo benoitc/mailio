@@ -79,6 +79,9 @@
     a_flag_update_that_fails_at_the_counter_is_repaired_by_the_retry/1,
     a_patch_that_fails_at_the_counter_is_repaired_by_the_retry/1,
     a_move_that_fails_at_the_source_counter_is_repaired_in_both_mailboxes/1,
+    a_repair_that_cannot_read_the_mailbox_keeps_its_mark/1,
+    a_draft_is_not_counted_as_unread/1,
+    a_draft_keyword_change_moves_the_unread_count/1,
 
     a_delivery_to_another_mailbox_repairs_the_shared_email_s_first_mailbox/1,
 
@@ -149,6 +152,9 @@ all() ->
         a_flag_update_that_fails_at_the_counter_is_repaired_by_the_retry,
         a_patch_that_fails_at_the_counter_is_repaired_by_the_retry,
         a_move_that_fails_at_the_source_counter_is_repaired_in_both_mailboxes,
+        a_repair_that_cannot_read_the_mailbox_keeps_its_mark,
+        a_draft_is_not_counted_as_unread,
+        a_draft_keyword_change_moves_the_unread_count,
 
         a_delivery_to_another_mailbox_repairs_the_shared_email_s_first_mailbox,
 
@@ -1522,6 +1528,56 @@ a_move_that_fails_at_the_source_counter_is_repaired_in_both_mailboxes(Config) ->
     ?assertEqual(ok, Move()),
     ?assertEqual({0, 0}, mailbox_counts(Account, <<"mbSrc">>)),
     ?assertEqual({2, 2}, mailbox_counts(Account, <<"mbDst">>)),
+    ?assertEqual({ok, []}, mailio_fsck:check_counters(Account)).
+
+%% A mailbox that cannot be read is not one with nothing to repair: the error comes
+%% back, the mark stays, and the next try repairs it.
+a_repair_that_cannot_read_the_mailbox_keeps_its_mark(Config) ->
+    Account = ?config(account, Config),
+    Db = mailio_account:db_name(Account),
+    Raw = <<"From: a@x\r\nTo: b@y\r\nSubject: rr\r\nMessage-ID: <rr@x>\r\n\r\nbody\r\n">>,
+    {ok, _} = mailio_account_writer:ingest(Account, <<"mbRR">>, Raw, #{uid => 1}),
+    {ok, Mbx} = mailio_db:get(Db, <<?ID_MAILBOX, "mbRR">>),
+    {ok, _, _} = mailio_db:put(Db, Mbx#{
+        <<"totalEmails">> => 2, <<"unreadEmails">> => 2, <<"counters_dirty_ingest">> => true
+    }),
+    %% a writer state, as the writer keeps it: account, database, event cursor
+    State = {state, Account, Db, first},
+    ?assertEqual(
+        {error, io_failure},
+        mailio_account_writer:repair_dirty(State, <<"mbRR">>, fun(_, _) -> {error, io_failure} end)
+    ),
+    {ok, Still} = mailio_db:get(Db, <<?ID_MAILBOX, "mbRR">>),
+    ?assert(maps:is_key(<<"counters_dirty_ingest">>, Still)),
+    ?assertEqual({2, 2}, mailbox_counts(Account, <<"mbRR">>)),
+    ?assertEqual(ok, mailio_account_writer:repair_dirty(State, <<"mbRR">>, fun mailio_db:get/2)),
+    ?assertEqual({1, 1}, mailbox_counts(Account, <<"mbRR">>)).
+
+%% RFC 8621, section 2: the unread count of a mailbox leaves drafts out, in the
+%% counter the writer keeps and in the recount.
+a_draft_is_not_counted_as_unread(Config) ->
+    Account = ?config(account, Config),
+    Raw = <<"From: a@x\r\nTo: b@y\r\nSubject: draft\r\nMessage-ID: <d1@x>\r\n\r\nbody\r\n">>,
+    {ok, _} = mailio_account_writer:ingest(Account, <<"mbD">>, Raw, #{
+        uid => 1, keywords => [<<"$draft">>]
+    }),
+    ?assertEqual({1, 0}, mailbox_counts(Account, <<"mbD">>)),
+    ?assertEqual({ok, []}, mailio_fsck:check_counters(Account)),
+    ?assertEqual(#{<<"mbD">> => {1, 0}}, mailio_fsck:recompute(Account)).
+
+%% A message that becomes a draft stops counting as unread, and counts again when
+%% it stops being one.
+a_draft_keyword_change_moves_the_unread_count(Config) ->
+    Account = ?config(account, Config),
+    Raw = <<"From: a@x\r\nTo: b@y\r\nSubject: turns\r\nMessage-ID: <d2@x>\r\n\r\nbody\r\n">>,
+    {ok, EmailId} = mailio_account_writer:ingest(Account, <<"mbDK">>, Raw, #{uid => 1}),
+    ?assertEqual({1, 1}, mailbox_counts(Account, <<"mbDK">>)),
+    ok = mailio_account_writer:patch(Account, EmailId, #{add_keywords => [<<"$draft">>]}),
+    ?assertEqual({1, 0}, mailbox_counts(Account, <<"mbDK">>)),
+    ok = mailio_account_writer:apply_flags(Account, <<"mbDK">>, EmailId, []),
+    ?assertEqual({1, 1}, mailbox_counts(Account, <<"mbDK">>)),
+    ok = mailio_account_writer:apply_flags(Account, <<"mbDK">>, EmailId, [<<"$draft">>]),
+    ?assertEqual({1, 0}, mailbox_counts(Account, <<"mbDK">>)),
     ?assertEqual({ok, []}, mailio_fsck:check_counters(Account)).
 
 idle_count(Srv) ->

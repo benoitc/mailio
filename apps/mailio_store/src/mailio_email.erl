@@ -27,7 +27,8 @@
     add_keyword/2,
     remove_keyword/2,
     set_keyword/3,
-    is_seen/1
+    is_seen/1,
+    is_read/1
 ]).
 -export([imap_entries/2, add_imap_entry/3, remove_imap_entry/3, clear_imap_entries/2]).
 
@@ -122,6 +123,11 @@ set_keyword(Email, Keyword, false) ->
 
 -spec is_seen(email()) -> boolean().
 is_seen(Email) -> has_keyword(Email, ?KW_SEEN).
+
+%% An email that is not counted in `unreadEmails': it is seen, or it is a draft
+%% (RFC 8621, section 2: a mailbox's unread count leaves drafts out).
+-spec is_read(email()) -> boolean().
+is_read(Email) -> is_seen(Email) orelse has_keyword(Email, ?KW_DRAFT).
 
 %%====================================================================
 %% IMAP uid entries: _mailio.imap is #{MailboxId => [Entry]} where each
