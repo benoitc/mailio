@@ -1,6 +1,6 @@
 {application, mailio_store, [
     {description, "Mail store, sync, rules and agent surface on top of mailio"},
-    {vsn, "0.1.0"},
+    {vsn, "0.2.0"},
     {registered, [mailio_sup]},
     {mod, {mailio_app, []}},
     {applications, [
