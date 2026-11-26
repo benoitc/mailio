@@ -77,6 +77,8 @@
     caps = [] :: [binary()],
     %% where the extensions negotiation after login stands: capability | enable
     neg :: capability | enable | undefined,
+    %% ENABLE QRESYNC was confirmed on this connection
+    qresync_enabled = false :: boolean(),
     notify :: pid() | undefined,
     unsolicited = [] :: [term()],
     backoff = ?BACKOFF_MIN :: pos_integer()
@@ -105,10 +107,11 @@
 %% restarted only when it crashes.
 %%
 %% A supervisor puts the start arguments in its reports, so they must not hold a
-%% secret: the config may not have a password, a token or a `username'/`password'
-%% pair. Give `credentials => {provider, {Module, Args}, AccountId, imap}' (see
-%% {@link mailio_credentials}) and the connection fetches the secret itself each
-%% time it logs in. A `token_fun' is accepted too, as the fun shows no secret.
+%% secret, nor the arguments of a provider, which may be one (the bundled static
+%% provider keeps passwords there). Keep the credential under a name with
+%% {@link mailio_credentials:register_ref/2} and give `credentials => {ref, Name}':
+%% the connection looks it up inside its own worker each time it logs in. A
+%% `token_fun' is accepted too, as the fun shows no secret.
 -spec child_spec(map()) -> supervisor:child_spec().
 child_spec(Config) ->
     case secret_in(Config) of
@@ -129,6 +132,7 @@ secret_in(Config) ->
         case maps:get(credentials, Config, undefined) of
             {password, _, _} -> true;
             {oauth2, _, _} -> true;
+            {provider, _, _, _} -> true;
             _ -> false
         end.
 
@@ -315,7 +319,10 @@ greeting(info, {Tag, Sock, Bin}, #data{sock = Sock} = Data) when
             %% used (RFC 9051, section 7.1.4)
             {next_state, tls_failed, Data2};
         {ok, {untagged, {status_resp, preauth, _, _}}, Data2} ->
-            {next_state, ready, Data2};
+            %% already logged in: the extensions are negotiated just the same
+            {next_state, after_login(Data2), Data2#data{
+                caps = [], neg = capability, qresync_enabled = false
+            }};
         {ok, _Other, Data2} ->
             %% not a greeting: give the connection up, socket and all
             drop(Data2);
@@ -409,13 +416,13 @@ auth(info, {T, Sock, Bin}, #data{sock = Sock} = Data) when
         Bin,
         fun(Status, _Code, _Text, Data1) ->
             Data2 = Data1#data{tag = undefined, literal = undefined},
-            case {Status, Data2#data.config} of
-                {ok, #{enable_qresync := true}} ->
-                    %% what the server offers is read again on every login, and
-                    %% QRESYNC enabled on each connection (RFC 7162, section 3.2.3)
-                    {next_state, negotiate, Data2#data{caps = [], neg = capability}};
-                {ok, _} ->
-                    {next_state, ready, Data2};
+            case Status of
+                %% what the server offers is read again on every login, and
+                %% QRESYNC enabled on each connection (RFC 7162, section 3.2.3)
+                ok ->
+                    {next_state, after_login(Data2), Data2#data{
+                        caps = [], neg = capability, qresync_enabled = false
+                    }};
                 _ ->
                     {next_state, auth_failed, Data2}
             end
@@ -429,6 +436,18 @@ auth({call, _From}, _Req, Data) ->
 %%====================================================================
 %% State: negotiate (after login: the capabilities, then ENABLE QRESYNC)
 %%====================================================================
+
+%% What the server offers, as far as it can be used: QRESYNC only once it was
+%% enabled on this connection and the server said so.
+offered_caps(#data{config = #{enable_qresync := true}, qresync_enabled = false, caps = Caps}) ->
+    [C || C <- Caps, string:uppercase(C) =/= <<"QRESYNC">>];
+offered_caps(#data{caps = Caps}) ->
+    Caps.
+
+%% Where a connection goes once it is logged in: to negotiate extensions when the
+%% config asks for QRESYNC, else to work.
+after_login(#data{config = #{enable_qresync := true}}) -> negotiate;
+after_login(_) -> ready.
 
 negotiate(enter, _Old, #data{neg = capability} = Data) ->
     negotiate_send(Data, fun mailio_imap_proto:capability/1);
@@ -449,8 +468,13 @@ negotiate(info, {T, Sock, Bin}, #data{sock = Sock} = Data) when
                     false ->
                         {next_state, ready, Data1#data{neg = undefined, tag = undefined}}
                 end;
-            (ok, _Code, _Text, #data{neg = enable} = Data1) ->
-                {next_state, ready, Data1#data{neg = undefined, tag = undefined}};
+            (Status, _Code, _Text, #data{neg = enable} = Data1) ->
+                %% QRESYNC is used only when the server said it is enabled: any
+                %% other answer, an empty ENABLED or a refusal, leaves it unused
+                Confirmed = Status =:= ok andalso enabled_qresync(Data1#data.untagged),
+                {next_state, ready, Data1#data{
+                    neg = undefined, tag = undefined, qresync_enabled = Confirmed
+                }};
             (_Status, _Code, _Text, Data1) ->
                 %% the server refused: this connection is not used, a new one is made
                 drop(Data1)
@@ -462,6 +486,21 @@ negotiate(info, Event, Data) ->
     handle_socket_closed(Event, Data);
 negotiate({call, _From}, _Req, Data) ->
     {keep_state, Data, [{postpone, true}]}.
+
+%% `* ENABLED QRESYNC' among the answers to ENABLE
+enabled_qresync(Untagged) ->
+    lists:any(
+        fun
+            ({other, <<"ENABLED">>, Names}) when is_binary(Names) ->
+                lists:member(
+                    <<"QRESYNC">>,
+                    binary:split(string:uppercase(Names), <<" ">>, [global, trim_all])
+                );
+            (_) ->
+                false
+        end,
+        Untagged
+    ).
 
 negotiate_send(Data, Build) ->
     {Tag, Data1} = next_tag(Data),
@@ -562,7 +601,7 @@ ready({call, From}, {run, Builder, Deadline}, Data) ->
             end
     end;
 ready({call, From}, capabilities, Data) ->
-    {keep_state, Data, [{reply, From, Data#data.caps}]};
+    {keep_state, Data, [{reply, From, offered_caps(Data)}]};
 ready({call, From}, {idle_start, NotifyPid}, Data) ->
     {Tag, Data1} = next_tag(Data),
     _ = send(Data1, mailio_imap_proto:idle(Tag)),

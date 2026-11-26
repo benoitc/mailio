@@ -56,6 +56,10 @@
     a_listing_that_misses_messages_is_an_error/1,
     a_listing_beyond_the_limit_stops/1,
     qresync_is_enabled_again_after_a_reconnect/1,
+    qresync_is_negotiated_after_a_preauth_greeting/1,
+    an_empty_enabled_answer_leaves_qresync_unused/1,
+    a_server_that_lost_its_extensions_is_read_without_them/1,
+
     writes_open_read_write/1
 ]).
 
@@ -101,6 +105,10 @@ all() ->
         a_listing_that_misses_messages_is_an_error,
         a_listing_beyond_the_limit_stops,
         qresync_is_enabled_again_after_a_reconnect,
+        qresync_is_negotiated_after_a_preauth_greeting,
+        an_empty_enabled_answer_leaves_qresync_unused,
+        a_server_that_lost_its_extensions_is_read_without_them,
+
         writes_open_read_write
     ].
 
@@ -606,3 +614,44 @@ retry_until_connected(Conn, State, N) ->
         Ok ->
             Ok
     end.
+
+%% Logged in by the greeting, the connection still negotiates before it is used.
+qresync_is_negotiated_after_a_preauth_greeting(Config) ->
+    Srv = ?config(srv, Config),
+    ok = mailio_fake_imap:set_option(Srv, enforce_enable, true),
+    ok = mailio_fake_imap:set_option(Srv, preauth_greeting, true),
+    Conn = conn_with(Config, #{}),
+    {ok, _, S1, done} = mailio_imap:fetch_changes_since(Conn, <<"INBOX">>, initial, #{}),
+    ?assertMatch({ok, _, _, done}, mailio_imap:fetch_changes_since(Conn, <<"INBOX">>, S1, #{})).
+
+%% `* ENABLED' with nothing in it, then OK, is not QRESYNC being enabled: no command
+%% that needs it is sent.
+an_empty_enabled_answer_leaves_qresync_unused(Config) ->
+    Srv = ?config(srv, Config),
+    ok = mailio_fake_imap:set_option(Srv, enforce_enable, true),
+    ok = mailio_fake_imap:set_option(Srv, empty_enabled, true),
+    Conn = conn_with(Config, #{}),
+    {ok, _, S1, done} = mailio_imap:fetch_changes_since(Conn, <<"INBOX">>, initial, #{}),
+    ?assertMatch({ok, _, _, done}, mailio_imap:fetch_changes_since(Conn, <<"INBOX">>, S1, #{})),
+    ?assertNot(
+        lists:any(
+            fun(C) -> re:run(C, <<"QRESYNC \\(">>) =/= nomatch end, mailio_fake_imap:commands(Srv)
+        )
+    ).
+
+%% After a reconnect to a server that offers nothing but IMAP4rev1, the listing is
+%% made with what it offers now, not with what the first connection offered.
+a_server_that_lost_its_extensions_is_read_without_them(Config) ->
+    Srv = ?config(srv, Config),
+    Conn = conn_with(Config, #{}),
+    {ok, _, S1, done} = mailio_imap:fetch_changes_since(Conn, <<"INBOX">>, initial, #{}),
+    ok = mailio_fake_imap:set_capabilities(Srv, <<>>),
+    ok = mailio_fake_imap:drop_connection(Srv),
+    Before = length(mailio_fake_imap:commands(Srv)),
+    ?assertMatch({ok, _, _, done}, retry_until_connected(Conn, S1, 50)),
+    After = lists:nthtail(Before, mailio_fake_imap:commands(Srv)),
+    ?assertNot(
+        lists:any(
+            fun(C) -> re:run(C, <<"CHANGEDSINCE|QRESYNC">>, [caseless]) =/= nomatch end, After
+        )
+    ).

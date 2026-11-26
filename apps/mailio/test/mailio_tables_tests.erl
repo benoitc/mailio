@@ -62,7 +62,7 @@ child_spec_starts_the_connection_under_a_supervisor_test() ->
         host => <<"127.0.0.1">>,
         port => 143,
         tls => false,
-        credentials => {provider, {?MODULE, []}, <<"acct">>, imap}
+        credentials => {ref, my_connection}
     }),
     ?assertMatch(#{start := {mailio_imap_conn, start_link, [_]}, restart := transient}, Spec),
     ?assertEqual(ok, supervisor:check_childspecs([Spec])).
@@ -76,11 +76,18 @@ child_spec_refuses_a_secret_test() ->
      || Extra <- [
             #{credentials => {password, <<"u">>, <<"s3cret">>}},
             #{credentials => {oauth2, <<"u">>, <<"tok">>}},
+            %% the arguments of a provider can hold the secret
+            #{
+                credentials =>
+                    {provider,
+                        {mailio_credentials_static, #{<<"a">> => {password, <<"u">>, <<"s3cret">>}}},
+                        <<"a">>, imap}
+            },
             #{username => <<"u">>, password => <<"s3cret">>}
         ]
     ],
     Spec = mailio_imap_conn:child_spec(Base#{
-        credentials => {provider, {?MODULE, []}, <<"a">>, imap}
+        credentials => {ref, my_connection}
     }),
     ?assertEqual(nomatch, string:find(lists:flatten(io_lib:format("~p", [Spec])), "s3cret")).
 
@@ -89,7 +96,12 @@ a_provider_reference_is_resolved_test() ->
     ?assertEqual(
         {ok, {password, <<"u">>, <<"from provider">>}},
         mailio_credentials:resolve({provider, {?MODULE, []}, <<"acct">>, imap})
-    ).
+    ),
+    ok = mailio_credentials:register_ref(my_connection, {password, <<"u">>, <<"from ref">>}),
+    ?assertEqual(
+        {ok, {password, <<"u">>, <<"from ref">>}}, mailio_credentials:resolve({ref, my_connection})
+    ),
+    mailio_credentials:forget_ref(my_connection).
 
 %% the provider callback
 fetch(<<"acct">>, imap, []) -> {ok, {password, <<"u">>, <<"from provider">>}}.

@@ -75,6 +75,8 @@
     a_refused_mapping_delete_is_an_error/1,
     an_ingest_that_stopped_before_the_counter_is_repaired_by_the_retry/1,
     a_uid_taken_over_by_another_email_keeps_the_counters_right/1,
+    a_flag_update_repairs_a_mailbox_whose_counter_write_failed/1,
+    a_delivery_to_another_mailbox_repairs_the_shared_email_s_first_mailbox/1,
 
     opaque_ids_are_synced_and_reconciled/1,
     an_unreliable_listing_does_not_remove_local_mail/1,
@@ -139,6 +141,8 @@ all() ->
         a_refused_mapping_delete_is_an_error,
         an_ingest_that_stopped_before_the_counter_is_repaired_by_the_retry,
         a_uid_taken_over_by_another_email_keeps_the_counters_right,
+        a_flag_update_repairs_a_mailbox_whose_counter_write_failed,
+        a_delivery_to_another_mailbox_repairs_the_shared_email_s_first_mailbox,
 
         opaque_ids_are_synced_and_reconciled,
         an_unreliable_listing_does_not_remove_local_mail,
@@ -1404,6 +1408,43 @@ a_uid_taken_over_by_another_email_keeps_the_counters_right(Config) ->
     ),
     ?assertEqual({1, 0}, mailbox_counts(Account, <<"mbT">>)),
     ?assertEqual({ok, []}, mailio_fsck:check_counters(Account)).
+
+%% The email and its mapping were stored and the counter write was refused. The
+%% retry of the sync only finds the flags to apply, and that must not leave the
+%% counters as they were.
+a_flag_update_repairs_a_mailbox_whose_counter_write_failed(Config) ->
+    Account = ?config(account, Config),
+    Db = mailio_account:db_name(Account),
+    Raw = <<"From: a@x\r\nTo: b@y\r\nSubject: flags\r\nMessage-ID: <f@x>\r\n\r\nbody\r\n">>,
+    {ok, EmailId} = mailio_account_writer:ingest(Account, <<"mbF">>, Raw, #{uid => 1}),
+    {ok, Mbx} = mailio_db:get(Db, <<?ID_MAILBOX, "mbF">>),
+    {ok, _, _} = mailio_db:put(Db, Mbx#{
+        <<"totalEmails">> => 0, <<"unreadEmails">> => 0, <<"counters_dirty_ingest">> => true
+    }),
+    ok = mailio_account_writer:apply_flags(Account, <<"mbF">>, EmailId, [<<"$seen">>]),
+    ?assertEqual({1, 0}, mailbox_counts(Account, <<"mbF">>)),
+    ?assertEqual({ok, []}, mailio_fsck:check_counters(Account)).
+
+%% An email in one mailbox, whose counters are marked as possibly wrong, arrives in
+%% another: the first one is counted again before the delivery moves its counters,
+%% and its mark is not cleared while it is wrong.
+a_delivery_to_another_mailbox_repairs_the_shared_email_s_first_mailbox(Config) ->
+    Account = ?config(account, Config),
+    Db = mailio_account:db_name(Account),
+    Raw = <<"From: a@x\r\nTo: b@y\r\nSubject: shared\r\nMessage-ID: <s2@x>\r\n\r\nbody\r\n">>,
+    {ok, _} = mailio_account_writer:ingest(Account, <<"mbI">>, Raw, #{uid => 1}),
+    {ok, Mbx} = mailio_db:get(Db, <<?ID_MAILBOX, "mbI">>),
+    {ok, _, _} = mailio_db:put(Db, Mbx#{
+        <<"totalEmails">> => 0, <<"unreadEmails">> => 0, <<"counters_dirty_ingest">> => true
+    }),
+    {ok, _} = mailio_account_writer:ingest(
+        Account, <<"mbA2">>, Raw, #{uid => 1, keywords => [<<"$seen">>]}
+    ),
+    ?assertEqual({1, 0}, mailbox_counts(Account, <<"mbI">>)),
+    ?assertEqual({1, 0}, mailbox_counts(Account, <<"mbA2">>)),
+    ?assertEqual({ok, []}, mailio_fsck:check_counters(Account)),
+    {ok, Fixed} = mailio_db:get(Db, <<?ID_MAILBOX, "mbI">>),
+    ?assertNot(maps:is_key(<<"counters_dirty_ingest">>, Fixed)).
 
 idle_count(Srv) ->
     length([

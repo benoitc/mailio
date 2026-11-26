@@ -174,7 +174,7 @@ do_fetch_changes(#{pid := Pid} = Conn, MailboxId, State, _Opts) ->
             Caps = Caps0#{
                 qresync := maps:get(qresync, Caps0, false) andalso maps:get(qresync, Conn, true)
             },
-            do_fetch_changes_with(Conn, Caps, MailboxId, State);
+            do_fetch_changes_with(Conn#{caps := Caps}, Caps, MailboxId, State);
         Other ->
             command_error(Other)
     end.

@@ -15,7 +15,7 @@
 
 -export([start/0, start/1, stop/1, port/1, commands/1]).
 -export([last_flags/2, set_flags/3, deliver/2, expunge/2, new_validity/2, set_failure/3]).
--export([set_option/3, inject/2, set_uidnext/2, set_search/2, drop_connection/1]).
+-export([set_option/3, inject/2, set_uidnext/2, set_search/2, drop_connection/1, set_capabilities/2]).
 
 -record(srv, {port, pid, ref, tab}).
 
@@ -91,6 +91,8 @@ set_option(Srv, Option, Bool) when
     Option =:= zero_max_uid;
     Option =:= fail_flags_fetch;
     Option =:= enforce_enable;
+    Option =:= preauth_greeting;
+    Option =:= empty_enabled;
     Option =:= bad_validity;
     Option =:= bad_vanished
 ->
@@ -121,6 +123,10 @@ set_search(Srv, Mode) when
 %% binary is sent as it is, to send one that is not a valid number.
 set_uidnext(Srv, N) -> call(Srv, {set_uidnext, N}, ok).
 
+%% @doc What the server announces from now on (a binary after `IMAP4rev1 ': the
+%% capabilities).
+set_capabilities(Srv, Caps) -> call(Srv, {set_capabilities, Caps}, ok).
+
 %% @doc The server closes the connection it has now, as a network failure would.
 drop_connection(Srv) -> call(Srv, drop_connection, ok).
 
@@ -149,10 +155,12 @@ accept_loop(LSock, Opts, Ref, State) ->
     case gen_tcp:accept(LSock, 50) of
         {ok, Sock} ->
             put(fake_opts, Opts),
-            gen_tcp:send(
-                Sock,
-                <<"* OK [CAPABILITY IMAP4rev1 IDLE CONDSTORE QRESYNC MOVE UIDPLUS SPECIAL-USE] ready\r\n">>
-            ),
+            Greeting =
+                case maps:get({opt, preauth_greeting}, State, false) of
+                    true -> <<"* PREAUTH logged in\r\n">>;
+                    false -> [<<"* OK [CAPABILITY ">>, capabilities(State), <<"] ready\r\n">>]
+                end,
+            gen_tcp:send(Sock, Greeting),
             inet:setopts(Sock, [{active, once}]),
             State1 = loop(
                 Sock, State#{selected => undefined, idling => undefined, enabled => false}, Ref
@@ -170,6 +178,12 @@ accept_loop(LSock, Opts, Ref, State) ->
         {error, _} ->
             ok
     end.
+
+capabilities(State) ->
+    [
+        <<"IMAP4rev1 ">>,
+        maps:get(caps, State, <<"IDLE CONDSTORE QRESYNC MOVE UIDPLUS SPECIAL-USE">>)
+    ].
 
 init_state() ->
     #{
@@ -235,6 +249,8 @@ handle_control(Sock, Ref, {deliver, Subject}, #{messages := Ms, uidnext := Uid} 
     {{ok, Ref, ok}, State1};
 handle_control(_Sock, Ref, {set_option, Option, Bool}, State) ->
     {{ok, Ref, ok}, State#{{opt, Option} => Bool}};
+handle_control(_Sock, Ref, {set_capabilities, Caps}, State) ->
+    {{ok, Ref, ok}, State#{caps => Caps}};
 handle_control(_Sock, Ref, drop_connection, State) ->
     {{ok, Ref, ok}, State};
 handle_control(_Sock, Ref, {set_search, Mode}, State) ->
@@ -381,7 +397,7 @@ dispatch(Sock, Tag, Rest, State) ->
         <<"CAPABILITY">> ->
             send(
                 Sock,
-                <<"* CAPABILITY IMAP4rev1 IDLE CONDSTORE QRESYNC MOVE UIDPLUS SPECIAL-USE\r\n">>
+                [<<"* CAPABILITY ">>, capabilities(State), <<"\r\n">>]
             ),
             tagged(Sock, Tag, <<"OK CAPABILITY done">>),
             {continue, State};
@@ -408,7 +424,10 @@ dispatch(Sock, Tag, Rest, State) ->
             end,
             {continue, State};
         <<"ENABLE">> ->
-            send(Sock, <<"* ENABLED QRESYNC\r\n">>),
+            case maps:get({opt, empty_enabled}, State, false) of
+                true -> send(Sock, <<"* ENABLED\r\n">>);
+                false -> send(Sock, <<"* ENABLED QRESYNC\r\n">>)
+            end,
             tagged(Sock, Tag, <<"OK ENABLE done">>),
             {continue, State#{enabled => true}};
         <<"NOOP">> ->

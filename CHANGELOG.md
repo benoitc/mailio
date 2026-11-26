@@ -33,6 +33,19 @@
 
 ### Fixed
 
+- A supervised IMAP connection is now given the name of a credential kept with
+  `register_ref`, not a credential or a provider with its arguments, because
+  the arguments of the bundled static provider are the secret. Looking up a
+  credential, calling its provider and following what it returns now happen in
+  one worker with one time limit, and the worker is stopped when the time is up.
+- The counters of a mailbox are counted again before a flag update, an ingest or
+  a patch changes them, for every mailbox that email is in. A mark that says the
+  counters may be wrong is no longer cleared by a later write while they are.
+- QRESYNC is negotiated on every login, including one where the server greets
+  as already logged in, and it is used only when the server confirms it. An
+  empty answer to ENABLE leaves it unused, and a listing after a reconnect uses
+  what the server offers now.
+
 - The connection specification for a supervisor no longer takes a password or a
   token, because a supervisor writes its start arguments in its reports. Give a
   reference to your credentials module instead. POP3 and SMTP now also refuse a

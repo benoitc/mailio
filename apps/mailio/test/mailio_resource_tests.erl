@@ -5,6 +5,8 @@
 %%% provider must not be able to hang or spin the caller or a connection.
 -module(mailio_resource_tests).
 -include_lib("eunit/include/eunit.hrl").
+-behaviour(mailio_credentials).
+-export([fetch/3, invalidate/3]).
 -include_lib("public_key/include/public_key.hrl").
 
 %%====================================================================
@@ -273,3 +275,71 @@ imap_with_provider(Fun) ->
     after
         mailio_fake_imap:stop(Srv)
     end.
+
+%%====================================================================
+%% One worker, one deadline, for the whole chain
+%%====================================================================
+
+%% a provider module for the tests that keeps what it is asked in its arguments
+fetch(<<"acct">>, imap, Cred) ->
+    {ok, Cred};
+fetch(<<"slow">>, imap, Parent) ->
+    %% the provider starts a helper of its own, linked, and waits for it
+    Helper = spawn_link(fun() ->
+        Parent ! {helper, self()},
+        timer:sleep(infinity)
+    end),
+    _ = Helper,
+    timer:sleep(infinity).
+invalidate(_, _, _) -> ok.
+
+a_token_fun_may_return_a_provider_reference_test() ->
+    Cred = {password, <<"u">>, <<"p">>},
+    Fun = fun() -> {ok, {provider, {?MODULE, Cred}, <<"acct">>, imap}} end,
+    ?assertEqual({ok, Cred}, mailio_credentials:resolve({token_fun, Fun})),
+    ?assertEqual(
+        {ok, Cred},
+        mailio_credentials:fetch({?MODULE, {token_fun, fun() -> {ok, Cred} end}}, <<"acct">>, imap)
+    ).
+
+a_named_credential_is_looked_up_test() ->
+    Cred = {oauth2, <<"u">>, <<"tok">>},
+    ok = mailio_credentials:register_ref(my_account, Cred),
+    try
+        ?assertEqual({ok, Cred}, mailio_credentials:resolve({ref, my_account})),
+        ?assertMatch(
+            {error, {credentials_failed, unknown_reference}},
+            mailio_credentials:resolve({ref, nobody})
+        )
+    after
+        mailio_credentials:forget_ref(my_account)
+    end.
+
+%% the time limit is for the chain, not for each link of it
+the_deadline_covers_the_whole_chain_test() ->
+    Slow = fun(Next) ->
+        fun() ->
+            timer:sleep(120),
+            {ok, Next}
+        end
+    end,
+    Chain = {token_fun, Slow({token_fun, Slow({token_fun, Slow({password, <<"u">>, <<"p">>})})})},
+    ?assertEqual(
+        {error, credentials_timeout}, mailio_credentials:resolve(Chain, #{timeout => 250})
+    ),
+    ?assertMatch({ok, _}, mailio_credentials:resolve(Chain, #{timeout => 2000})).
+
+%% a provider that is slow, and the helper it started, are gone when the time is up
+a_timed_out_provider_leaves_nothing_running_test() ->
+    Self = self(),
+    ?assertEqual(
+        {error, credentials_timeout},
+        mailio_credentials:resolve({provider, {?MODULE, Self}, <<"slow">>, imap}, #{timeout => 150})
+    ),
+    Helper =
+        receive
+            {helper, H} -> H
+        after 1000 -> error(no_helper)
+        end,
+    timer:sleep(50),
+    ?assertNot(is_process_alive(Helper)).

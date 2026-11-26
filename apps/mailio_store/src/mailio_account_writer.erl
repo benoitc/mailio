@@ -191,13 +191,18 @@ init(AccountId) ->
 
 handle_call({ingest, MailboxId, Raw, Opts}, _From, State) ->
     Result = safely(fun() ->
-        ok = repair_dirty(State, MailboxId),
+        %% the mailboxes the email is in too: an ingest rewrites their counters
+        Members = email_mailboxes(State#state.db, mailio_id:email_id(Raw)),
+        ok = repair_marked(State, [MailboxId | Members]),
         do_ingest(State#state.db, MailboxId, Raw, Opts)
     end),
     State1 = emit_events(State),
     {reply, Result, State1};
 handle_call({apply_flags, MailboxId, EmailId, ServerKeywords}, _From, State) ->
-    Result = do_apply_flags(State#state.db, MailboxId, EmailId, ServerKeywords),
+    Result = safely(fun() ->
+        ok = repair_marked(State, [MailboxId | email_mailboxes(State#state.db, EmailId)]),
+        do_apply_flags(State#state.db, MailboxId, EmailId, ServerKeywords)
+    end),
     State1 = emit_events(State),
     {reply, Result, State1};
 handle_call({remove_uid, MailboxId, Uid}, _From, State) ->
@@ -224,7 +229,14 @@ handle_call({set_counters, MailboxId, Total, Unread}, _From, State) ->
     State1 = emit_events(State),
     {reply, Result, State1};
 handle_call({patch, EmailId, Patch}, _From, State) ->
-    Result = do_patch(State#state.db, EmailId, Patch),
+    Result = safely(fun() ->
+        Named = lists:append([
+            maps:get(K, Patch, [])
+         || K <- [add_mailboxes, remove_mailboxes, set_mailboxes]
+        ]),
+        ok = repair_marked(State, Named ++ email_mailboxes(State#state.db, EmailId)),
+        do_patch(State#state.db, EmailId, Patch)
+    end),
     State1 = emit_events(State),
     {reply, Result, State1};
 handle_call(_Req, _From, State) ->
@@ -244,6 +256,18 @@ safely(Fun) ->
 %% the counter is written. A mark that is still there means a removal stopped in
 %% between and the counter may be wrong: it is counted again from the emails, once,
 %% before anything else is written to the mailbox.
+%% Every mailbox a write can change counters of is repaired first, and a mark is
+%% only ever cleared by the write that counted it again or moved the counters.
+repair_marked(State, Mailboxes) ->
+    lists:foreach(fun(M) -> ok = repair_dirty(State, M) end, lists:usort(Mailboxes)).
+
+%% the mailboxes an email is in, none if it is not stored
+email_mailboxes(Db, EmailId) ->
+    case mailio_db:get(Db, <<?ID_EMAIL, EmailId/binary>>) of
+        {ok, Email} -> mailio_email:mailbox_ids(Email);
+        {error, not_found} -> []
+    end.
+
 repair_dirty(#state{db = Db, account_id = AccountId}, MailboxId) ->
     case mailio_db:get(Db, <<?ID_MAILBOX, MailboxId/binary>>) of
         {ok, Mbx} when
