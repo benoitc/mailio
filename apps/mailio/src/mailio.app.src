@@ -1,6 +1,6 @@
 {application, mailio, [
     {description, "IMAP, POP3 and SMTP clients, MIME and RFC 5322. OTP only, no database."},
-    {vsn, "0.1.0"},
+    {vsn, "0.2.0"},
     {registered, []},
     {applications, [
         kernel,
@@ -13,5 +13,6 @@
     {modules, []},
     {pkg_name, mailio},
     {licenses, ["Apache-2.0"]},
+    {maintainers, ["Benoit Chesneau"]},
     {links, [{"GitHub", "https://github.com/benoitc/mailio"}]}
 ]}.
