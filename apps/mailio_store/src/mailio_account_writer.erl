@@ -24,9 +24,13 @@
 
 -include("mailio_store.hrl").
 
--export([start_link/1, ingest/4, apply_flags/4, remove_member/3, gc_blobs/2, migrate_blobs/2]).
+-export([start_link/1, ingest/4, apply_flags/4, remove_member/3, remove_uid/3]).
+-export([gc_blobs/2, migrate_blobs/2]).
 -export([set_counters/4, patch/3]).
 -export([uidmap_id/3, lookup_uid/3]).
+-ifdef(TEST).
+-export([deleted/1]).
+-endif.
 -export([init/1, handle_call/3, handle_cast/2, handle_info/2, terminate/2]).
 
 -record(state, {
@@ -36,6 +40,8 @@
 }).
 
 -define(PARSE_VERSION, 1).
+%% An ingest has its own mark: the removal it may do inside it clears the other.
+-define(INGEST_MARK, <<"counters_dirty_ingest">>).
 
 %%====================================================================
 %% API
@@ -62,6 +68,12 @@ apply_flags(AccountId, MailboxId, EmailId, ServerKeywords) ->
 -spec remove_member(binary(), binary(), binary()) -> ok | {error, term()}.
 remove_member(AccountId, MailboxId, EmailId) ->
     gen_server:call(via(AccountId), {remove_member, MailboxId, EmailId}, 30000).
+
+%% @doc One UID of a mailbox is gone: drop its mapping, and the email's
+%% membership only if no other UID of the mailbox still refers to it.
+-spec remove_uid(binary(), binary(), term()) -> ok | {error, not_found | term()}.
+remove_uid(AccountId, MailboxId, Uid) ->
+    gen_server:call(via(AccountId), {remove_uid, MailboxId, Uid}, 30000).
 
 %% @doc Sweep blobs orphaned longer than `GraceSecs', in the writer process
 %% so it cannot race a concurrent re-ingest. Returns the count swept.
@@ -92,23 +104,80 @@ patch(AccountId, EmailId, Patch) ->
 via(AccountId) ->
     {via, mailio_registry, {writer, AccountId}}.
 
-%% @doc Document id of the uid->email mapping for a mailbox + uid.
+%% @doc Document id of the uid->email mapping for a mailbox + uid. The id keeps
+%% the type of the UID (the integer 1 and the text "1" are two messages for an
+%% adapter with opaque UIDs) and lives in a namespace of its own, so it never
+%% meets an id written by an older version.
 -spec uidmap_id(binary(), binary(), term()) -> binary().
 uidmap_id(_AccountId, MailboxId, Uid) ->
-    UidBin = to_bin(Uid),
-    <<?ID_UIDMAP, MailboxId/binary, "/", UidBin/binary>>.
+    <<?ID_UIDMAP2, MailboxId/binary, "/", (uid_key(Uid))/binary>>.
 
 %% @doc Look up the email id mapped to a mailbox + uid.
 -spec lookup_uid(binary(), binary(), term()) -> {ok, binary()} | {error, not_found}.
 lookup_uid(AccountId, MailboxId, Uid) ->
     Db = mailio_account:db_name(AccountId),
-    case mailio_db:get(Db, uidmap_id(AccountId, MailboxId, Uid)) of
-        {ok, #{<<"emailId">> := EmailId}} -> {ok, EmailId};
-        {error, not_found} -> {error, not_found}
+    case existing_uidmap_id(Db, MailboxId, Uid) of
+        {_, {ok, #{<<"emailId">> := EmailId}}} -> {ok, EmailId};
+        {_, {error, not_found}} -> {error, not_found}
     end.
 
-to_bin(Uid) when is_integer(Uid) -> integer_to_binary(Uid);
-to_bin(Uid) when is_binary(Uid) -> Uid.
+uid_key(Uid) when is_integer(Uid) -> <<"i:", (integer_to_binary(Uid))/binary>>;
+uid_key(Uid) when is_binary(Uid) -> <<"b:", Uid/binary>>.
+
+%% Mappings written by an older version: the UID as it is, in the old namespace,
+%% or, from a build that ran for a while, a text UID after `b:'. Their document
+%% holds the UID with its type, and only a document that holds this UID is this
+%% UID's mapping.
+legacy_uidmap_ids(MailboxId, Uid) ->
+    Base = <<?ID_UIDMAP, MailboxId/binary, "/">>,
+    case Uid of
+        _ when is_integer(Uid) -> [<<Base/binary, (integer_to_binary(Uid))/binary>>];
+        _ -> [<<Base/binary, Uid/binary>>, <<Base/binary, "b:", Uid/binary>>]
+    end.
+
+legacy_mappings(Db, MailboxId, Uid) ->
+    [
+        {Id, Found}
+     || Id <- legacy_uidmap_ids(MailboxId, Uid),
+        {ok, #{<<"uid">> := Stored}} = Found <- [mailio_db:get(Db, Id)],
+        Stored =:= Uid
+    ].
+
+%% The mapping of a UID: the current one, or an older one that has not moved yet.
+existing_uidmap_id(Db, MailboxId, Uid) ->
+    Id = uidmap_id(<<>>, MailboxId, Uid),
+    case mailio_db:get(Db, Id) of
+        {ok, _} = Found ->
+            {Id, Found};
+        {error, not_found} = Missing ->
+            case legacy_mappings(Db, MailboxId, Uid) of
+                [{Old, Found} | _] -> {Old, Found};
+                [] -> {Id, Missing}
+            end
+    end.
+
+%% A UID has no mapping left, in either namespace.
+delete_uidmap(Db, MailboxId, Uid) ->
+    maybe
+        ok ?= deleted(mailio_db:delete(Db, uidmap_id(<<>>, MailboxId, Uid))),
+        drop_legacy(Db, MailboxId, Uid)
+    end.
+
+drop_legacy(Db, MailboxId, Uid) ->
+    lists:foldl(
+        fun
+            ({Old, _}, ok) -> deleted(mailio_db:delete(Db, Old));
+            (_, Error) -> Error
+        end,
+        ok,
+        legacy_mappings(Db, MailboxId, Uid)
+    ).
+
+%% A mapping that is already gone is deleted; one the database refuses to delete
+%% is not, and the caller is told.
+deleted({ok, _}) -> ok;
+deleted({error, not_found}) -> ok;
+deleted({error, _} = Error) -> Error.
 
 %%====================================================================
 %% gen_server
@@ -118,18 +187,37 @@ init(AccountId) ->
     Db = mailio_account:db_name(AccountId),
     {ok, _} = mailio_db:ensure_db(Db),
     {ok, _Changes, Hlc} = mailio_db:changes(Db, first),
+    ok = load_dirty(Db),
     {ok, #state{account_id = AccountId, db = Db, emit_cursor = Hlc}}.
 
 handle_call({ingest, MailboxId, Raw, Opts}, _From, State) ->
-    Result = do_ingest(State#state.db, MailboxId, Raw, Opts),
+    Result = safely(fun() ->
+        %% the mailboxes the email is in too: an ingest rewrites their counters
+        Members = email_mailboxes(State#state.db, mailio_id:email_id(Raw)),
+        ok = repair_marked(State, [MailboxId | Members]),
+        do_ingest(State#state.db, MailboxId, Raw, Opts)
+    end),
     State1 = emit_events(State),
     {reply, Result, State1};
 handle_call({apply_flags, MailboxId, EmailId, ServerKeywords}, _From, State) ->
-    Result = do_apply_flags(State#state.db, MailboxId, EmailId, ServerKeywords),
+    Result = safely(fun() ->
+        ok = repair_marked(State, [MailboxId | email_mailboxes(State#state.db, EmailId)]),
+        do_apply_flags(State#state.db, MailboxId, EmailId, ServerKeywords)
+    end),
+    State1 = emit_events(State),
+    {reply, Result, State1};
+handle_call({remove_uid, MailboxId, Uid}, _From, State) ->
+    Result = safely(fun() ->
+        ok = repair_marked(State, [MailboxId]),
+        do_remove_uid(State#state.db, MailboxId, Uid)
+    end),
     State1 = emit_events(State),
     {reply, Result, State1};
 handle_call({remove_member, MailboxId, EmailId}, _From, State) ->
-    Result = do_remove_member(State#state.db, MailboxId, EmailId),
+    Result = safely(fun() ->
+        ok = repair_marked(State, [MailboxId]),
+        do_remove_member(State#state.db, MailboxId, EmailId)
+    end),
     State1 = emit_events(State),
     {reply, Result, State1};
 handle_call({migrate_blobs, Opts}, _From, State) ->
@@ -142,11 +230,56 @@ handle_call({set_counters, MailboxId, Total, Unread}, _From, State) ->
     State1 = emit_events(State),
     {reply, Result, State1};
 handle_call({patch, EmailId, Patch}, _From, State) ->
-    Result = do_patch(State#state.db, EmailId, Patch),
+    Result = safely(fun() ->
+        Named = lists:append([
+            maps:get(K, Patch, [])
+         || K <- [add_mailboxes, remove_mailboxes, set_mailboxes]
+        ]),
+        ok = repair_marked(State, Named ++ email_mailboxes(State#state.db, EmailId)),
+        do_patch(State#state.db, EmailId, Patch)
+    end),
     State1 = emit_events(State),
     {reply, Result, State1};
 handle_call(_Req, _From, State) ->
     {reply, {error, unknown_request}, State}.
+
+%% A write that the database refuses is an error to the caller, with the work
+%% left in a state the next call repairs, not a crash that loses the reply.
+safely(Fun) ->
+    try
+        Fun()
+    catch
+        error:{badmatch, {error, Reason}} -> {error, Reason};
+        error:{badmatch, Other} -> {error, Other}
+    end.
+
+%% A removal marks the mailbox before it changes the email and clears the mark when
+%% the counter is written. A mark that is still there means a removal stopped in
+%% between and the counter may be wrong: it is counted again from the emails, once,
+%% before anything else is written to the mailbox.
+%% Every mailbox a write can change counters of is repaired first, and a mark is
+%% only ever cleared by the write that counted it again or moved the counters.
+repair_marked(State, Mailboxes) ->
+    All = lists:usort(Mailboxes ++ maps:keys(get_dirty())),
+    lists:foreach(fun(M) -> ok = repair_dirty(State, M) end, All).
+
+%% the mailboxes an email is in, none if it is not stored
+email_mailboxes(Db, EmailId) ->
+    case mailio_db:get(Db, <<?ID_EMAIL, EmailId/binary>>) of
+        {ok, Email} -> mailio_email:mailbox_ids(Email);
+        {error, not_found} -> []
+    end.
+
+repair_dirty(#state{db = Db, account_id = AccountId}, MailboxId) ->
+    case mailio_db:get(Db, <<?ID_MAILBOX, MailboxId/binary>>) of
+        {ok, Mbx} when
+            is_map_key(<<"counters_dirty">>, Mbx); is_map_key(?INGEST_MARK, Mbx)
+        ->
+            {Total, Unread} = maps:get(MailboxId, mailio_fsck:recompute(AccountId), {0, 0}),
+            do_set_counters(Db, MailboxId, Total, Unread);
+        _ ->
+            ok
+    end.
 
 handle_cast(_Msg, State) ->
     {noreply, State}.
@@ -170,7 +303,10 @@ do_ingest(Db, MailboxId, Raw, Opts) ->
             merge_existing(Db, Existing, MailboxId, Opts),
             {ok, EmailId};
         {error, not_found} ->
+            %% a new email changes the counters, and so may the UID it takes over
+            ok = mark_ingesting(Db, [MailboxId]),
             full_ingest(Db, EmailId, DocId, MailboxId, Raw, Opts),
+            ok = clear_ingesting(Db, [MailboxId]),
             {ok, EmailId}
     end.
 
@@ -182,12 +318,26 @@ merge_existing(Db, Existing, MailboxId, Opts) ->
     E1 = mailio_email:add_mailbox(Existing, MailboxId),
     E2 = apply_keywords(E1, maps:get(keywords, Opts, [])),
     E3 = add_imap_entry(E2, MailboxId, Opts),
+    NowSeen = mailio_email:is_seen(E3),
+    %% Counters change on a new membership, or when the email became read or
+    %% unread. The mailboxes are marked first and cleared last, so that a stop
+    %% in between is found and counted again by the next write to them.
+    Touched =
+        case {AlreadyMember, WasSeen =:= NowSeen} of
+            {true, true} -> [];
+            _ -> lists:usort([MailboxId | mailio_email:mailbox_ids(Existing)])
+        end,
+    ok = mark_ingesting(Db, Touched),
     {ok, _, _} = mailio_db:put(Db, E3),
-    maybe_write_uidmap(Db, MailboxId, Opts, mailio_email:id_of(Existing)),
+    ok = maybe_write_uidmap(Db, MailboxId, Opts, mailio_email:id_of(Existing)),
+    %% the mailboxes that held it already: merging keywords may have read it
+    adjust_unread(Db, mailio_email:mailbox_ids(Existing), WasSeen, NowSeen),
     case AlreadyMember of
         true -> ok;
-        false -> bump_mailbox(Db, MailboxId, +1, seen_delta(false, WasSeen))
-    end.
+        %% a new membership is unread only if the email is, as it is now
+        false -> bump_mailbox(Db, MailboxId, +1, seen_delta(NowSeen, false))
+    end,
+    ok = clear_ingesting(Db, Touched).
 
 %%====================================================================
 %% Server flag application and membership removal
@@ -206,10 +356,48 @@ do_apply_flags(Db, _MailboxId, EmailId, ServerKeywords) ->
             ],
             New = lists:usort(ServerKeywords ++ LocalOnly),
             Email1 = Email#{<<"keywords">> => keywords_map(New)},
-            {ok, _, _} = mailio_db:put(Db, Email1),
             NowSeen = lists:member(?KW_SEEN, New),
+            %% the counters move only when the email became read or unread: then the
+            %% mailboxes are marked first and cleared once they are written
+            Touched =
+                case WasSeen =:= NowSeen of
+                    true -> [];
+                    false -> mailio_email:mailbox_ids(Email1)
+                end,
+            ok = mark_ingesting(Db, Touched),
+            {ok, _, _} = mailio_db:put(Db, Email1),
             adjust_unread(Db, mailio_email:mailbox_ids(Email1), WasSeen, NowSeen),
+            ok = clear_ingesting(Db, Touched),
             ok;
+        {error, not_found} ->
+            {error, not_found}
+    end.
+
+%% One UID of a mailbox is gone from the server. Two UIDs can hold the same mail
+%% (one email), so the email stays a member of the mailbox, with its counter,
+%% for as long as another UID of that mailbox still refers to it.
+%%
+%% The mapping goes last. A removal that stops half way leaves it in place, so
+%% the next one finds it and finishes, and it does not count the email out of
+%% the mailbox twice (the email says whether it is still a member).
+do_remove_uid(Db, MailboxId, Uid) ->
+    {_MapId, Found} = existing_uidmap_id(Db, MailboxId, Uid),
+    case Found of
+        {ok, #{<<"emailId">> := EmailId}} ->
+            case mailio_db:get(Db, <<?ID_EMAIL, EmailId/binary>>) of
+                {ok, Email} ->
+                    Left = mailio_email:remove_imap_entry(Email, MailboxId, Uid),
+                    case mailio_email:imap_entries(Left, MailboxId) of
+                        [] ->
+                            do_remove_member(Db, MailboxId, EmailId);
+                        _ ->
+                            {ok, _, _} = mailio_db:put(Db, Left),
+                            ok
+                    end;
+                {error, not_found} ->
+                    ok
+            end,
+            ok = delete_uidmap(Db, MailboxId, Uid);
         {error, not_found} ->
             {error, not_found}
     end.
@@ -218,29 +406,38 @@ do_remove_member(Db, MailboxId, EmailId) ->
     DocId = <<?ID_EMAIL, EmailId/binary>>,
     case mailio_db:get(Db, DocId) of
         {ok, Email} ->
-            WasSeen = mailio_email:is_seen(Email),
-            Email1 = mailio_email:remove_mailbox(Email, MailboxId),
-            bump_mailbox(Db, MailboxId, -1, seen_delta(WasSeen, true) * -1),
-            case mailio_email:mailbox_ids(Email1) of
-                [] ->
-                    destroy_email(Db, Email1);
-                _ ->
+            %% leaving a mailbox also forgets its UIDs: a stale one would keep a
+            %% later redelivery looking like a copy that is still there
+            Email1 = mailio_email:clear_imap_entries(
+                mailio_email:remove_mailbox(Email, MailboxId), MailboxId
+            ),
+            case mailio_email:in_mailbox(Email, MailboxId) of
+                true ->
+                    %% mark, change the email, write the counter and clear the
+                    %% mark: a stop anywhere leaves the mark, and the next write
+                    %% to the mailbox counts it again from the emails
+                    WasSeen = mailio_email:is_seen(Email),
+                    ok = mark_dirty(Db, MailboxId),
                     {ok, _, _} = mailio_db:put(Db, Email1),
+                    ok = settle_counter(Db, MailboxId, -1, seen_delta(WasSeen, true) * -1);
+                false ->
                     ok
             end,
-            _ = mailio_db:delete(Db, uidmap_id_for(Email, MailboxId)),
+            case mailio_email:mailbox_ids(Email1) of
+                [] -> destroy_email(Db, Email1);
+                _ -> ok
+            end,
+            ok = delete_first_uidmap(Db, Email, MailboxId),
             ok;
         {error, not_found} ->
             ok
     end.
 
 %% Best-effort uidmap cleanup: derive any uid recorded for the mailbox.
-uidmap_id_for(Email, MailboxId) ->
+delete_first_uidmap(Db, Email, MailboxId) ->
     case mailio_email:imap_entries(Email, MailboxId) of
-        [#{<<"uid">> := Uid} | _] ->
-            <<?ID_UIDMAP, MailboxId/binary, "/", (to_bin(Uid))/binary>>;
-        _ ->
-            <<?ID_UIDMAP, MailboxId/binary, "/none">>
+        [#{<<"uid">> := Uid} | _] -> delete_uidmap(Db, MailboxId, Uid);
+        _ -> ok
     end.
 
 destroy_email(Db, Email) ->
@@ -270,6 +467,15 @@ do_patch(Db, EmailId, Patch) ->
                 maps:get(remove_mailboxes, Patch, [])
             ),
             NewSeen = lists:member(?KW_SEEN, NewKw),
+            %% a patch that changes membership or the read state moves counters:
+            %% the mailboxes are marked before anything is written and cleared
+            %% after the counters are
+            Touched =
+                case {OldMbx =:= NewMbx, OldSeen =:= NewSeen} of
+                    {true, true} -> [];
+                    _ -> lists:usort(OldMbx ++ NewMbx)
+                end,
+            ok = mark_ingesting(Db, Touched),
             case NewMbx of
                 [] ->
                     %% No mailboxes left -> destroy, undo its counters.
@@ -283,6 +489,7 @@ do_patch(Db, EmailId, Patch) ->
                     {ok, _, _} = mailio_db:put(Db, Email1),
                     update_patch_counters(Db, OldMbx, NewMbx, OldSeen, NewSeen)
             end,
+            ok = clear_ingesting(Db, Touched),
             ok;
         {error, not_found} ->
             {error, not_found}
@@ -319,9 +526,12 @@ do_set_counters(Db, MailboxId, Total, Unread) ->
     DocId = <<?ID_MAILBOX, MailboxId/binary>>,
     case mailio_db:get(Db, DocId) of
         {ok, Doc} ->
-            Doc1 = Doc#{<<"totalEmails">> => Total, <<"unreadEmails">> => Unread},
+            Doc1 = maps:without(
+                [<<"counters_dirty">>, ?INGEST_MARK],
+                Doc#{<<"totalEmails">> => Total, <<"unreadEmails">> => Unread}
+            ),
             {ok, _, _} = mailio_db:put(Db, Doc1),
-            ok;
+            track_dirty(MailboxId, Doc1);
         {error, not_found} ->
             {error, not_found}
     end.
@@ -345,13 +555,28 @@ maybe_write_uidmap(Db, MailboxId, Opts, EmailId) ->
         Uid ->
             %% Enumerated by the `uidmap/<mailbox>/' id prefix, so no
             %% separate mailboxId field is needed for lookup.
-            Doc = #{
-                <<"id">> => <<?ID_UIDMAP, MailboxId/binary, "/", (to_bin(Uid))/binary>>,
-                <<"uid">> => Uid,
-                <<"emailId">> => EmailId
-            },
-            {ok, _, _} = mailio_db:put(Db, Doc),
-            ok
+            Id = uidmap_id(<<>>, MailboxId, Uid),
+            Doc = #{<<"id">> => Id, <<"uid">> => Uid, <<"emailId">> => EmailId},
+            {OldId, Found} = existing_uidmap_id(Db, MailboxId, Uid),
+            case Found of
+                %% the same message again (a replayed page): nothing to write,
+                %% apart from moving an older mapping to the current key. A
+                %% retry that finds both writes the current one and drops the old.
+                {ok, #{<<"emailId">> := EmailId}} when OldId =:= Id ->
+                    drop_legacy(Db, MailboxId, Uid);
+                {ok, #{<<"emailId">> := EmailId}} ->
+                    {ok, _, _} = mailio_db:put(Db, Doc),
+                    drop_legacy(Db, MailboxId, Uid);
+                %% The UID now belongs to another message: the one that held it
+                %% loses it (and its place in the mailbox, if it had no other).
+                {ok, #{<<"emailId">> := _Other}} ->
+                    _ = do_remove_uid(Db, MailboxId, Uid),
+                    {ok, _, _} = mailio_db:put(Db, Doc),
+                    ok;
+                {error, not_found} ->
+                    {ok, _, _} = mailio_db:put(Db, Doc),
+                    ok
+            end
     end.
 
 full_ingest(Db, EmailId, DocId, MailboxId, Raw, Opts) ->
@@ -442,7 +667,7 @@ full_ingest(Db, EmailId, DocId, MailboxId, Raw, Opts) ->
     Supporting = [ThreadDoc | MsgidDocs] ++ [TextDoc],
     _ = mailio_db:put_batch(Db, Supporting),
     {ok, _, _} = mailio_db:put(Db, EmailDoc),
-    maybe_write_uidmap(Db, MailboxId, Opts, EmailId),
+    ok = maybe_write_uidmap(Db, MailboxId, Opts, EmailId),
     bump_mailbox(Db, MailboxId, +1, seen_delta(is_seen_kw(Keywords), false)).
 
 %%====================================================================
@@ -519,19 +744,100 @@ ensure_mailbox(Db, MailboxId) ->
     end.
 
 bump_mailbox(Db, MailboxId, TotalDelta, UnreadDelta) ->
+    case bumped_mailbox(Db, MailboxId, TotalDelta, UnreadDelta) of
+        [Doc1] ->
+            {ok, _, _} = mailio_db:put(Db, Doc1),
+            ok;
+        [] ->
+            ok
+    end.
+
+mark_dirty(Db, MailboxId) ->
+    mark_dirty(Db, MailboxId, <<"counters_dirty">>).
+
+mark_dirty(Db, MailboxId, Key) ->
+    DocId = <<?ID_MAILBOX, MailboxId/binary>>,
+    case mailio_db:get(Db, DocId) of
+        {ok, Doc} ->
+            Doc1 = Doc#{Key => true},
+            {ok, _, _} = mailio_db:put(Db, Doc1),
+            track_dirty(MailboxId, Doc1);
+        {error, not_found} ->
+            ok
+    end.
+
+%% The mailboxes that carry a mark are kept in the writer, so that a retry finds
+%% them all: a write names only the mailboxes it is about, and a mark can be on
+%% one that the retry no longer names (the one an email was moved out of). The
+%% marks are on disk, and the writer reads them again when it starts.
+-define(DIRTY_KEY, mailio_writer_dirty).
+
+track_dirty(MailboxId, Doc) ->
+    Known = get_dirty(),
+    case is_map_key(<<"counters_dirty">>, Doc) orelse is_map_key(?INGEST_MARK, Doc) of
+        true -> put(?DIRTY_KEY, Known#{MailboxId => true});
+        false -> put(?DIRTY_KEY, maps:remove(MailboxId, Known))
+    end,
+    ok.
+
+get_dirty() ->
+    case get(?DIRTY_KEY) of
+        undefined -> #{};
+        Known -> Known
+    end.
+
+load_dirty(Db) ->
+    {ok, Docs} = mailio_db:by_id_prefix(Db, <<?ID_MAILBOX>>),
+    put(?DIRTY_KEY, #{}),
+    lists:foreach(
+        fun(#{<<"id">> := <<?ID_MAILBOX, M/binary>>} = Doc) -> track_dirty(M, Doc) end, Docs
+    ).
+
+mark_ingesting(Db, Mailboxes) ->
+    lists:foreach(fun(M) -> ok = mark_dirty(Db, M, ?INGEST_MARK) end, Mailboxes).
+
+clear_ingesting(Db, Mailboxes) ->
+    lists:foreach(
+        fun(M) ->
+            DocId = <<?ID_MAILBOX, M/binary>>,
+            case mailio_db:get(Db, DocId) of
+                {ok, #{?INGEST_MARK := _} = Doc} ->
+                    Doc1 = maps:remove(?INGEST_MARK, Doc),
+                    {ok, _, _} = mailio_db:put(Db, Doc1),
+                    track_dirty(M, Doc1);
+                _ ->
+                    ok
+            end
+        end,
+        Mailboxes
+    ).
+
+%% The counters moved and the mark gone, in the one write of the mailbox.
+settle_counter(Db, MailboxId, TotalDelta, UnreadDelta) ->
+    case bumped_mailbox(Db, MailboxId, TotalDelta, UnreadDelta) of
+        [Doc] ->
+            Doc1 = maps:remove(<<"counters_dirty">>, Doc),
+            {ok, _, _} = mailio_db:put(Db, Doc1),
+            track_dirty(MailboxId, Doc1);
+        [] ->
+            ok
+    end.
+
+%% The mailbox document with its counters moved, to be written by the caller.
+bumped_mailbox(Db, MailboxId, TotalDelta, UnreadDelta) ->
     DocId = <<?ID_MAILBOX, MailboxId/binary>>,
     case mailio_db:get(Db, DocId) of
         {ok, Doc} ->
             Total = maps:get(<<"totalEmails">>, Doc, 0) + TotalDelta,
             Unread = maps:get(<<"unreadEmails">>, Doc, 0) + UnreadDelta,
-            Doc1 = Doc#{
-                <<"totalEmails">> => max(0, Total),
-                <<"unreadEmails">> => max(0, Unread)
-            },
-            {ok, _, _} = mailio_db:put(Db, Doc1),
-            ok;
+            [
+                Doc#{
+                    <<"totalEmails">> => max(0, Total),
+                    <<"unreadEmails">> => max(0, Unread)
+                }
+            ];
         {error, not_found} ->
-            ok
+            []
     end.
 
 seen_delta(IsSeen, _Was) when IsSeen -> 0;
@@ -628,7 +934,6 @@ maybe_list(undefined) -> [];
 maybe_list(X) -> [X].
 
 null_or(undefined) -> null;
-null_or(null) -> null;
 null_or(X) -> X.
 
 null_or_list([]) -> null;

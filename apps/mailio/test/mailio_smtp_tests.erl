@@ -51,6 +51,57 @@ partial_recipients_test() ->
         ?assertEqual(1, mailio_fake_smtp:data_count(Srv))
     end).
 
+%% Every recipient answered 4yz: a retry is what the server asks for, and nothing
+%% was submitted (RFC 5321, section 4.2.1).
+all_recipients_deferred_is_transient_test() ->
+    with(#{}, fun(Srv) ->
+        E = mailio_smtp:submit(cfg(Srv), <<"a@x">>, [<<"defer1@y">>, <<"defer2@y">>], ?MSG),
+        ?assertEqual(smtp_transient, code(E)),
+        ?assert(retryable(E)),
+        ?assertEqual(0, mailio_fake_smtp:data_count(Srv))
+    end).
+
+%% A mix of a deferral and a refusal is not a retry: one recipient will never take it.
+deferred_and_refused_recipients_are_rejected_test() ->
+    with(#{}, fun(Srv) ->
+        E = mailio_smtp:submit(cfg(Srv), <<"a@x">>, [<<"defer1@y">>, <<"bad1@y">>], ?MSG),
+        ?assertEqual(smtp_rejected, code(E))
+    end).
+
+%% A greeting or an EHLO answer that is not what the protocol says is an error
+%% value, never an exception out of submit.
+%% 554 at the greeting and 502 for EHLO are permanent: retrying changes nothing.
+a_permanent_greeting_is_not_retryable_test() ->
+    with(#{mode => bad_greeting}, fun(Srv) ->
+        E = mailio_smtp:submit(cfg(Srv), <<"a@x">>, [<<"b@y">>], ?MSG),
+        ?assertEqual(smtp_rejected, code(E)),
+        ?assertNot(retryable(E))
+    end).
+
+a_permanent_ehlo_answer_is_not_retryable_test() ->
+    with(#{mode => bad_ehlo}, fun(Srv) ->
+        E = mailio_smtp:submit(cfg(Srv), <<"a@x">>, [<<"b@y">>], ?MSG),
+        ?assertEqual(smtp_rejected, code(E)),
+        ?assertNot(retryable(E))
+    end).
+
+%% A temporary answer at the greeting is a retry.
+a_busy_greeting_is_retryable_test() ->
+    with(#{mode => busy_greeting}, fun(Srv) ->
+        E = mailio_smtp:submit(cfg(Srv), <<"a@x">>, [<<"b@y">>], ?MSG),
+        ?assertEqual(smtp_transient, code(E)),
+        ?assert(retryable(E))
+    end).
+
+%% No recipient is an error in the call, and nothing is sent anywhere.
+no_recipient_is_not_retryable_test() ->
+    with(#{}, fun(Srv) ->
+        E = mailio_smtp:submit(cfg(Srv), <<"a@x">>, [], ?MSG),
+        ?assertEqual(smtp_rejected, code(E)),
+        ?assertNot(retryable(E)),
+        ?assertEqual(0, mailio_fake_smtp:data_count(Srv))
+    end).
+
 all_recipients_refused_test() ->
     with(#{}, fun(Srv) ->
         E = mailio_smtp:submit(cfg(Srv), <<"a@x">>, [<<"bad1@y">>, <<"bad2@y">>], ?MSG),
@@ -233,6 +284,32 @@ starttls_test() ->
     with(#{tls => none}, fun(Srv) ->
         E = mailio_smtp:submit(cfg(Srv, #{tls => starttls}), <<"a@x">>, [<<"b@y">>], ?MSG),
         ?assertEqual(smtp_tls_failed, code(E)),
+        ?assertEqual(0, mailio_fake_smtp:data_count(Srv))
+    end).
+
+%% The second EHLO, after STARTTLS, is classified like the first.
+a_permanent_ehlo_answer_after_starttls_is_not_retryable_test() ->
+    {Server, Client} = certs(),
+    CACerts = proplists:get_value(cacerts, Client),
+    with(#{tls => starttls, tls_opts => Server, mode => bad_ehlo_after_tls}, fun(Srv) ->
+        E = mailio_smtp:submit(
+            tls_cfg(Srv, #{tls => starttls, cacerts => CACerts}), <<"a@x">>, [<<"b@y">>], ?MSG
+        ),
+        ?assertEqual(smtp_rejected, code(E)),
+        ?assertNot(retryable(E))
+    end).
+
+%% A tls setting that is not understood is an error before any socket is opened,
+%% not plain text.
+an_unknown_tls_setting_is_refused_test() ->
+    with(#{}, fun(Srv) ->
+        [
+            begin
+                E = mailio_smtp:submit(cfg(Srv, #{tls => Bad}), <<"a@x">>, [<<"b@y">>], ?MSG),
+                ?assertEqual(smtp_tls_failed, code(E))
+            end
+         || Bad <- [none, implicit, maybe_, <<"starttls">>]
+        ],
         ?assertEqual(0, mailio_fake_smtp:data_count(Srv))
     end).
 

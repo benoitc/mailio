@@ -359,14 +359,10 @@ parse_params(Bin) ->
 %% Split "value; p1=v1; p2*=..." into {Value, ParamsMap}, applying RFC 2231
 %% continuation reassembly and charset decoding.
 split_value_params(Value) ->
-    Segments = split_semicolons(Value),
-    case Segments of
-        [] ->
-            {<<>>, #{}};
-        [Main | ParamSegs] ->
-            Raw = lists:foldl(fun parse_one_param/2, [], ParamSegs),
-            {Main, reassemble_2231(Raw)}
-    end.
+    %% there is always a first segment, even for an empty value
+    [Main | ParamSegs] = split_semicolons(Value),
+    Raw = lists:foldl(fun parse_one_param/2, [], ParamSegs),
+    {Main, reassemble_2231(Raw)}.
 
 split_semicolons(Bin) ->
     split_semi(Bin, <<>>, [], false).

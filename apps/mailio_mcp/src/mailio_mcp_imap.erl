@@ -986,8 +986,27 @@ qresync_changes(C, Account, Box, #{uv := UV, modseq := ModSeq, flags := Old} = P
 
 qresync_result(_C, _Account, _Box, #{uv := PUV}, _Old, #{uv := UV}, _Events) when PUV =/= UV ->
     {error, checkpoint_expired};
-qresync_result(C, Account, Box, Prev, Old, #{exists := Exists} = Sel, Events) ->
-    Vanished = lists:append([Uids || {vanished, _Earlier, Uids} <- Events]),
+qresync_result(C, Account, Box, Prev, Old, Sel, Events) ->
+    Ranges = lists:append([R || {vanished, _Earlier, R} <- Events]),
+    Unreadable = [Raw || {other, <<"VANISHED", _/binary>> = Raw} <- Events],
+    case {Unreadable, mailio_imap_proto:expand_uid_ranges(Ranges, 100000)} of
+        {[], {ok, Vanished}} ->
+            qresync_apply(C, Account, Box, Prev, Old, Sel, Events, Vanished);
+        %% a report we cannot read, or one too long to list: it may hide
+        %% removals, so compare the whole mailbox instead
+        _ ->
+            fallback
+    end.
+
+qresync_apply(C, Account, Box, Prev, Old, #{exists := Exists} = Sel, Events, Vanished) ->
+    %% a snapshot never holds more than `max_snapshot' entries: a mailbox beyond it
+    %% is read the capped way, not extended one delivery at a time
+    case Exists > mailio_mcp_config:limit(max_snapshot, 20000) of
+        true -> fallback;
+        false -> qresync_apply_within(C, Account, Box, Prev, Old, Sel, Events, Vanished)
+    end.
+
+qresync_apply_within(C, Account, Box, Prev, Old, #{exists := Exists} = Sel, Events, Vanished) ->
     Gone = lists:sort([U || U <- Vanished, is_map_key(U, Old)]),
     Changed = [
         {maps:get(uid, M), flag_bits(maps:get(flags, M, []))}
@@ -1043,23 +1062,33 @@ full_changes(C, Account, Box, Sel, Prev) ->
             true -> iolist_to_binary([integer_to_list(Exists - Cap + 1), ":*"]);
             false -> <<"1:*">>
         end,
-    Cur =
+    %% A fetch that fails is an error, not an empty mailbox: an empty snapshot
+    %% would report every message the caller knows as removed.
+    Fetched =
         case Exists of
             0 ->
-                #{};
+                {ok, #{}};
             _ ->
                 case mailio_mcp_imap_io:cmd(C, [<<"FETCH ">>, Range, <<" (UID FLAGS)">>]) of
                     {ok, U, _} ->
-                        maps:from_list([
-                            {maps:get(uid, M), flag_bits(maps:get(flags, M, []))}
-                         || {fetch, _Seq, Items} <- U,
-                            M <- [fetch_map(Items)],
-                            is_map_key(uid, M)
-                        ]);
-                    _ ->
-                        #{}
+                        {ok,
+                            maps:from_list([
+                                {maps:get(uid, M), flag_bits(maps:get(flags, M, []))}
+                             || {fetch, _Seq, Items} <- U,
+                                M <- [fetch_map(Items)],
+                                is_map_key(uid, M)
+                            ])};
+                    Failed ->
+                        {error, {imap_fetch_failed, Failed}}
                 end
         end,
+    case Fetched of
+        {ok, Cur} -> full_changes(C, Account, Box, Sel, Prev, Cap, Cur);
+        {error, _} = Error -> Error
+    end.
+
+full_changes(C, Account, Box, Sel, Prev, Cap, Cur) ->
+    Exists = maps:get(exists, Sel),
     Snap = #{
         uv => maps:get(uv, Sel),
         uidnext => maps:get(uidnext, Sel),
@@ -1079,8 +1108,34 @@ full_changes(C, Account, Box, Sel, Prev) ->
                 removed => []
             }};
         #{flags := Old} ->
-            Added = lists:sort([U || U <- maps:keys(Cur), not maps:is_key(U, Old)]),
-            Removed = lists:sort([U || U <- maps:keys(Old), not maps:is_key(U, Cur)]),
+            %% After a capped read a UID that was not in the snapshot may simply have
+            %% been outside it. Only one at or above the previous UIDNEXT is new.
+            AddFloor =
+                case maps:get(partial, Prev, false) of
+                    true -> maps:get(uidnext, Prev, 0);
+                    false -> 0
+                end,
+            Added = lists:sort([
+                U
+             || U <- maps:keys(Cur), not maps:is_key(U, Old), U >= AddFloor
+            ]),
+            %% A capped read lists only the newest messages. A UID below the
+            %% lowest one it lists may well still be there: only those within
+            %% what was listed are known to be gone.
+            Lowest =
+                case Cur =:= #{} of
+                    true -> 0;
+                    false -> lists:min(maps:keys(Cur))
+                end,
+            Floor =
+                case Exists > Cap of
+                    true -> Lowest;
+                    false -> 0
+                end,
+            Removed = lists:sort([
+                U
+             || U <- maps:keys(Old), not maps:is_key(U, Cur), U >= Floor
+            ]),
             Updated = lists:sort([
                 U
              || {U, F} <- maps:to_list(Cur),

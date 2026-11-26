@@ -187,7 +187,7 @@ fetch_body_literal_test() ->
 vanished_test() ->
     {untagged, {vanished, true, Uids}} =
         ?P:parse_response(<<"* VANISHED (EARLIER) 41,43:45">>),
-    ?assertEqual([41, 43, 44, 45], Uids).
+    ?assertEqual([{41, 41}, {43, 45}], Uids).
 
 continuation_test() ->
     ?assertEqual(
@@ -196,7 +196,56 @@ continuation_test() ->
     ).
 
 uid_set_parse_test() ->
-    ?assertEqual([1, 3, 4, 5, 9], ?P:parse_uid_set(<<"1,3:5,9">>)).
+    ?assertEqual([{1, 1}, {3, 5}, {9, 9}], ?P:parse_uid_ranges(<<"1,3:5,9">>)),
+    ?assertEqual(
+        {ok, [1, 3, 4, 5, 9]}, ?P:expand_uid_ranges(?P:parse_uid_ranges(<<"1,3:5,9">>), 100)
+    ).
+
+%% RFC 3501: the two ends of a range may come in either order.
+uid_set_descending_range_test() ->
+    ?assertEqual([{3, 5}], ?P:parse_uid_ranges(<<"5:3">>)),
+    ?assertEqual({ok, [3, 4, 5]}, ?P:expand_uid_ranges(?P:parse_uid_ranges(<<"5:3">>), 10)).
+
+uid_set_is_normalised_test() ->
+    ?assertEqual([{1, 8}, {10, 10}], ?P:parse_uid_ranges(<<"10,3:8,1:5">>)).
+
+%% A short set must not be able to allocate a huge list.
+uid_set_expansion_is_bounded_test() ->
+    Ranges = ?P:parse_uid_ranges(<<"1:4294967295">>),
+    ?assertEqual([{1, 4294967295}], Ranges),
+    ?assertEqual({error, too_many}, ?P:expand_uid_ranges(Ranges, 100000)),
+    ?assertEqual(4294967295, ?P:uid_count(Ranges)),
+    %% the parser itself stays small too
+    {untagged, {vanished, false, R}} = ?P:parse_response(<<"* VANISHED 1:4294967295">>),
+    ?assertEqual([{1, 4294967295}], R).
+
+uid_set_garbage_does_not_crash_test() ->
+    ?assertEqual([{7, 7}], ?P:parse_uid_ranges(<<"abc,1:x,7,:,,99999999999999">>)),
+    ?assertEqual([], ?P:parse_uid_ranges(<<>>)).
+
+%% A line that arrives in small pieces is framed in linear work: each call
+%% resumes where the last one stopped.
+fragmented_line_is_framed_in_linear_work_test() ->
+    N = 20000,
+    Line = binary:copy(<<"x">>, N),
+    {reductions, R0} = process_info(self(), reductions),
+    Result = feed(Line, <<>>, start, 1),
+    {reductions, R1} = process_info(self(), reductions),
+    ?assertEqual(done, Result),
+    %% a rescan from the start each time would cost about N*N/2 steps
+    ?assert(R1 - R0 < N * 60).
+
+feed(<<>>, Buf, Scan, _Step) ->
+    case ?P:read_response(<<Buf/binary, "\r\n">>, #{max_line => 100000}, Scan) of
+        {ok, _, <<>>} -> done;
+        Other -> Other
+    end;
+feed(<<B, Rest/binary>>, Buf, Scan, Step) ->
+    Buf1 = <<Buf/binary, B>>,
+    case ?P:read_response(Buf1, #{max_line => 100000}, Scan) of
+        {more, Scan1} -> feed(Rest, Buf1, Scan1, Step);
+        Other -> Other
+    end.
 
 %% A section key that carries a field list stays in one piece, and the data
 %% lands under it, also with other literals in the same response.
@@ -238,3 +287,273 @@ fetch_header_fields_with_origin_test() ->
     {ok, Line, <<>>} = mailio_imap_proto:read_response(Raw),
     {untagged, {fetch, 1, Items}} = mailio_imap_proto:parse_response(Line),
     ?assertEqual(H, proplists:get_value(<<"BODY[HEADER.FIELDS (SUBJECT)]<0>">>, Items)).
+
+%%==== framing across literals and packet boundaries ====
+
+%% Frame a response that arrives one byte at a time. Resume = keep the state
+%% the framer hands back; restart = ignore it and scan from the start each time.
+frame_by_byte(Bin, Resume) -> frame_by_byte(Bin, <<>>, start, Resume, #{}).
+
+frame_by_byte(<<>>, Buf, _St, _Mode, _Opts) ->
+    {incomplete, Buf};
+frame_by_byte(<<B, Rest/binary>>, Buf, St, Mode, Opts) ->
+    Buf1 = <<Buf/binary, B>>,
+    case ?P:read_response(Buf1, Opts, St) of
+        {ok, Line, <<>>} ->
+            {ok, Line};
+        {more, St1} ->
+            frame_by_byte(Rest, Buf1, next_state(Mode, St1), Mode, Opts);
+        Other ->
+            Other
+    end.
+
+next_state(resume, St) -> St;
+next_state(restart, _) -> start.
+
+reductions_of(Fun) ->
+    {reductions, R0} = process_info(self(), reductions),
+    Result = Fun(),
+    {reductions, R1} = process_info(self(), reductions),
+    {Result, R1 - R0}.
+
+%% A continuation line after a literal that arrives in pieces: the work must
+%% not grow with the square of the length.
+fragmented_continuation_after_a_literal_is_linear_test() ->
+    N = 20000,
+    Resp = iolist_to_binary([
+        <<"* 1 FETCH (BODY[] {5}\r\nabcde ">>, binary:copy(<<"x">>, N), <<")\r\n">>
+    ]),
+    Whole = binary:part(Resp, 0, byte_size(Resp) - 2),
+    {Result, R} = reductions_of(fun() -> frame_by_byte(Resp, resume) end),
+    ?assertEqual({ok, Whole}, Result),
+    ?assert(R < byte_size(Resp) * 60).
+
+%% Many literals in one response: earlier ones are not walked again each time.
+many_literals_are_framed_in_linear_work_test_() ->
+    {timeout, 60, fun many_literals_check/0}.
+
+many_literals_check() ->
+    Parts = [[<<" BODY[">>, integer_to_binary(I), <<"] {3}\r\nabc">>] || I <- lists:seq(1, 600)],
+    Resp = iolist_to_binary([<<"* 1 FETCH (">>, Parts, <<")\r\n">>]),
+    Whole = binary:part(Resp, 0, byte_size(Resp) - 2),
+    {Result, Resumed} = reductions_of(fun() -> frame_by_byte(Resp, resume) end),
+    ?assertEqual({ok, Whole}, Result),
+    ?assert(Resumed < byte_size(Resp) * 60),
+    %% the same input without resuming costs much more: the check can tell
+    {Result2, Restarted} = reductions_of(fun() -> frame_by_byte(Resp, restart) end),
+    ?assertEqual({ok, Whole}, Result2),
+    ?assert(Restarted > Resumed * 5).
+
+%% The same frame whatever the packet boundaries are.
+framing_does_not_depend_on_packet_boundaries_test() ->
+    Resp = <<"* 1 FETCH (BODY[1] {3}\r\nabc BODY[2] {2}\r\nde FLAGS (\\Seen))\r\n">>,
+    Whole = binary:part(Resp, 0, byte_size(Resp) - 2),
+    ?assertEqual({ok, Whole}, frame_by_byte(Resp, resume)),
+    [
+        begin
+            <<A:K/binary, B/binary>> = Resp,
+            {more, St} = ?P:read_response(A, #{}, start),
+            ?assertEqual({ok, Whole, <<>>}, ?P:read_response(<<A/binary, B/binary>>, #{}, St))
+        end
+     || K <- lists:seq(1, byte_size(Resp) - 1)
+    ].
+
+%% max_line must mean the same whether the CR and the LF arrive together or not.
+max_line_does_not_depend_on_where_the_packet_ends_test() ->
+    Opts = #{max_line => 100},
+    Line = binary:copy(<<"x">>, 100),
+    Over = binary:copy(<<"x">>, 101),
+    %% exactly at the limit: all of these are fine
+    ?assertMatch({ok, Line, <<>>}, ?P:read_response(<<Line/binary, "\r\n">>, Opts, start)),
+    ?assertMatch({more, _}, ?P:read_response(Line, Opts, start)),
+    {more, S1} = ?P:read_response(<<Line/binary, "\r">>, Opts, start),
+    ?assertMatch({ok, Line, <<>>}, ?P:read_response(<<Line/binary, "\r\n">>, Opts, S1)),
+    %% one byte over: refused in every chunking
+    ?assertEqual(
+        {error, response_too_large}, ?P:read_response(<<Over/binary, "\r\n">>, Opts, start)
+    ),
+    ?assertEqual({error, response_too_large}, ?P:read_response(Over, Opts, start)),
+    ?assertEqual({error, response_too_large}, ?P:read_response(<<Over/binary, "\r">>, Opts, start)).
+
+%%==== VANISHED on the wire path ====
+
+vanished_marker_is_case_insensitive_test() ->
+    ?assertEqual(
+        {untagged, {vanished, true, [{41, 41}, {43, 45}]}},
+        ?P:parse_response(<<"* VANISHED (earlier) 41,43:45">>)
+    ),
+    ?assertEqual(
+        {untagged, {vanished, true, [{7, 7}]}},
+        ?P:parse_response(<<"* VANISHED (EaRlIeR) 7">>)
+    ).
+
+vanished_without_marker_test() ->
+    ?assertEqual({untagged, {vanished, false, [{3, 3}]}}, ?P:parse_response(<<"* VANISHED 3">>)),
+    ?assertEqual(
+        {untagged, {vanished, false, [{1, 2}, {9, 9}]}}, ?P:parse_response(<<"* VANISHED 2:1,9">>)
+    ).
+
+%% A UID is 1*DIGIT without a sign and without a leading zero.
+vanished_rejects_things_that_are_not_uids_test() ->
+    [
+        ?assertMatch({untagged, {other, <<"VANISHED ", _/binary>>}}, ?P:parse_response(Wire))
+     || Wire <- [
+            <<"* VANISHED 01">>,
+            <<"* VANISHED +2">>,
+            <<"* VANISHED 007">>,
+            <<"* VANISHED -3">>,
+            <<"* VANISHED 0">>,
+            <<"* VANISHED 4294967296">>,
+            %% one part that is not a UID spoils the report: do not act on half of it
+            <<"* VANISHED 5,abc,7">>
+        ]
+    ].
+
+%% A marker that is not (EARLIER) must not turn into removals.
+vanished_with_an_unknown_marker_is_not_a_removal_test() ->
+    [
+        ?assertMatch({untagged, {other, <<"VANISHED ", _/binary>>}}, ?P:parse_response(Wire))
+     || Wire <- [
+            <<"* VANISHED (FOO) 5">>,
+            <<"* VANISHED (EARLIER 5">>,
+            <<"* VANISHED (EARLIER FOO) 5">>,
+            <<"* VANISHED ( ) 5">>,
+            %% the marker is followed by a space
+            <<"* VANISHED (EARLIER)5">>,
+            %% and by the UIDs: a report without any is not a report
+            <<"* VANISHED (EARLIER)">>,
+            <<"* VANISHED (EARLIER) ">>,
+            <<"* VANISHED ">>,
+            <<"* VANISHED (EARLIER) abc">>,
+            %% more than one set, or a marker that is not exactly (EARLIER)
+            <<"* VANISHED (EARLIER) 5 7">>,
+            <<"* VANISHED 5 7">>,
+            <<"* VANISHED ( EARLIER ) 5">>,
+            <<"* VANISHED (EARLIER ) 5">>,
+            <<"* VANISHED ( EARLIER) 5">>
+        ]
+    ].
+
+%% The whole-response limit counts while waiting for the end of a line, too.
+max_response_applies_while_waiting_for_the_line_end_test() ->
+    Opts = #{max_response => 8},
+    ?assertEqual({error, response_too_large}, ?P:read_response(<<"0123456789">>, Opts, start)),
+    ?assertMatch({more, _}, ?P:read_response(<<"0123">>, Opts, start)),
+    %% after a literal, a line that has no end yet counts from the start of the response
+    Opts2 = #{max_response => 30},
+    First = <<"* 1 FETCH (BODY[] {3}\r\nabc">>,
+    {more, St} = ?P:read_response(First, Opts2, start),
+    ?assertEqual(
+        {error, response_too_large},
+        ?P:read_response(<<First/binary, " and a long tail that never ends">>, Opts2, St)
+    ).
+
+%% The CR that ends the buffer counts toward the response limit, so the answer
+%% does not depend on where the packet ended.
+max_response_counts_a_trailing_cr_test() ->
+    Opts = #{max_response => 8},
+    ?assertMatch({more, _}, ?P:read_response(<<"012345">>, Opts, start)),
+    {more, St} = ?P:read_response(<<"012345\r">>, Opts, start),
+    ?assertMatch({ok, <<"012345">>, <<>>}, ?P:read_response(<<"012345\r\n">>, Opts, St)),
+    %% one more byte and the response can no longer fit, with or without the CR
+    ?assertEqual({error, response_too_large}, ?P:read_response(<<"0123456">>, Opts, start)),
+    ?assertEqual({error, response_too_large}, ?P:read_response(<<"0123456\r">>, Opts, start)),
+    ?assertEqual({error, response_too_large}, ?P:read_response(<<"0123456\r\n">>, Opts, start)).
+
+vanished_still_reads_what_is_well_formed_test() ->
+    ?assertEqual(
+        {untagged, {vanished, true, [{5, 5}]}}, ?P:parse_response(<<"* VANISHED (earlier) 5">>)
+    ),
+    ?assertEqual(
+        {untagged, {vanished, true, [{5, 7}]}}, ?P:parse_response(<<"* VANISHED (EARLIER) 5:7">>)
+    ),
+    ?assertEqual({untagged, {vanished, false, [{5, 5}]}}, ?P:parse_response(<<"* VANISHED 5 ">>)).
+
+%% A SEARCH answer is numbers only; one that is not is not read in part.
+search_answer_is_read_whole_test() ->
+    ?assertEqual({untagged, {search, [5, 7]}}, ?P:parse_response(<<"* SEARCH 5 7">>)),
+    ?assertEqual({untagged, {search, []}}, ?P:parse_response(<<"* SEARCH">>)),
+    ?assertEqual({untagged, {search, []}}, ?P:parse_response(<<"* SEARCH ">>)),
+    ?assertMatch(
+        {untagged, {other, <<"SEARCH", _/binary>>}}, ?P:parse_response(<<"* SEARCH 5 abc 7">>)
+    ).
+
+%% What a SEARCH answer may hold: numbers, and with CONDSTORE a closing (MODSEQ n).
+search_answer_with_brackets_is_not_read_test() ->
+    [
+        ?assertMatch({untagged, {other, <<"SEARCH", _/binary>>}}, ?P:parse_response(Wire))
+     || Wire <- [
+            <<"* SEARCH )">>,
+            <<"* SEARCH 5 ) 7">>,
+            <<"* SEARCH (5)">>,
+            <<"* SEARCH 5 (MODSEQ)">>,
+            <<"* SEARCH 5 (MODSEQ 9) 7">>,
+            <<"* SEARCH 01">>,
+            <<"* SEARCH 0">>
+        ]
+    ].
+
+search_answer_with_modseq_is_read_test() ->
+    ?assertEqual(
+        {untagged, {search, [5, 7]}}, ?P:parse_response(<<"* SEARCH 5 7 (MODSEQ 917162500)">>)
+    ).
+
+%% RFC 7162, section 3.1.6: the suffix is left out when nothing matched. A
+%% suffix alone is not an empty answer, it is a malformed one.
+search_answer_with_modseq_alone_is_not_an_empty_answer_test() ->
+    ?assertMatch(
+        {untagged, {other, <<"SEARCH", _/binary>>}}, ?P:parse_response(<<"* SEARCH (MODSEQ 9)">>)
+    ),
+    %% an explicit empty answer is still one
+    ?assertEqual({untagged, {search, []}}, ?P:parse_response(<<"* SEARCH">>)).
+
+%% The suffix is its own item (a space before it) and holds a mod-sequence from
+%% 1 to 2^63-1 (RFC 7162, section 7).
+search_answer_with_a_bad_modseq_suffix_is_malformed_test() ->
+    [
+        ?assertMatch(
+            {untagged, {other, <<"SEARCH", _/binary>>}}, ?P:parse_response(Wire)
+        )
+     || Wire <- [
+            <<"* SEARCH 5(MODSEQ 9)">>,
+            <<"* SEARCH 5 (MODSEQ 0)">>,
+            <<"* SEARCH 5 (MODSEQ 00)">>,
+            <<"* SEARCH 5 (MODSEQ 9223372036854775808)">>,
+            <<"* SEARCH 5 (MODSEQ 09223372036854775808)">>
+        ]
+    ],
+    %% leading zeros are digits: the value counts, not the length
+    [
+        ?assertEqual({untagged, {search, [5]}}, ?P:parse_response(Wire))
+     || Wire <- [
+            <<"* SEARCH 5 (MODSEQ 09)">>,
+            <<"* SEARCH 5 (MODSEQ 000000000000000000000009)">>,
+            <<"* SEARCH 5 (MODSEQ 09223372036854775807)">>
+        ]
+    ],
+    ?assertEqual(
+        {untagged, {search, [5]}}, ?P:parse_response(<<"* SEARCH 5 (MODSEQ 9223372036854775807)">>)
+    ).
+
+%% UIDNEXT and UIDVALIDITY are numbers from 1 (RFC 3501, section 9: nz-number):
+%% no leading zero and no sign, checked on the bytes before they become a number.
+status_codes_with_non_canonical_numbers_are_not_numbers_test() ->
+    [
+        begin
+            {untagged, {status_resp, ok, {Name, Args}, _}} = ?P:parse_response(Wire),
+            ?assertNotMatch([{number, _}], Args)
+        end
+     || {Name, Wire} <- [
+            {<<"UIDNEXT">>, <<"* OK [UIDNEXT 01] next">>},
+            {<<"UIDNEXT">>, <<"* OK [UIDNEXT 007] next">>},
+            {<<"UIDNEXT">>, <<"* OK [UIDNEXT +5] next">>},
+            {<<"UIDNEXT">>, <<"* OK [UIDNEXT 0] next">>},
+            {<<"UIDVALIDITY">>, <<"* OK [UIDVALIDITY 01] valid">>},
+            {<<"UIDVALIDITY">>, <<"* OK [UIDVALIDITY 0] valid">>}
+        ]
+    ],
+    %% and the canonical ones are numbers
+    ?assertMatch(
+        {untagged, {status_resp, ok, {<<"UIDNEXT">>, [{number, 102}]}, _}},
+        ?P:parse_response(<<"* OK [UIDNEXT 102] next">>)
+    ).

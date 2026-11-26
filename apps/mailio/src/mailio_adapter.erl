@@ -43,13 +43,23 @@
         uid := term(),
         keywords := [binary()],
         internal_date => integer(),
-        size => non_neg_integer()
+        size => non_neg_integer(),
+        %% The UIDVALIDITY the message was listed under. An adapter that supplies
+        %% it must also implement fetch_message/5, so that the message is only
+        %% fetched under that UIDVALIDITY (RFC 3501, section 2.3.1.1). An adapter
+        %% whose message ids stay valid across reads leaves it out and needs only
+        %% fetch_message/4.
+        uidvalidity => non_neg_integer()
     }}
     | {updated, #{uid := term(), keywords := [binary()]}}
     %% uid
     | {removed, term()}
-    %% cursor invalid (UIDVALIDITY change): full resync
-    | reset.
+    %% The cursor is invalid (UIDVALIDITY changed): every UID the caller holds
+    %% means something else now. The caller replaces its copy of the mailbox.
+    | reset
+    %% The changes are too many to list one by one: the caller reads the whole
+    %% mailbox and brings its copy in line, and only then keeps the new state.
+    | resync.
 
 %% Streaming sink for raw message bytes.
 -type fetch_sink() :: fun((iodata()) -> ok).
@@ -84,6 +94,19 @@
     MailboxId :: binary(),
     Uid :: term(),
     fetch_sink()
+) ->
+    {ok, #{size := non_neg_integer()}} | {error, mailio_error:error_map()}.
+
+%% Like fetch_message/4, and only when the mailbox still has the UIDVALIDITY in
+%% `Opts' (`#{uidvalidity => V}'); otherwise an error. A caller that holds a UID
+%% across two reads uses it so that a recreated mailbox cannot hand it another
+%% message.
+-callback fetch_message(
+    conn(),
+    MailboxId :: binary(),
+    Uid :: term(),
+    fetch_sink(),
+    Opts :: map()
 ) ->
     {ok, #{size := non_neg_integer()}} | {error, mailio_error:error_map()}.
 
@@ -129,4 +152,33 @@
 -callback list_uids(conn(), MailboxId :: binary()) ->
     {ok, [term()]} | {error, mailio_error:error_map()}.
 
--optional_callbacks([watch/3, unwatch/2, append/4, move/4, expunge/3, list_uids/2]).
+%% Like list_uids/2, and it stops with an error once the mailbox holds more than
+%% `max' messages, as they are read.
+-callback list_uids(conn(), MailboxId :: binary(), #{max => pos_integer()}) ->
+    {ok, [term()]} | {error, mailio_error:error_map()}.
+
+%% How many messages the mailbox holds now, and under which UIDVALIDITY. A full
+%% read is checked against both before anything the read did not list is
+%% removed: a mailbox recreated since the read began has other messages under the
+%% same numbers. Adapters that cannot tell leave it out, and their full reads are
+%% not checked.
+-callback mailbox_info(conn(), MailboxId :: binary()) ->
+    {ok, #{exists := non_neg_integer(), uidvalidity := term()}}
+    | {error, mailio_error:error_map()}.
+
+%% The UIDVALIDITY a saved state belongs to, for a full read that listed no
+%% message and so has no other way to say which generation it read.
+-callback state_uidvalidity(remote_state()) -> term().
+
+-optional_callbacks([
+    watch/3,
+    unwatch/2,
+    append/4,
+    move/4,
+    expunge/3,
+    list_uids/2,
+    list_uids/3,
+    fetch_message/5,
+    mailbox_info/2,
+    state_uidvalidity/1
+]).

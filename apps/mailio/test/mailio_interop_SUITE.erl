@@ -43,7 +43,8 @@
     pop3_listing_limit_holds/1,
     pop3_never_deletes/1,
     smtp_delivery_roundtrip/1,
-    smtp_implicit_tls/1
+    smtp_implicit_tls/1,
+    imap_expunge_removes_only_the_named_message/1
 ]).
 
 all() -> [{group, dovecot}, {group, greenmail}, {group, stalwart}].
@@ -60,7 +61,8 @@ groups() ->
         imap_implicit_tls_verified,
         imap_starttls_verified,
         imap_untrusted_certificate_refused,
-        adapter_reports_changes
+        adapter_reports_changes,
+        imap_expunge_removes_only_the_named_message
     ],
     Pop3 = [
         pop3_roundtrip,
@@ -395,6 +397,39 @@ pop3_never_deletes(Config) ->
     {ok, I} = imap_open(P, #{}),
     ?assertEqual(1, length(fetch_all(I))),
     mailio_imap_conn:close(I).
+
+%% One message is expunged by UID and another, already flagged \Deleted by someone
+%% else, stays in the mailbox.
+imap_expunge_removes_only_the_named_message(Config) ->
+    P = ?config(profile, Config),
+    {ok, Conn} = mailio_imap:connect(imap_cfg(P, #{})),
+    case maps:get(uidplus, mailio_imap:capabilities(Conn), false) of
+        false ->
+            mailio_imap:close(Conn),
+            {skip, "the server does not offer UIDPLUS"};
+        true ->
+            {ok, W} = imap_open(P, #{}),
+            ok = append(W, message(<<"named">>, <<"1\r\n">>)),
+            ok = append(W, message(<<"flagged by someone else">>, <<"2\r\n">>)),
+            {ok, Initial, _, done} = mailio_imap:fetch_changes_since(
+                Conn, <<"INBOX">>, initial, #{}
+            ),
+            [Named, Flagged] = lists:sort([maps:get(uid, I) || {added, I} <- Initial]),
+            {ok, _, {ok, _, _}} = mailio_imap_conn:run(W, fun(T) ->
+                {mailio_imap_proto:select(T, <<"INBOX">>), undefined}
+            end),
+            {ok, _, {ok, _, _}} = mailio_imap_conn:run(W, fun(T) ->
+                {
+                    mailio_imap_proto:uid_store(T, Flagged, {add, true}, [<<"\\Deleted">>]),
+                    undefined
+                }
+            end),
+            ?assertEqual(ok, mailio_imap:expunge(Conn, <<"INBOX">>, [Named])),
+            {ok, Left} = mailio_imap:list_uids(Conn, <<"INBOX">>),
+            ?assertEqual([Flagged], Left),
+            mailio_imap_conn:close(W),
+            mailio_imap:close(Conn)
+    end.
 
 %%====================================================================
 %% SMTP cases (the server delivers to the mailbox we then read)

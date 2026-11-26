@@ -81,7 +81,7 @@ dispatch(Envelope) ->
 %%====================================================================
 
 init([]) ->
-    ?TABLE = ets:new(?TABLE, [named_table, set, public, {keypos, #sub.ref}]),
+    ?TABLE = ets:new(?TABLE, [named_table, set, protected, {keypos, #sub.ref}]),
     {ok, #state{}}.
 
 handle_call({subscribe, Topic, Pid}, _From, State) ->

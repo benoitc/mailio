@@ -3,11 +3,11 @@
 %%%
 %%% A scriptable SMTP server for tests. Options:
 %%%   mode: ok | drop_after_data | reject_data | defer_data | reject_mail_from
-%%%         | defer_mail_from | auth_fail
+%%%         | defer_mail_from | auth_fail | bad_greeting | busy_greeting | bad_ehlo | bad_ehlo_after_tls
 %%%   tls:  none | implicit | starttls | starttls_not_offered
 %%%   tls_opts: ssl server options (certificate and key) for the TLS modes
 %%%   auth: plain | login | none (what AUTH mechanism the EHLO advertises)
-%%% Recipients whose local part starts with "bad" get 550.
+%%% Recipients whose local part starts with "bad" get 550, with "defer" 451.
 -module(mailio_fake_smtp).
 
 -export([start/1, stop/1, port/1, messages/1, data_count/1, auth_seen/1]).
@@ -86,6 +86,12 @@ accept_loop(L, Opts, Tab) ->
             ok
     end.
 
+session(Mod, Sock, #{mode := bad_greeting} = Opts, Tab) ->
+    send(Mod, Sock, "554 no service\r\n"),
+    loop(Mod, Sock, Opts, Tab, #{});
+session(Mod, Sock, #{mode := busy_greeting} = Opts, Tab) ->
+    send(Mod, Sock, "421 busy\r\n"),
+    loop(Mod, Sock, Opts, Tab, #{});
 session(Mod, Sock, Opts, Tab) ->
     send(Mod, Sock, "220 fake ESMTP\r\n"),
     loop(Mod, Sock, Opts, Tab, #{}).
@@ -116,6 +122,12 @@ loop(Mod, Sock, Opts, Tab, St) ->
             U = string:uppercase(binary_to_list(Line)),
             Mode = maps:get(mode, Opts),
             case U of
+                "EHLO" ++ _ when Mode =:= bad_ehlo_after_tls, Mod =:= ssl ->
+                    send(Mod, Sock, "502 not implemented\r\n"),
+                    loop(Mod, Sock, Opts, Tab, St);
+                "EHLO" ++ _ when Mode =:= bad_ehlo ->
+                    send(Mod, Sock, "502 not implemented\r\n"),
+                    loop(Mod, Sock, Opts, Tab, St);
                 "EHLO" ++ _ ->
                     send(Mod, Sock, ehlo_reply(Opts, Mod)),
                     loop(Mod, Sock, Opts, Tab, St);
@@ -155,6 +167,9 @@ loop(Mod, Sock, Opts, Tab, St) ->
                     loop(Mod, Sock, Opts, Tab, St);
                 "RCPT TO:<BAD" ++ _ ->
                     send(Mod, Sock, "550 no such user\r\n"),
+                    loop(Mod, Sock, Opts, Tab, St);
+                "RCPT TO:<DEFER" ++ _ ->
+                    send(Mod, Sock, "451 try later\r\n"),
                     loop(Mod, Sock, Opts, Tab, St);
                 "RCPT" ++ _ ->
                     send(Mod, Sock, "250 ok\r\n"),

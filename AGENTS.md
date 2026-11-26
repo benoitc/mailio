@@ -88,8 +88,7 @@ rebar3 ct --dir apps/mailio/test
 rebar3 ct --dir apps/mailio_store/test
 ```
 
-Dialyzer reports 5 warnings in code that predates these rules (`mailio_rfc5322`,
-`mailio_account_writer`, and similar). A change must not add one.
+Dialyzer reports no warnings. A change must not add one.
 
 The suites that talk to a real server need disposable servers. Start what you
 need; a suite skips itself when its server is not running:

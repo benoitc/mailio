@@ -122,3 +122,296 @@ format_address_non_ascii_test() ->
     A = #{name => <<"Iñtërnâtiônàl"/utf8>>, email => <<"i@x.com">>},
     Formatted = mailio_mime_render:format_address(A),
     ?assertMatch(<<"=?UTF-8?B?", _/binary>>, Formatted).
+
+%%====================================================================
+%% What is generated follows the format (RFC 2047, 2045, 5322)
+%%====================================================================
+
+%% random text with characters of one to four bytes, spaces and tabs
+random_text(N) ->
+    Alphabet = [$a, $b, $\s, $\t, $=, $?, 233, 8364, 16#1F600, 16#4E2D, $., $_],
+    unicode:characters_to_binary([
+        lists:nth(rand:uniform(length(Alphabet)), Alphabet)
+     || _ <- lists:seq(1, N)
+    ]).
+
+header_block(Mail) ->
+    [Head, _] = binary:split(Mail, <<"\r\n\r\n">>),
+    Head.
+
+%% every encoded word is at most 75 characters, no line is longer than 998, and
+%% the subject reads back as it was written
+encoded_words_stay_within_75_and_round_trip_test() ->
+    rand:seed(exsss, {1, 2, 3}),
+    [
+        begin
+            Subject = random_text(rand:uniform(300)),
+            Mail = mailio_mime_render:build(#{
+                from => [#{email => <<"a@x">>}],
+                to => [#{email => <<"b@y">>, name => random_text(rand:uniform(80))}],
+                subject => Subject,
+                text => <<"hi">>
+            }),
+            Head = header_block(Mail),
+            Lines = binary:split(Head, <<"\r\n">>, [global]),
+            [?assert(byte_size(L) =< 76) || L <- Lines],
+            Words = [
+                W
+             || [W] <- element(
+                    2, re:run(Head, <<"=\\?[^ ]*\\?=">>, [global, {capture, first, binary}])
+                )
+            ],
+            [?assert(byte_size(W) =< 75) || W <- Words],
+            [Subj] = [V || <<"Subject: ", V/binary>> <- unfold(Lines)],
+            ?assertEqual(
+                unicode:characters_to_binary(Subject), mailio_mime_decode:decode_words(Subj)
+            )
+        end
+     || _ <- lists:seq(1, 200)
+    ],
+    ok.
+
+unfold(Lines) ->
+    lists:reverse(
+        lists:foldl(
+            fun
+                (<<" ", Rest/binary>>, [Prev | Acc]) -> [<<Prev/binary, " ", Rest/binary>> | Acc];
+                (L, Acc) -> [L | Acc]
+            end,
+            [],
+            Lines
+        )
+    ).
+
+%% a long ASCII subject is folded onto lines that are not too long
+a_long_ascii_subject_is_folded_test() ->
+    Subject = iolist_to_binary(lists:join(<<" ">>, lists:duplicate(400, <<"word">>))),
+    Mail = mailio_mime_render:build(#{
+        from => [#{email => <<"a@x">>}],
+        to => [#{email => <<"b@y">>}],
+        subject => Subject,
+        text => <<"hi">>
+    }),
+    Lines = binary:split(header_block(Mail), <<"\r\n">>, [global]),
+    [?assert(byte_size(L) =< 78) || L <- Lines],
+    [Subj] = [V || <<"Subject: ", V/binary>> <- unfold(Lines)],
+    ?assertEqual(Subject, Subj).
+
+%% quoted-printable lines are at most 76 characters and decode to the text
+quoted_printable_lines_stay_within_76_and_round_trip_test() ->
+    rand:seed(exsss, {4, 5, 6}),
+    [
+        begin
+            Text = iolist_to_binary(
+                lists:join(<<"\r\n">>, [
+                    random_text(rand:uniform(200))
+                 || _ <- lists:seq(1, 1 + rand:uniform(4))
+                ])
+            ),
+            Mail = mailio_mime_render:render(#{
+                type => <<"text">>,
+                subtype => <<"plain">>,
+                charset => <<"utf-8">>,
+                encoding => <<"quoted-printable">>,
+                headers => [],
+                body => Text
+            }),
+            [_, Body] = binary:split(Mail, <<"\r\n\r\n">>),
+            [?assert(byte_size(L) =< 76) || L <- binary:split(Body, <<"\r\n">>, [global])],
+            ?assertEqual(Text, mailio_mime_decode:decode_quoted_printable(Body))
+        end
+     || _ <- lists:seq(1, 200)
+    ],
+    ok.
+
+%% a space or tab that ends a line is escaped, or a server may strip it
+trailing_white_space_is_escaped_in_quoted_printable_test() ->
+    Mail = mailio_mime_render:render(#{
+        type => <<"text">>,
+        subtype => <<"plain">>,
+        encoding => <<"quoted-printable">>,
+        headers => [],
+        body => <<"end \r\ntab\t\r\nlast ">>
+    }),
+    [_, Body] = binary:split(Mail, <<"\r\n\r\n">>),
+    ?assertEqual(<<"end=20\r\ntab=09\r\nlast=20">>, Body).
+
+%% every built message has a Date, unless the caller gave one
+build_adds_a_date_test() ->
+    Spec = #{from => [#{email => <<"a@x">>}], to => [#{email => <<"b@y">>}], text => <<"hi">>},
+    Head = header_block(mailio_mime_render:build(Spec#{date => 1795619045})),
+    ?assertMatch({match, _}, re:run(Head, <<"\r\nDate: Wed, 25 Nov 2026 15:04:05 \\+0000\r\n">>)),
+    {ok, _} = mailio_rfc5322:parse_date(<<"Wed, 25 Nov 2026 15:04:05 +0000">>),
+    Now = header_block(mailio_mime_render:build(Spec)),
+    ?assertMatch({match, _}, re:run(Now, <<"\r\nDate: ">>)),
+    Given = header_block(
+        mailio_mime_render:build(Spec#{
+            headers => [{<<"Date">>, <<"Mon, 1 Jan 2024 00:00:00 +0000">>}]
+        })
+    ),
+    ?assertEqual(1, length(binary:matches(Given, <<"Date: ">>))).
+
+%% Bytes that are not UTF-8 are replaced, and the encoding ends.
+malformed_utf8_in_a_header_is_encoded_test_() ->
+    {timeout, 20, fun() ->
+        [
+            begin
+                Mail = mailio_mime_render:build(#{
+                    from => [#{email => <<"a@x">>}],
+                    to => [#{email => <<"b@y">>, name => Bad}],
+                    subject => Bad,
+                    text => <<"hi">>
+                }),
+                [
+                    ?assert(byte_size(L) =< 76)
+                 || L <- binary:split(header_block(Mail), <<"\r\n">>, [global])
+                ]
+            end
+         || Bad <- [
+                <<255, 254, 253>>,
+                <<"abc", 16#C3>>,
+                <<16#E2, 16#82>>,
+                binary:copy(<<16#80>>, 200),
+                <<"é", 255, "é">>
+            ]
+        ]
+    end}.
+
+%% Spaces in a long subject are kept exactly: folded, then unfolded, it is the same.
+ascii_folding_keeps_the_spaces_test() ->
+    [
+        begin
+            Mail = mailio_mime_render:build(#{
+                from => [#{email => <<"a@x">>}],
+                to => [#{email => <<"b@y">>}],
+                subject => Subject,
+                text => <<"hi">>
+            }),
+            Lines = binary:split(header_block(Mail), <<"\r\n">>, [global]),
+            [?assert(byte_size(L) =< 76) || L <- Lines],
+            [Got] = [V || <<"Subject: ", V/binary>> <- unfold(Lines)],
+            ?assertEqual(Subject, mailio_mime_decode:decode_words(Got))
+        end
+     || Subject <- [
+            <<" leading and a long tail ", (binary:copy(<<"word ">>, 40))/binary>>,
+            <<(binary:copy(<<"word ">>, 40))/binary, " ">>,
+            <<(binary:copy(<<"word  ">>, 40))/binary, "end">>,
+            binary:copy(<<"x">>, 200)
+        ]
+    ],
+    ok.
+
+%% A text with a line longer than 998 characters is not sent as 7bit.
+a_long_body_line_is_encoded_test() ->
+    Mail = mailio_mime_render:build(#{
+        from => [#{email => <<"a@x">>}],
+        to => [#{email => <<"b@y">>}],
+        text => binary:copy(<<"x">>, 1200)
+    }),
+    [_, Body] = binary:split(Mail, <<"\r\n\r\n">>),
+    [?assert(byte_size(L) =< 998) || L <- binary:split(Body, <<"\r\n">>, [global])],
+    ?assertEqual(binary:copy(<<"x">>, 1200), mailio_mime_decode:decode_quoted_printable(Body)).
+
+%% One very long line is encoded in about its own size, not many times it: the
+%% work runs in a process that is killed when its heap passes 24 MiB.
+a_very_long_quoted_printable_line_is_cheap_test_() ->
+    {timeout, 30, fun() ->
+        Line = binary:copy(<<"é ">>, 140 * 1024 div 3),
+        Self = self(),
+        {Pid, Ref} = spawn_opt(
+            fun() ->
+                Out = mailio_mime_render:render(#{
+                    type => <<"text">>,
+                    subtype => <<"plain">>,
+                    encoding => <<"quoted-printable">>,
+                    headers => [],
+                    body => Line
+                }),
+                Self ! {done, self(), Out}
+            end,
+            [
+                monitor,
+                {max_heap_size, #{size => 3 * 1024 * 1024, kill => true, error_logger => false}}
+            ]
+        ),
+        Out =
+            receive
+                {done, Pid, O} -> O;
+                {'DOWN', Ref, process, Pid, Reason} -> error({too_much_memory, Reason})
+            after 20000 -> error(timeout)
+            end,
+        [_, Body] = binary:split(Out, <<"\r\n\r\n">>),
+        [?assert(byte_size(L) =< 76) || L <- binary:split(Body, <<"\r\n">>, [global])],
+        ?assertEqual(Line, mailio_mime_decode:decode_quoted_printable(Body))
+    end}.
+
+%% The work grows with the size: a line four times as long costs about four times
+%% as much, not sixteen.
+quoted_printable_work_grows_with_the_size_test() ->
+    Cost = fun(Size) ->
+        Line = binary:copy(<<"abcdefgh ">>, Size div 9),
+        Self = self(),
+        spawn_link(fun() ->
+            {reductions, R0} = process_info(self(), reductions),
+            _ = mailio_mime_render:render(#{
+                type => <<"text">>,
+                subtype => <<"plain">>,
+                encoding => <<"quoted-printable">>,
+                headers => [],
+                body => Line
+            }),
+            {reductions, R1} = process_info(self(), reductions),
+            Self ! {cost, R1 - R0}
+        end),
+        receive
+            {cost, N} -> N
+        after 20000 -> error(timeout)
+        end
+    end,
+    Small = Cost(16 * 1024),
+    Large = Cost(64 * 1024),
+    ?assert(Large < 6 * Small).
+
+%% Many bytes that are not UTF-8 are replaced in one pass.
+many_bad_bytes_in_a_header_cost_linear_time_test() ->
+    Cost = fun(Size) ->
+        Bad = binary:copy(<<255>>, Size),
+        Self = self(),
+        spawn_link(fun() ->
+            {reductions, R0} = process_info(self(), reductions),
+            _ = mailio_mime_render:encode_unstructured(Bad),
+            {reductions, R1} = process_info(self(), reductions),
+            Self ! {cost, R1 - R0}
+        end),
+        receive
+            {cost, N} -> N
+        after 20000 -> error(timeout)
+        end
+    end,
+    ?assert(Cost(32 * 1024) < 6 * Cost(8 * 1024)).
+
+%% A name that needs encoding and an address on one line would be over 76
+%% characters with the header name: the address is on a line of its own.
+an_encoded_name_and_its_address_fit_the_line_test() ->
+    Mail = mailio_mime_render:build(#{
+        from => [
+            #{email => <<"someone.long@example.org">>, name => <<"Zoë Müller-Lindström"/utf8>>}
+        ],
+        to => [#{email => <<"b@y">>, name => <<"Zoë Müller-Lindström"/utf8>>}],
+        text => <<"hi">>
+    }),
+    [?assert(byte_size(L) =< 76) || L <- binary:split(header_block(Mail), <<"\r\n">>, [global])].
+
+%% An ASCII name that is long next to a long address is folded too.
+a_long_ascii_name_and_address_fit_the_line_test() ->
+    Mail = mailio_mime_render:build(#{
+        from => [
+            #{
+                email => <<"a.very.long.mailbox.name@subdomain.example.org">>,
+                name => <<"Alexander Bartholomew Smith">>
+            }
+        ],
+        to => [#{email => <<"b@y">>}],
+        text => <<"hi">>
+    }),
+    [?assert(byte_size(L) =< 76) || L <- binary:split(header_block(Mail), <<"\r\n">>, [global])].

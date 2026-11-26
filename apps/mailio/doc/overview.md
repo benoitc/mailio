@@ -38,6 +38,10 @@ Every size a server controls is bounded, so a broken or hostile server cannot ma
 | IMAP literal (one message body or part) | 64 MiB | `max_literal` | `{error, response_too_large}`, connection closed for good |
 | IMAP line outside a literal | 64 KiB | `max_line` | same |
 | IMAP whole response | 96 MiB | `max_response` | same |
+| IMAP responses one command collects | 100,000 of them and 96 MiB | `max_untagged`, `max_untagged_bytes` | same |
+| IMAP UIDs one sync adapter command lists | 10,000, cut to half of `max_untagged` for FETCH and to what fits in `max_line` for SEARCH | `listing_window` | not a limit that fails: a larger mailbox is listed in several windows, and the adapter answers `more` until it is all read |
+| IMAP listing commands for one mailbox read | 100,000 | `max_list_commands` | `imap_listing_too_sparse`, nothing is changed: UIDs that are far apart cost windows, not messages. It counts the windows of data; the EXAMINE of each call and the query for the highest UID are not in it |
+| IMAP `VANISHED` report the sync adapter lists one by one | 100,000 UIDs | `max_vanished`, which can only lower it | the adapter returns `resync`: read the mailbox again and keep the new state only when that worked |
 | POP3 listing reply (LIST, UIDL, CAPA) | 32 MiB | `max_list_bytes` | `pop3_response_too_large`, connection closed |
 | POP3 TOP reply | 1 MiB | `max_top_bytes` | same |
 | POP3 RETR reply | the `MaxBytes` you pass, plus 64 KiB | argument | same |
@@ -47,7 +51,39 @@ Every size a server controls is bounded, so a broken or hostile server cannot ma
 | MIME parts per message | 1000 | application env `max_mime_parts` of `mailio` | the rest are dropped, the part gets a `too_many_parts` defect |
 | MIME nesting depth | 50 | fixed | the part is kept whole with a `max_depth_exceeded` defect |
 
-Timeouts are 30 seconds for connecting, for each IMAP command and for each POP3 and SMTP reply. TLS certificates and host names are verified unless you set `verify => verify_none`.
+Timeouts are 30 seconds for connecting, for each POP3 and SMTP reply and for the IMAP greeting, STARTTLS and login (`command_timeout`). An IMAP command has the deadline you give `run/3`, 30 seconds by default; when the server has not answered by then you get `{error, imap_timeout}` and the connection is dropped, because a late answer could no longer be matched to its command. Credential providers have 10 seconds (`credentials_timeout`). TLS certificates and host names are verified unless you set `verify => verify_none`.
+
+## Changes that break callers
+
+These affect code that calls `mailio_imap_proto` directly, which is public API.
+
+| Before | Now |
+|---|---|
+| `parse_uid_set/1` returned every UID of a set as a list | `parse_uid_ranges/1` returns sorted, merged `{Lo, Hi}` ranges (either end may come first). `expand_uid_ranges(Ranges, Max)` returns `{ok, List}` or `{error, too_many}`, and `uid_count/1` counts them |
+| `{vanished, Earlier, [Uid]}` | `{vanished, Earlier, [{Lo, Hi}]}` |
+| `read_response/3` took a byte offset | it takes `start`, then the state it returned in `{more, State}` |
+| An IMAP connection without a `tls` option used plain text | the default is `starttls`, as for POP3 and SMTP. Plain text needs `tls => false`. A server that greets with PREAUTH on a connection that has to be protected is refused with `tls_failed` |
+| POP3 and SMTP took any `tls` value they did not know as plain text | an unknown value is refused (`pop3_tls_failed`, `smtp_tls_failed`) before a socket is opened |
+| `build/1` left out the Date header | it adds one (now, or the `date` you give in seconds since the epoch) unless you pass a `Date` header |
+
+The sync adapter (`mailio_adapter`) reports more than before:
+
+- It can return `resync` among its changes, next to `reset`.
+- Every `added` change carries the `uidvalidity` it was listed under.
+- `fetch_message/5` takes `#{uidvalidity => V}` and refuses (`imap_uidvalidity_changed`) when the mailbox has another one. It is optional in `mailio_adapter`, but an adapter whose `added` changes carry `uidvalidity` must implement it: the store refuses to fetch such a message through `fetch_message/4`.
+- A mailbox is listed in windows of `listing_window` UIDs, and a read that does not fit in one call answers `more` with a state to continue from. The state carries where the listing stopped, so it may be kept between calls.
+- A listing or flag fetch the server refuses is now an error, and so is a UID search that does not answer in full: a tagged OK with no `* SEARCH` line, or one with something other than numbers in it, is not a mailbox with no mail (an explicit, empty `* SEARCH` is). It used to be an empty answer with a new state.
+
+- `list_uids/3` takes `#{max => N}` and stops with an error as soon as the mailbox holds more than N messages. `mailbox_info/2` says how many it holds and under which UIDVALIDITY. Both are optional; the store uses them to check a listing against the mailbox before it removes anything.
+- `list_uids` answers only when the UIDs it found are as many as the messages the server reported, and it reads again a few times when they are not. A mailbox that never agrees is an error.
+
+The rest of this section is about `reset` and `resync`. `reset` means the UIDs the caller holds mean other messages now; `resync` means there were too many changes to list. In both cases read the whole mailbox again and keep the new state only when that worked.
+
+## Sharing one connection
+
+The IMAP adapter lets several processes use one handle. A call that selects a mailbox and then acts on it (reading a message, changing flags, moving, expunging, listing, starting IDLE) holds the connection for the whole call, so it never acts on a mailbox somebody else selected in between. Callers wait for their turn in the order they asked, for up to two minutes, and a caller that dies gives its turn up. If you use `mailio_imap_conn` directly you select and send on your own, so give each connection one user or use `mailio_imap_lock` the same way. A connection started with `start_link/1` is linked to the process that started it and goes down with it; to keep one for a long time start it under your own supervisor with `mailio_imap_conn:child_spec/1`. A supervisor puts the start arguments in its reports, so the config you give it may not hold a password or a token: keep the credential under a name with `mailio_credentials:register_ref(Name, Cred)` and give `credentials => {ref, Name}` (or a `{token_fun, Fun}`): the connection looks it up in its own worker each time it logs in. Any other `credentials` value is refused, because it could be the secret or hold it, and the error does not repeat it.
+
+`expunge/3` removes the UIDs you name and no other message, with `UID EXPUNGE`. A server without UIDPLUS has only `EXPUNGE`, which would also take every message another client flagged `\\Deleted` at that moment, so the call returns `imap_operation_unsupported` before it changes anything. Moving a message uses `UID MOVE` when the server has MOVE, and copy then `UID EXPUNGE` when it has UIDPLUS; with neither it is refused the same way.
 
 ## Errors
 

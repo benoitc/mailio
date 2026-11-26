@@ -233,3 +233,12 @@ Remaining questions, not blocking:
 ## Where this plan lives
 
 This file, on branch `docs-review-2026-11-24`. The next run of the review should update it instead of starting over.
+
+## Update after the second review of `mailio` (November 2026)
+
+A second review of the library found problems in resource use, IMAP liveness, sync correctness and generated mail. They were fixed in one pull request, in six steps; the CHANGELOG lists what changed for users. What it means for this plan:
+
+- Dialyzer is at zero warnings, so the "accepted warnings" in the validation matrix above no longer apply, and `AGENTS.md` says a change must not add one.
+- The overview now has a section on sharing one IMAP connection and a table of the limits and timeouts, and `usage.md` and the overview say that `tls` defaults to `starttls`.
+- The registry and event tables are written only by their owners, and a long-lived IMAP connection has a child specification for a supervisor.
+- The release items above are unchanged: license text, repository link, maintainers and the version bump are still the maintainer's step, and the release waits for the documentation review of the merged `main`.

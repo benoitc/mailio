@@ -18,13 +18,14 @@
 
 -export([
     start_link/1,
+    child_spec/1,
     run/2, run/3,
     idle_start/2,
     idle_stop/1,
     capabilities/1,
     close/1
 ]).
--export([callback_mode/0, init/1, terminate/3]).
+-export([callback_mode/0, init/1, terminate/3, format_status/1]).
 -export([
     connect/3,
     greeting/3,
@@ -36,11 +37,20 @@
     ready/3,
     running/3,
     idle/3,
-    backoff/3
+    backoff/3,
+    negotiate/3
 ]).
 
 -define(CONNECT_TIMEOUT, 30000).
 -define(CMD_TIMEOUT, 30000).
+%% What one command may collect in untagged responses before the connection
+%% is refused: how many, and how many bytes. Config: max_untagged and
+%% max_untagged_bytes.
+-define(MAX_UNTAGGED, 100000).
+-define(MAX_UNTAGGED_BYTES, 100663296).
+%% The state machine enforces every deadline itself; a caller's own wait is only
+%% a backstop for a machine that no longer exists.
+-define(CALL_CAP, 120000).
 -define(BACKOFF_MIN, 1000).
 -define(BACKOFF_MAX, 300000).
 
@@ -51,10 +61,24 @@
     buffer = <<>> :: binary(),
     tagn = 0 :: non_neg_integer(),
     from :: gen_statem:from() | undefined,
+    %% who asked to stop IDLE, kept apart from the caller that started it
+    stopper :: gen_statem:from() | undefined,
+    %% absolute (monotonic ms) time by which the running command must be answered
+    deadline :: integer() | undefined,
+    %% resume point of the framer for a line that is still arriving
+    scan = start :: mailio_imap_proto:resume(),
+    %% what the running command has collected so far, and the size of the last frame
+    acc_count = 0 :: non_neg_integer(),
+    acc_bytes = 0 :: non_neg_integer(),
+    last_size = 0 :: non_neg_integer(),
     tag :: binary() | undefined,
     untagged = [] :: [term()],
     literal :: binary() | [binary()] | undefined,
     caps = [] :: [binary()],
+    %% where the extensions negotiation after login stands: capability | enable
+    neg :: capability | enable | undefined,
+    %% ENABLE QRESYNC was confirmed on this connection
+    qresync_enabled = false :: boolean(),
     notify :: pid() | undefined,
     unsolicited = [] :: [term()],
     backoff = ?BACKOFF_MIN :: pos_integer()
@@ -64,7 +88,7 @@
 %% API
 %%====================================================================
 
-%% Config: #{host, port, tls => true | starttls | false, notify => pid(),
+%% Config: #{host, port, tls => true | starttls (the default) | false, notify => pid(),
 %%           io_hook => fun((sent | received, non_neg_integer()) -> term()),
 %%           credentials => mailio_credentials:cred(),
 %%           verify => verify_peer | verify_none, cacerts | cacertfile}.
@@ -76,6 +100,44 @@
 %% untrusted certificate, a wrong host name): `{error, tls_failed}'. With
 %% `tls => starttls' the connection is upgraded before any credential is sent,
 %% and refused if the server does not offer STARTTLS.
+%% @doc A child specification for a supervisor. A connection started with
+%% `start_link/1' is linked to the process that started it and goes down with it;
+%% an application that keeps a connection for a long time starts it under its
+%% own supervisor with this. The connection handles its own reconnects, so it is
+%% restarted only when it crashes.
+%%
+%% A supervisor puts the start arguments in its reports, so they must not hold a
+%% secret, nor the arguments of a provider, which may be one (the bundled static
+%% provider keeps passwords there). Keep the credential under a name with
+%% {@link mailio_credentials:register_ref/2} and give `credentials => {ref, Name}':
+%% the connection looks it up inside its own worker each time it logs in. A
+%% `token_fun' is accepted too, as the fun shows no secret.
+-spec child_spec(map()) -> supervisor:child_spec().
+child_spec(Config) ->
+    case secret_in(Config) of
+        true -> error(secret_in_child_spec);
+        false -> ok
+    end,
+    #{
+        id => {?MODULE, maps:get(host, Config, undefined), maps:get(port, Config, undefined)},
+        start => {?MODULE, start_link, [Config]},
+        restart => transient,
+        shutdown => 5000,
+        type => worker,
+        modules => [?MODULE]
+    }.
+
+secret_in(Config) ->
+    maps:is_key(password, Config) orelse maps:is_key(token, Config) orelse
+        maps:is_key(secret, Config) orelse
+        case maps:find(credentials, Config) of
+            error -> false;
+            {ok, {ref, _Name}} -> false;
+            {ok, {token_fun, Fun}} when is_function(Fun, 0) -> false;
+            %% anything else could be, or hold, the secret: it is not kept
+            {ok, _Other} -> true
+        end.
+
 -spec start_link(map()) -> {ok, pid()} | {error, term()}.
 start_link(Config) ->
     gen_statem:start_link(?MODULE, Config, []).
@@ -89,16 +151,31 @@ run(Pid, Builder) ->
 -spec run(pid(), fun((binary()) -> {iodata(), binary() | undefined}), timeout()) ->
     {ok, [term()], {atom(), term(), binary()}} | {error, term()}.
 run(Pid, Builder, Timeout) ->
-    gen_statem:call(Pid, {run, Builder}, Timeout).
+    Deadline = now_ms() + Timeout,
+    call(Pid, {run, Builder, Deadline}).
 
--spec capabilities(pid()) -> [binary()].
+%% The connection answers by the deadline, whatever the server does. A call
+%% that finds the process gone is a lost connection, not a crash of the caller.
+call(Pid, Request) ->
+    try
+        gen_statem:call(Pid, Request, ?CALL_CAP)
+    catch
+        exit:{timeout, _} ->
+            {error, imap_timeout};
+        exit:{Reason, _} when Reason =:= noproc; Reason =:= normal; Reason =:= shutdown ->
+            {error, imap_disconnected}
+    end.
+
+now_ms() -> erlang:monotonic_time(millisecond).
+
+-spec capabilities(pid()) -> [binary()] | {error, term()}.
 capabilities(Pid) ->
-    case gen_statem:call(Pid, capabilities) of
+    case call(Pid, capabilities) of
         [] ->
             %% A server need not announce its capabilities with the login reply:
             %% ask once, then answer from what the connection learned.
             _ = run(Pid, fun(Tag) -> {mailio_imap_proto:capability(Tag), undefined} end),
-            gen_statem:call(Pid, capabilities);
+            call(Pid, capabilities);
         Caps ->
             Caps
     end.
@@ -107,11 +184,11 @@ capabilities(Pid) ->
 %% `{imap_idle_event, self(), Event}'.
 -spec idle_start(pid(), pid()) -> ok | {error, term()}.
 idle_start(Pid, NotifyPid) ->
-    gen_statem:call(Pid, {idle_start, NotifyPid}).
+    call(Pid, {idle_start, NotifyPid}).
 
--spec idle_stop(pid()) -> ok.
+-spec idle_stop(pid()) -> ok | {error, term()}.
 idle_stop(Pid) ->
-    gen_statem:call(Pid, idle_stop).
+    call(Pid, idle_stop).
 
 -spec close(pid()) -> ok.
 close(Pid) ->
@@ -123,18 +200,26 @@ close(Pid) ->
 
 callback_mode() -> [state_functions, state_enter].
 
-init(Config) ->
-    Transport =
-        case maps:get(tls, Config, false) of
-            true -> ssl;
-            _ -> gen_tcp
-        end,
-    Data = #data{
-        config = Config,
-        transport = Transport,
-        notify = maps:get(notify, Config, undefined)
-    },
-    {ok, connect, Data}.
+init(Config0) ->
+    %% like POP3 and SMTP: the connection is protected unless it is said not to be
+    Config = maps:merge(#{tls => starttls}, Config0),
+    case lists:member(maps:get(tls, Config), [true, starttls, false]) of
+        false ->
+            %% a setting that is not understood must not end up as plain text
+            {stop, {invalid_tls_option, maps:get(tls, Config)}};
+        true ->
+            Data = #data{
+                config = Config,
+                transport = initial_transport(Config),
+                notify = maps:get(notify, Config, undefined)
+            },
+            {ok, connect, Data}
+    end.
+
+%% What a new connection starts as. A STARTTLS connection becomes TLS on the way,
+%% and a new one after it was lost starts in plain text again.
+initial_transport(#{tls := true}) -> ssl;
+initial_transport(_) -> gen_tcp.
 
 terminate(_Reason, _State, #data{sock = undefined}) ->
     ok;
@@ -199,25 +284,30 @@ mailio_tls_opts(Config) ->
             ]
     end.
 
-%% The credentials from the config, forcing a token_fun.
-credentials(#{credentials := Cred}) -> force_credentials(Cred);
-credentials(#{username := User, password := Pass}) -> {password, User, Pass};
-credentials(_) -> {error, no_credentials}.
-
-force_credentials({token_fun, F}) ->
-    case F() of
-        {ok, Cred} -> force_credentials(Cred);
+%% The credentials from the config. A token_fun is resolved by
+%% mailio_credentials in a process of its own, with a depth and time limit, so
+%% a provider cannot make this process loop or wait for ever.
+credentials(#{credentials := Cred} = Config) ->
+    case mailio_credentials:resolve(Cred, cred_opts(Config)) of
+        {ok, Resolved} -> Resolved;
         {error, _} = E -> E
     end;
-force_credentials(Cred) ->
-    Cred.
+credentials(#{username := User, password := Pass}) ->
+    {password, User, Pass};
+credentials(_) ->
+    {error, no_credentials}.
+
+cred_opts(#{credentials_timeout := T}) -> #{timeout => T};
+cred_opts(_) -> #{}.
 
 %%====================================================================
 %% State: greeting
 %%====================================================================
 
 greeting(enter, _Old, Data) ->
-    {keep_state, set_active(Data)};
+    {keep_state, set_active(Data), [{state_timeout, cmd_timeout(Data), handshake_timeout}]};
+greeting(state_timeout, handshake_timeout, Data) ->
+    drop(Data);
 greeting(info, {Tag, Sock, Bin}, #data{sock = Sock} = Data) when
     Tag =:= tcp; Tag =:= ssl
 ->
@@ -225,14 +315,23 @@ greeting(info, {Tag, Sock, Bin}, #data{sock = Sock} = Data) when
     case take_one(Data1) of
         {ok, {untagged, {status_resp, ok, _Code, _Text}}, Data2} ->
             {next_state, after_greeting(Data2), Data2};
+        {ok, {untagged, {status_resp, preauth, _, _}}, #data{config = #{tls := starttls}} = Data2} ->
+            %% A server that is already logged in has nothing for us to protect
+            %% with STARTTLS, and this connection was to be protected: it is not
+            %% used (RFC 9051, section 7.1.4)
+            {next_state, tls_failed, Data2};
         {ok, {untagged, {status_resp, preauth, _, _}}, Data2} ->
-            {next_state, ready, Data2};
+            %% already logged in: the extensions are negotiated just the same
+            {next_state, after_login(Data2), Data2#data{
+                caps = [], neg = capability, qresync_enabled = false
+            }};
         {ok, _Other, Data2} ->
-            {next_state, backoff, Data2};
+            %% not a greeting: give the connection up, socket and all
+            drop(Data2);
         {error, response_too_large} ->
             {next_state, response_too_large, Data1};
-        more ->
-            {keep_state, Data1}
+        {more, Data2} ->
+            {keep_state, Data2}
     end;
 greeting(info, Event, Data) ->
     handle_socket_closed(Event, Data);
@@ -249,7 +348,11 @@ after_greeting(_) -> auth.
 starttls(enter, _Old, Data) ->
     {Tag, Data1} = next_tag(Data),
     _ = send(Data1, mailio_imap_proto:starttls(Tag)),
-    {keep_state, Data1#data{tag = Tag, untagged = []}};
+    {keep_state, Data1#data{tag = Tag, untagged = []}, [
+        {state_timeout, cmd_timeout(Data1), handshake_timeout}
+    ]};
+starttls(state_timeout, handshake_timeout, Data) ->
+    drop(Data);
 starttls(info, {T, Sock, Bin}, #data{sock = Sock} = Data) when
     T =:= tcp; T =:= ssl
 ->
@@ -271,7 +374,7 @@ upgrade(#data{sock = Sock, config = Config} = Data) ->
     case ssl:connect(Sock, mailio_tls_opts(Config), ?CONNECT_TIMEOUT) of
         {ok, SslSock} ->
             {next_state, auth,
-                set_active(Data#data{transport = ssl, sock = SslSock, buffer = <<>>})};
+                set_active(Data#data{transport = ssl, sock = SslSock, buffer = <<>>, scan = start})};
         {error, _Reason} ->
             {next_state, tls_failed, Data}
     end.
@@ -285,7 +388,9 @@ auth(enter, _Old, #data{config = Config} = Data) ->
     case credentials(Config) of
         {password, User, Pass} ->
             _ = send(Data1, mailio_imap_proto:login(Tag, User, Pass)),
-            {keep_state, Data1#data{tag = Tag, untagged = []}};
+            {keep_state, Data1#data{tag = Tag, untagged = []}, [
+                {state_timeout, cmd_timeout(Data1), handshake_timeout}
+            ]};
         {oauth2, User, Token} ->
             _ = send(Data1, mailio_imap_proto:authenticate_xoauth2(Tag)),
             %% the token answers the first `+'; an error challenge after it is
@@ -293,10 +398,18 @@ auth(enter, _Old, #data{config = Config} = Data) ->
             Replies = [
                 iolist_to_binary(mailio_imap_proto:xoauth2_response(User, Token)), <<"\r\n">>
             ],
-            {keep_state, Data1#data{tag = Tag, untagged = [], literal = Replies}};
+            {keep_state, Data1#data{tag = Tag, untagged = [], literal = Replies}, [
+                {state_timeout, cmd_timeout(Data1), handshake_timeout}
+            ]};
         {error, _} ->
-            {next_state, auth_failed, Data1}
+            %% a state change is not allowed from an enter call (nor a next_event):
+            %% a zero state timeout makes the change the next thing that happens
+            {keep_state, Data1, [{state_timeout, 0, credentials_failed}]}
     end;
+auth(state_timeout, credentials_failed, Data) ->
+    {next_state, auth_failed, Data};
+auth(state_timeout, handshake_timeout, Data) ->
+    drop(Data);
 auth(info, {T, Sock, Bin}, #data{sock = Sock} = Data) when
     T =:= tcp; T =:= ssl
 ->
@@ -304,9 +417,16 @@ auth(info, {T, Sock, Bin}, #data{sock = Sock} = Data) when
         Data,
         Bin,
         fun(Status, _Code, _Text, Data1) ->
+            Data2 = Data1#data{tag = undefined, literal = undefined},
             case Status of
-                ok -> {next_state, ready, Data1#data{tag = undefined, literal = undefined}};
-                _ -> {next_state, auth_failed, Data1#data{tag = undefined, literal = undefined}}
+                %% what the server offers is read again on every login, and
+                %% QRESYNC enabled on each connection (RFC 7162, section 3.2.3)
+                ok ->
+                    {next_state, after_login(Data2), Data2#data{
+                        caps = [], neg = capability, qresync_enabled = false
+                    }};
+                _ ->
+                    {next_state, auth_failed, Data2}
             end
         end
     );
@@ -314,6 +434,82 @@ auth(info, Event, Data) ->
     handle_socket_closed(Event, Data);
 auth({call, _From}, _Req, Data) ->
     {keep_state, Data, [{postpone, true}]}.
+
+%%====================================================================
+%% State: negotiate (after login: the capabilities, then ENABLE QRESYNC)
+%%====================================================================
+
+%% What the server offers, as far as it can be used: QRESYNC only once it was
+%% enabled on this connection and the server said so.
+offered_caps(#data{config = #{enable_qresync := true}, qresync_enabled = false, caps = Caps}) ->
+    [C || C <- Caps, string:uppercase(C) =/= <<"QRESYNC">>];
+offered_caps(#data{caps = Caps}) ->
+    Caps.
+
+%% Where a connection goes once it is logged in: to negotiate extensions when the
+%% config asks for QRESYNC, else to work.
+after_login(#data{config = #{enable_qresync := true}}) -> negotiate;
+after_login(_) -> ready.
+
+negotiate(enter, _Old, #data{neg = capability} = Data) ->
+    negotiate_send(Data, fun mailio_imap_proto:capability/1);
+negotiate(state_timeout, handshake_timeout, Data) ->
+    drop(Data);
+negotiate(info, {T, Sock, Bin}, #data{sock = Sock} = Data) when
+    T =:= tcp; T =:= ssl
+->
+    process_until_tagged(
+        Data,
+        Bin,
+        fun
+            (ok, _Code, _Text, #data{neg = capability, caps = Caps} = Data1) ->
+                case lists:member(<<"QRESYNC">>, [string:uppercase(C) || C <- Caps]) of
+                    true ->
+                        Data2 = Data1#data{neg = enable, tag = undefined, untagged = []},
+                        {next_state, negotiate, Data2, [{state_timeout, 0, send_enable}]};
+                    false ->
+                        {next_state, ready, Data1#data{neg = undefined, tag = undefined}}
+                end;
+            (Status, _Code, _Text, #data{neg = enable} = Data1) ->
+                %% QRESYNC is used only when the server said it is enabled: any
+                %% other answer, an empty ENABLED or a refusal, leaves it unused
+                Confirmed = Status =:= ok andalso enabled_qresync(Data1#data.untagged),
+                {next_state, ready, Data1#data{
+                    neg = undefined, tag = undefined, qresync_enabled = Confirmed
+                }};
+            (_Status, _Code, _Text, Data1) ->
+                %% the server refused: this connection is not used, a new one is made
+                drop(Data1)
+        end
+    );
+negotiate(state_timeout, send_enable, #data{neg = enable} = Data) ->
+    negotiate_send(Data, fun(Tag) -> mailio_imap_proto:enable(Tag, [<<"QRESYNC">>]) end);
+negotiate(info, Event, Data) ->
+    handle_socket_closed(Event, Data);
+negotiate({call, _From}, _Req, Data) ->
+    {keep_state, Data, [{postpone, true}]}.
+
+%% `* ENABLED QRESYNC' among the answers to ENABLE
+enabled_qresync(Untagged) ->
+    lists:any(
+        fun
+            ({other, <<"ENABLED">>, Names}) when is_binary(Names) ->
+                lists:member(
+                    <<"QRESYNC">>,
+                    binary:split(string:uppercase(Names), <<" ">>, [global, trim_all])
+                );
+            (_) ->
+                false
+        end,
+        Untagged
+    ).
+
+negotiate_send(Data, Build) ->
+    {Tag, Data1} = next_tag(Data),
+    _ = send(Data1, Build(Tag)),
+    {keep_state, Data1#data{tag = Tag, untagged = []}, [
+        {state_timeout, cmd_timeout(Data1), handshake_timeout}
+    ]}.
 
 %%====================================================================
 %% State: auth_failed (terminal: the server refused the credentials)
@@ -347,18 +543,28 @@ tls_failed(_Type, _Event, Data) ->
 %% State: response_too_large (terminal: the server sent more than allowed)
 %%====================================================================
 
-response_too_large(enter, _Old, #data{transport = T, sock = Sock, from = From} = Data) ->
+response_too_large(enter, _Old, #data{transport = T, sock = Sock} = Data) ->
     _ =
         case Sock of
             undefined -> ok;
             _ -> catch_close(T, Sock)
         end,
-    Replies =
-        case From of
-            undefined -> [];
-            _ -> [{reply, From, {error, response_too_large}}]
-        end,
-    {keep_state, Data#data{sock = undefined, buffer = <<>>, from = undefined}, Replies};
+    %% Answer whoever waits, and let go of what the command had collected: a
+    %% caller that keeps this connection must not keep the data with it.
+    {Settled, Replies} = pending_replies(Data, response_too_large),
+    {keep_state,
+        Settled#data{
+            sock = undefined,
+            buffer = <<>>,
+            scan = start,
+            untagged = [],
+            literal = undefined,
+            tag = undefined,
+            deadline = undefined,
+            acc_count = 0,
+            acc_bytes = 0
+        },
+        Replies};
 response_too_large({call, From}, _Req, Data) ->
     {keep_state, Data, [{reply, From, {error, response_too_large}}]};
 response_too_large(_Type, _Event, Data) ->
@@ -370,17 +576,40 @@ response_too_large(_Type, _Event, Data) ->
 
 ready(enter, _Old, Data) ->
     {keep_state, Data#data{from = undefined, tag = undefined, untagged = []}};
-ready({call, From}, {run, Builder}, Data) ->
-    {Tag, Data1} = next_tag(Data),
-    {IoData, Literal} = Builder(Tag),
-    send(Data1, IoData),
-    {next_state, running, Data1#data{from = From, tag = Tag, untagged = [], literal = Literal}};
+ready({call, From}, {run, Builder, Deadline}, Data) ->
+    case now_ms() >= Deadline of
+        true ->
+            %% the caller has given up: do not send what it asked for
+            {keep_state, Data, [{reply, From, {error, imap_timeout}}]};
+        false ->
+            {Tag, Data1} = next_tag(Data),
+            try Builder(Tag) of
+                {IoData, Literal} ->
+                    case send(Data1, IoData) of
+                        ok ->
+                            {next_state, running, Data1#data{
+                                from = From,
+                                deadline = Deadline,
+                                tag = Tag,
+                                untagged = [],
+                                literal = Literal
+                            }};
+                        {error, _} ->
+                            drop(Data1, [{reply, From, {error, imap_disconnected}}])
+                    end
+            catch
+                Class:Reason ->
+                    {keep_state, Data1, [{reply, From, {error, {builder_failed, {Class, Reason}}}}]}
+            end
+    end;
 ready({call, From}, capabilities, Data) ->
-    {keep_state, Data, [{reply, From, Data#data.caps}]};
+    {keep_state, Data, [{reply, From, offered_caps(Data)}]};
 ready({call, From}, {idle_start, NotifyPid}, Data) ->
     {Tag, Data1} = next_tag(Data),
-    send(Data1, mailio_imap_proto:idle(Tag)),
-    {next_state, idle, Data1#data{from = From, tag = Tag, notify = NotifyPid, untagged = []}};
+    _ = send(Data1, mailio_imap_proto:idle(Tag)),
+    {next_state, idle, Data1#data{from = From, tag = Tag, notify = NotifyPid, untagged = []}, [
+        {state_timeout, cmd_timeout(Data1), idle_timeout}
+    ]};
 ready({call, From}, idle_stop, Data) ->
     {keep_state, Data, [{reply, From, ok}]};
 ready(info, {T, Sock, Bin}, #data{sock = Sock} = Data) when
@@ -399,8 +628,12 @@ ready(info, Event, Data) ->
 %% State: running
 %%====================================================================
 
-running(enter, _Old, Data) ->
-    {keep_state, Data};
+running(enter, _Old, #data{deadline = Deadline} = Data) ->
+    {keep_state, Data, [{state_timeout, max(0, Deadline - now_ms()), command_timeout}]};
+running(state_timeout, command_timeout, #data{from = From} = Data) ->
+    %% The reply was lost or never comes. Reading on would put every later
+    %% answer against the wrong command, so the connection is dropped.
+    drop(Data, [{reply, From, {error, imap_timeout}}]);
 running(info, {T, Sock, Bin}, #data{sock = Sock} = Data) when
     T =:= tcp; T =:= ssl
 ->
@@ -413,7 +646,7 @@ running(info, {T, Sock, Bin}, #data{sock = Sock} = Data) when
         end
     );
 running(info, Event, Data) ->
-    reply_error_and(Event, Data);
+    handle_socket_closed(Event, Data);
 running({call, _From}, _Req, Data) ->
     {keep_state, Data, [{postpone, true}]}.
 
@@ -423,10 +656,14 @@ running({call, _From}, _Req, Data) ->
 
 idle(enter, _Old, Data) ->
     {keep_state, Data};
-idle({call, From}, idle_stop, Data) ->
-    send(Data, mailio_imap_proto:idle_done()),
+idle({call, From}, idle_stop, #data{stopper = undefined} = Data) ->
+    _ = send(Data, mailio_imap_proto:idle_done()),
     %% Wait for the tagged completion of the IDLE command.
-    {keep_state, Data#data{from = From}};
+    {keep_state, Data#data{stopper = From}, [{state_timeout, cmd_timeout(Data), idle_timeout}]};
+idle({call, From}, idle_stop, Data) ->
+    {keep_state, Data, [{reply, From, {error, already_stopping}}]};
+idle(state_timeout, idle_timeout, Data) ->
+    drop(Data, [], imap_timeout);
 idle({call, _From}, _Req, Data) ->
     {keep_state, Data, [{postpone, true}]};
 idle(info, {T, Sock, Bin}, #data{sock = Sock} = Data) when
@@ -442,25 +679,29 @@ handle_idle_responses(Data) ->
 
 handle_idle_responses(Data, Acts) ->
     case take_one(Data) of
-        more ->
-            {keep_state, Data, Acts};
+        {more, Data0} ->
+            {keep_state, Data0, Acts};
         {error, response_too_large} ->
             {next_state, response_too_large, Data, Acts};
         {ok, {continuation, _Text}, Data1} ->
             %% Server accepted IDLE: acknowledge the idle_start caller now,
             %% while staying in the idle state.
             {Data2, A} = ack_from(Data1),
-            handle_idle_responses(Data2, Acts ++ A);
+            handle_idle_responses(Data2, Acts ++ [{state_timeout, cancel} | A]);
         {ok, {tagged, Tag, _Status, _}, Data1} when Tag =:= Data#data.tag ->
             %% IDLE completed (after DONE): return to ready, ack the stopper.
             {Data2, A} = ack_from(Data1),
-            {next_state, ready, Data2#data{tag = undefined}, Acts ++ A};
+            {Data3, B} = ack_stopper(Data2),
+            {next_state, ready, Data3#data{tag = undefined}, Acts ++ A ++ B};
         {ok, {untagged, Event}, Data1} ->
             _ = notify_idle(Data1, Event),
             handle_idle_responses(Data1, Acts);
         {ok, _Other, Data1} ->
             handle_idle_responses(Data1, Acts)
     end.
+
+ack_stopper(#data{stopper = undefined} = Data) -> {Data, []};
+ack_stopper(#data{stopper = From} = Data) -> {Data#data{stopper = undefined}, [{reply, From, ok}]}.
 
 ack_from(#data{from = undefined} = Data) -> {Data, []};
 ack_from(#data{from = From} = Data) -> {Data#data{from = undefined}, [{reply, From, ok}]}.
@@ -478,7 +719,7 @@ backoff(enter, _Old, #data{backoff = B} = Data) ->
     {keep_state, Data, [{state_timeout, B, retry}]};
 backoff(state_timeout, retry, #data{backoff = B} = Data) ->
     NextB = min(B * 2, ?BACKOFF_MAX),
-    {next_state, connect, Data#data{backoff = NextB, buffer = <<>>}};
+    {next_state, connect, Data#data{backoff = NextB, buffer = <<>>, scan = start}};
 backoff({call, From}, _Req, Data) ->
     {keep_state, Data, [{reply, From, {error, not_connected}}]};
 backoff(_Type, _Event, Data) ->
@@ -496,8 +737,8 @@ process_until_tagged(Data0, Bin, Done) ->
 
 loop_responses(Data, Done) ->
     case take_one(Data) of
-        more ->
-            {keep_state, Data};
+        {more, Data0} ->
+            {keep_state, Data0};
         {error, response_too_large} ->
             {next_state, response_too_large, Data};
         {ok, {continuation, _Text}, Data1} ->
@@ -519,9 +760,20 @@ loop_responses(Data, Done) ->
         ->
             Done(Status, Code, Text, Data1);
         {ok, {untagged, Event}, Data1} ->
-            Data2 = Data1#data{untagged = [Event | Data1#data.untagged]},
-            Data3 = maybe_capture_caps(Data2, Event),
-            loop_responses(Data3, Done);
+            %% One command may not collect without end, whatever each answer weighs
+            Count = Data1#data.acc_count + 1,
+            Bytes = Data1#data.acc_bytes + Data1#data.last_size,
+            case Count > max_untagged(Data1) orelse Bytes > max_untagged_bytes(Data1) of
+                true ->
+                    {next_state, response_too_large, Data1};
+                false ->
+                    Data2 = Data1#data{
+                        untagged = [Event | Data1#data.untagged],
+                        acc_count = Count,
+                        acc_bytes = Bytes
+                    },
+                    loop_responses(maybe_capture_caps(Data2, Event), Done)
+            end;
         {ok, _Other, Data1} ->
             loop_responses(Data1, Done)
     end.
@@ -533,22 +785,24 @@ maybe_capture_caps(Data, _) -> Data.
 %% stray unsolicited data we are not actively collecting).
 drain_unsolicited(Data) ->
     case take_one(Data) of
-        more -> {ok, Data};
+        {more, Data1} -> {ok, Data1};
         {error, response_too_large} -> {error, response_too_large};
         {ok, _Resp, Data1} -> drain_unsolicited(Data1)
     end.
 
 %% Frame and parse a single response from the buffer.
-take_one(#data{buffer = Buf, config = Config} = Data) ->
-    case mailio_imap_proto:read_response(Buf, Config) of
-        more ->
-            more;
+take_one(#data{buffer = Buf, config = Config, scan = Scan} = Data) ->
+    case mailio_imap_proto:read_response(Buf, Config, Scan) of
+        {more, Next} ->
+            more_data(Data#data{scan = Next});
         {error, response_too_large} ->
             {error, response_too_large};
         {ok, Line, Rest} ->
             Resp = mailio_imap_proto:parse_response(Line),
-            {ok, Resp, Data#data{buffer = Rest}}
+            {ok, Resp, Data#data{buffer = Rest, scan = start, last_size = byte_size(Line)}}
     end.
+
+more_data(Data) -> {more, Data}.
 
 %%====================================================================
 %% Socket helpers
@@ -577,7 +831,14 @@ send(#data{transport = Transport, sock = Sock} = Data, IoData) ->
 
 next_tag(#data{tagn = N} = Data) ->
     Tag = iolist_to_binary([$A, integer_to_binary(N + 1)]),
-    {Tag, Data#data{tagn = N + 1}}.
+    %% a new command starts with nothing collected
+    {Tag, Data#data{tagn = N + 1, acc_count = 0, acc_bytes = 0}}.
+
+max_untagged(#data{config = #{max_untagged := N}}) -> N;
+max_untagged(_) -> ?MAX_UNTAGGED.
+
+max_untagged_bytes(#data{config = #{max_untagged_bytes := N}}) -> N;
+max_untagged_bytes(_) -> ?MAX_UNTAGGED_BYTES.
 
 catch_close(gen_tcp, Sock) ->
     try
@@ -595,21 +856,77 @@ catch_close(ssl, Sock) ->
 handle_socket_closed({Closed, _Sock}, Data) when
     Closed =:= tcp_closed; Closed =:= ssl_closed
 ->
-    {next_state, backoff, Data#data{sock = undefined, buffer = <<>>}};
+    drop(Data);
 handle_socket_closed({Err, _Sock, _Reason}, Data) when
     Err =:= tcp_error; Err =:= ssl_error
 ->
-    {next_state, backoff, Data#data{sock = undefined, buffer = <<>>}};
+    drop(Data);
 handle_socket_closed(_Other, Data) ->
     {keep_state, Data}.
 
-reply_error_and(Event, #data{from = From} = Data) ->
-    Replies =
-        case From of
-            undefined -> [];
-            _ -> [{reply, From, {error, connection_lost}}]
+%% Give up the connection: close the socket, answer whoever is waiting, and
+%% go to the reconnect state. Calls that arrive meanwhile get `not_connected'.
+drop(Data) ->
+    drop(Data, [], imap_disconnected).
+
+drop(Data, Replies) ->
+    drop(Data, Replies, imap_disconnected).
+
+drop(#data{transport = T, sock = Sock} = Data, Replies, Why) ->
+    _ =
+        case Sock of
+            undefined -> ok;
+            _ -> catch_close(T, Sock)
         end,
-    case handle_socket_closed(Event, Data) of
-        {next_state, S, Data1} -> {next_state, S, Data1#data{from = undefined}, Replies};
-        Other -> Other
-    end.
+    {Cleared, Pending} = pending_replies(Data, Why),
+    {next_state, backoff,
+        Cleared#data{
+            transport = initial_transport(Data#data.config),
+            sock = undefined,
+            buffer = <<>>,
+            scan = start,
+            tag = undefined,
+            deadline = undefined,
+            untagged = [],
+            literal = undefined,
+            acc_count = 0,
+            acc_bytes = 0
+        },
+        Replies ++ Pending}.
+
+%% Replies owed to the caller of a command, an IDLE start or an IDLE stop.
+pending_replies(#data{from = From, stopper = Stopper} = Data, Why) ->
+    Replies = [{reply, F, {error, Why}} || F <- [From, Stopper], F =/= undefined],
+    {Data#data{from = undefined, stopper = undefined}, Replies}.
+
+cmd_timeout(#data{config = #{command_timeout := T}}) -> T;
+cmd_timeout(_) -> ?CMD_TIMEOUT.
+
+%% What a crash report or sys:get_status shows: no credentials, no mail.
+format_status(#{data := #data{config = Config} = Data} = Status) ->
+    Status#{
+        data := #{
+            config => redact_config(Config),
+            transport => Data#data.transport,
+            tag => Data#data.tag,
+            caps => Data#data.caps,
+            backoff => Data#data.backoff,
+            buffer => {redacted, byte_size(Data#data.buffer)},
+            untagged => {redacted, length(Data#data.untagged)}
+        }
+    };
+format_status(Status) ->
+    Status.
+
+redact_config(Config) ->
+    maps:map(
+        fun
+            (K, _) when
+                K =:= credentials; K =:= username; K =:= password; K =:= token; K =:= secret
+            ->
+                '***';
+            (_, V) ->
+                V
+        end,
+        Config
+    ).

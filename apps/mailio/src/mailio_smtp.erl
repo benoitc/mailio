@@ -30,6 +30,8 @@
 -define(MAX_REPLY_LINE, 4096).
 -define(MAX_REPLY_BYTES, 65536).
 -define(TIMEOUT, 30000).
+-define(TRACKED, mailio_smtp_submit).
+-define(BODY_SENT, mailio_smtp_body_sent).
 
 -type config() :: map().
 -type result() :: #{
@@ -43,18 +45,76 @@
 
 -spec submit(config(), binary(), [binary()], iodata()) ->
     {ok, result()} | mailio_error:t().
+submit(_Config, _From, [], _Data) ->
+    %% nothing to send to: no connection is made, and a retry would be the same
+    mailio_error:new(smtp_rejected, <<"there is no recipient">>, #{stage => rcpt_to, rejected => []});
 submit(Config, From, Rcpts, Data) ->
     try
-        C0 = connect(Config),
-        {220, _} = read_reply(C0),
+        %% a setting that is not understood must not end up as plain text
+        lists:member(maps:get(tls, Config, starttls), [true, starttls, false]) orelse
+            throw(
+                {mailio_smtp,
+                    mailio_error:new(smtp_tls_failed, <<"the tls setting is not understood">>, #{})}
+            ),
+        C0 = track(connect(Config)),
+        greeting(C0),
         {C1, Caps} = ehlo(C0, Config),
-        C2 = auth(C1, Config, Caps),
+        C2 = auth(track(C1), Config, Caps),
         session(C2, From, Rcpts, Data)
     catch
         throw:{mailio_smtp, Error} ->
             Error;
         error:{badmatch, {Code, Text}} when is_integer(Code) ->
-            transient(unexpected_reply, #{code => Code, reply => bin(Text)})
+            unexpected(#{code => Code, reply => bin(Text)});
+        Class:_Reason ->
+            %% Whatever else goes wrong is an error value too, and says only what
+            %% kind it was: no detail of the server's data goes into it
+            unexpected(#{class => Class})
+    after
+        erase(?BODY_SENT),
+        release()
+    end.
+
+%% After the message was sent a lost answer means the outcome is unknown; before
+%% it nothing was submitted, so a retry is safe.
+unexpected(Detail) ->
+    case get(?BODY_SENT) of
+        true ->
+            unknown(Detail);
+        _ ->
+            try
+                transient(unexpected_reply, Detail)
+            catch
+                throw:{mailio_smtp, Error} -> Error
+            end
+    end.
+
+%% A service that is not ready says so with 4yz (try later) or 5yz (not for us, as
+%% 554 does): only the first is worth a retry.
+greeting(C) ->
+    case read_reply(C) of
+        {220, _} -> ok;
+        {Code, Text} -> rejected_or_transient(C, greeting, Code, Text, [])
+    end.
+
+%% The newest connection of a submission in progress. Whatever ends the call,
+%% its socket is closed here: a failed TLS upgrade leaves the plain socket
+%% open, and a finished session never closed it.
+track(C) ->
+    put(?TRACKED, C),
+    C.
+
+release() ->
+    case erase(?TRACKED) of
+        #c{mod = M, sock = S} -> catch_all(fun() -> M:close(S) end);
+        undefined -> ok
+    end.
+
+catch_all(F) ->
+    try
+        F()
+    catch
+        _:_ -> ok
     end.
 
 %%====================================================================
@@ -121,7 +181,7 @@ tls_error(R) ->
 
 ehlo(#c{config = Config} = C, Config) ->
     Name = maps:get(ehlo_name, Config, <<"localhost">>),
-    {250, Text} = cmd(C, [<<"EHLO ">>, Name]),
+    Text = read_ehlo(C, Name),
     Caps = caps(Text),
     case {C#c.mod, maps:get(tls, Config, starttls)} of
         {gen_tcp, starttls} ->
@@ -144,13 +204,20 @@ ehlo(#c{config = Config} = C, Config) ->
                 {ok, S} ->
                     ok = ssl:setopts(S, [{packet, line}, {packet_size, ?MAX_REPLY_LINE}]),
                     C2 = C#c{mod = ssl, sock = S},
-                    {250, Text2} = cmd(C2, [<<"EHLO ">>, Name]),
-                    {C2, caps(Text2)};
+                    {C2, caps(read_ehlo(track(C2), Name))};
                 {error, R} ->
                     throw({mailio_smtp, tls_error(R)})
             end;
         _ ->
             {C, Caps}
+    end.
+
+%% EHLO and what the server answers: 250, or a 4yz that asks for a retry, or a
+%% refusal that retrying does not change (RFC 5321, section 4.2.1).
+read_ehlo(C, Name) ->
+    case cmd(C, [<<"EHLO ">>, Name]) of
+        {250, Text} -> Text;
+        {Code, Reply} -> rejected_or_transient(C, ehlo, Code, Reply, [])
     end.
 
 caps(Text) ->
@@ -161,26 +228,27 @@ has(Caps, Word) ->
 
 auth(C, Config, Caps) ->
     case maps:get(credentials, Config, undefined) of
-        undefined -> C;
-        Cred -> auth_with(C, force(Cred), Caps)
+        undefined ->
+            C;
+        Cred ->
+            case mailio_credentials:resolve(Cred, cred_opts(Config)) of
+                {ok, Resolved} ->
+                    auth_with(C, Resolved, Caps);
+                {error, _Why} ->
+                    %% the provider's own words may hold a secret: not repeated
+                    throw(
+                        {mailio_smtp,
+                            mailio_error:new(
+                                smtp_auth_failed,
+                                <<"credentials unavailable">>,
+                                #{}
+                            )}
+                    )
+            end
     end.
 
-force({token_fun, F}) ->
-    case F() of
-        {ok, Cred} ->
-            force(Cred);
-        {error, _Reason} ->
-            throw(
-                {mailio_smtp,
-                    mailio_error:new(
-                        smtp_auth_failed,
-                        <<"credentials unavailable">>,
-                        #{}
-                    )}
-            )
-    end;
-force(Cred) ->
-    Cred.
+cred_opts(#{credentials_timeout := T}) -> #{timeout => T};
+cred_opts(_) -> #{}.
 
 auth_with(C, {oauth2, User, Token}, _Caps) ->
     Init = base64:encode(<<"user=", User/binary, 1, "auth=Bearer ", Token/binary, 1, 1>>),
@@ -236,14 +304,29 @@ session(C, From, Rcpts, Data) ->
     case Accepted of
         [] ->
             _ = cmd_quiet(C, [<<"QUIT">>]),
-            throw(
-                {mailio_smtp,
-                    mailio_error:new(
-                        smtp_rejected,
-                        <<"every recipient was refused">>,
-                        #{stage => rcpt_to, rejected => Rejected}
-                    )}
-            );
+            %% Every recipient answered 4yz: the server asks for a retry (RFC 5321,
+            %% section 4.2.1), and nothing was submitted. Only refusals that are all
+            %% permanent are a rejection.
+            case lists:all(fun(#{code := Cd}) -> Cd >= 400 andalso Cd < 500 end, Rejected) of
+                true ->
+                    throw(
+                        {mailio_smtp,
+                            mailio_error:new(
+                                smtp_transient,
+                                <<"the server deferred every recipient">>,
+                                #{stage => rcpt_to, rejected => Rejected}
+                            )}
+                    );
+                false ->
+                    throw(
+                        {mailio_smtp,
+                            mailio_error:new(
+                                smtp_rejected,
+                                <<"every recipient was refused">>,
+                                #{stage => rcpt_to, rejected => Rejected}
+                            )}
+                    )
+            end;
         _ ->
             ok
     end,
@@ -252,6 +335,7 @@ session(C, From, Rcpts, Data) ->
         {DC, DT} -> rejected_or_transient(C, data, DC, DT, Rejected)
     end,
     %% From here on a lost reply means the outcome is unknown.
+    put(?BODY_SENT, true),
     Body = stuff(iolist_to_binary(Data)),
     case send(C, [Body, <<".\r\n">>]) of
         ok -> ok;

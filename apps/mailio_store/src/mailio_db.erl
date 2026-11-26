@@ -13,7 +13,7 @@
 
 -export([ensure_db/1, open_db/1, close_db/1, delete_db/1]).
 -export([get/2, get_many/2, put/2, put_batch/2, put_batch_strict/2, delete/2, delete/3]).
--export([find/2, find/3, explain/2, by_id_prefix/2]).
+-export([find/2, find/3, explain/2, by_id_prefix/2, fold_id_prefix/5]).
 -export([version_count/2]).
 -export([changes/2, changes/3, subscribe_changes/2, subscribe_path/2, unsubscribe/1]).
 -export([
@@ -26,6 +26,10 @@
 ]).
 
 -export_type([db/0, doc/0, doc_id/0, rev/0, cursor/0, change/0]).
+
+%% How many documents one answer of the database holds when a listing is read
+%% to the end.
+-define(CHUNK, 1000).
 
 -type db() :: binary().
 -type doc() :: map().
@@ -175,12 +179,51 @@ explain(Db, QuerySpec) ->
 
 %% @doc Enumerate documents whose id starts with `Prefix' via barrel's
 %% primary-key range scan (no secondary index needed). Used to list a
-%% collection by its path-style id namespace (e.g. `<<"email/">>').
+%% collection by its path-style id namespace (e.g. `<<"email/">>'). The
+%% database answers in chunks; all of them are read, to the last.
 -spec by_id_prefix(db(), binary()) -> {ok, [doc()]} | {error, term()}.
 by_id_prefix(Db, Prefix) ->
-    case unwrap(barrel_docdb:find(Db, #{id_prefix => Prefix}, #{limit => 1000000})) of
-        {ok, Docs, _Meta} -> {ok, Docs};
+    Fun = fun(Docs, Acc) -> {ok, [Docs | Acc]} end,
+    case fold_id_prefix(Db, Prefix, ?CHUNK, Fun, []) of
+        {ok, Chunks} -> {ok, lists:append(lists:reverse(Chunks))};
         {error, _} = Err -> Err
+    end.
+
+%% @doc Visit the documents whose id starts with `Prefix', `Batch' at a time,
+%% following the database's continuation to the end. `Fun(Docs, Acc)' answers
+%% `{ok, Acc1}' to go on or `{stop, Acc1}' to end the walk, which is then
+%% `{stopped, Acc1}'. Result: `{ok, Acc}' after the last batch.
+-spec fold_id_prefix(
+    db(), binary(), pos_integer(), fun(([doc()], Acc) -> {ok, Acc} | {stop, Acc}), Acc
+) ->
+    {ok, Acc} | {stopped, Acc} | {error, term()}
+when
+    Acc :: term().
+fold_id_prefix(Db, Prefix, Batch, Fun, Acc) ->
+    fold_id_prefix(Db, Prefix, Batch, Fun, Acc, undefined).
+
+fold_id_prefix(Db, Prefix, Batch, Fun, Acc, Token) ->
+    Opts0 = #{chunk_size => Batch},
+    Opts =
+        case Token of
+            undefined -> Opts0;
+            _ -> Opts0#{continuation => Token}
+        end,
+    case unwrap(barrel_docdb:find(Db, #{id_prefix => Prefix, limit => Batch}, Opts)) of
+        {ok, Docs, Meta} ->
+            case Fun(Docs, Acc) of
+                {stop, Acc1} ->
+                    {stopped, Acc1};
+                {ok, Acc1} ->
+                    case Meta of
+                        #{has_more := true, continuation := Next} ->
+                            fold_id_prefix(Db, Prefix, Batch, Fun, Acc1, Next);
+                        _ ->
+                            {ok, Acc1}
+                    end
+            end;
+        {error, _} = Err ->
+            Err
     end.
 
 %%====================================================================

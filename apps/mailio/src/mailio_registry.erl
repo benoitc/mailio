@@ -81,7 +81,7 @@ init([]) ->
     ?TABLE = ets:new(?TABLE, [
         named_table,
         set,
-        public,
+        protected,
         {read_concurrency, true}
     ]),
     {ok, #{monitors => #{}, names => #{}}}.

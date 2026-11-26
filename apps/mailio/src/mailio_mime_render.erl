@@ -19,6 +19,8 @@
 %% a container (`parts' key). Recognized fields: type, subtype, params,
 %% encoding, charset, headers (extra non-content headers), disposition,
 %% filename.
+-define(WORD_BYTES, 36).
+
 -spec render(map()) -> binary().
 render(Part0) ->
     %% Fix the boundary once so the header and body delimiters agree.
@@ -165,20 +167,79 @@ chunk64(B64, Acc) ->
     <<Line:76/binary, Rest/binary>> = B64,
     chunk64(Rest, <<Acc/binary, Line/binary, "\r\n">>).
 
-%% Minimal quoted-printable encoder (escapes non-printable and '=').
-encode_qp(Body) -> encode_qp(Body, <<>>).
-encode_qp(<<>>, Acc) ->
-    Acc;
-encode_qp(<<$\r, $\n, Rest/binary>>, Acc) ->
-    encode_qp(Rest, <<Acc/binary, "\r\n">>);
-encode_qp(<<C, Rest/binary>>, Acc) ->
-    case qp_printable(C) of
-        true -> encode_qp(Rest, <<Acc/binary, C>>);
-        false -> encode_qp(Rest, <<Acc/binary, $=, (hex_hi(C)), (hex_lo(C))>>)
+%% Quoted-printable (RFC 2045, section 6.7): lines of at most 76 characters, with a
+%% soft line break (`=' at the end of a line) where a line would be longer, and
+%% the space or tab that ends a line written as an escape. Line breaks of the
+%% text (CRLF) are kept as they are. Runs of text that needs no escape are copied
+%% as slices of the input, so a very long line costs no more than its own size.
+encode_qp(Body) ->
+    Lines = binary:split(Body, <<"\r\n">>, [global]),
+    iolist_to_binary(lists:join(<<"\r\n">>, [qp(L, 0) || L <- Lines])).
+
+qp(<<>>, _Len) ->
+    [];
+qp(Bin, Len) ->
+    Size = byte_size(Bin),
+    %% Only as far as this line has room is looked at, so that a long line is
+    %% scanned once, a line at a time, and not once for every line of it.
+    case qp_run(Bin, Size, 0, 76 - Len) of
+        0 ->
+            Limit = (76 - Len) div 3 + 1,
+            Unsafe = qp_unsafe_run(Bin, Size, 0, Limit),
+            case Unsafe =:= Size andalso Len + 3 * Unsafe =< 76 of
+                true ->
+                    [qp_escapes(Bin)];
+                false ->
+                    Take = min(Unsafe, (75 - Len) div 3),
+                    case Take =< 0 of
+                        true ->
+                            [<<"=\r\n">> | qp(Bin, 0)];
+                        false ->
+                            [
+                                qp_escapes(binary:part(Bin, 0, Take))
+                                | qp(binary:part(Bin, Take, Size - Take), Len + 3 * Take)
+                            ]
+                    end
+            end;
+        Run when Run =:= Size, Len + Run =< 76 ->
+            [Bin];
+        Run ->
+            Take = min(Run, 75 - Len),
+            case Take =< 0 of
+                true ->
+                    [<<"=\r\n">> | qp(Bin, 0)];
+                false ->
+                    [
+                        binary:part(Bin, 0, Take)
+                        | qp(binary:part(Bin, Take, Size - Take), Len + Take)
+                    ]
+            end
     end.
 
-qp_printable($=) -> false;
-qp_printable(C) -> C >= 33 andalso C =< 126.
+%% how many bytes from here are written as they are, looking at no more than
+%% `Limit': printable ASCII except `=', and a space or tab that does not end the line
+qp_run(Bin, Size, I, Limit) when I < Size, I < Limit ->
+    case qp_literal(binary:at(Bin, I), I =:= Size - 1) of
+        true -> qp_run(Bin, Size, I + 1, Limit);
+        false -> I
+    end;
+qp_run(_Bin, _Size, I, _Limit) ->
+    I.
+
+qp_literal(C, _AtEnd) when C =:= $=; C < 32; C > 126 -> false;
+qp_literal(C, true) when C =:= $\s; C =:= $\t -> false;
+qp_literal(_, _) -> true.
+
+qp_escapes(Bin) -> <<<<$=, (hex_hi(C)), (hex_lo(C))>> || <<C>> <= Bin>>.
+
+%% how many bytes from here are written as escapes, looking at no more than `Limit'
+qp_unsafe_run(Bin, Size, I, Limit) when I < Size, I < Limit ->
+    case qp_literal(binary:at(Bin, I), I =:= Size - 1) of
+        false -> qp_unsafe_run(Bin, Size, I + 1, Limit);
+        true -> I
+    end;
+qp_unsafe_run(_Bin, _Size, I, _Limit) ->
+    I.
 
 hex_hi(C) -> hex_digit(C bsr 4).
 hex_lo(C) -> hex_digit(C band 16#0F).
@@ -220,7 +281,47 @@ build_headers(Spec) ->
         end,
     Mime = [{<<"MIME-Version">>, <<"1.0">>}],
     Extra = maps:get(headers, Spec, []),
-    Base ++ Cc ++ Subj ++ MsgId ++ Mime ++ Extra.
+    Base ++ Cc ++ Subj ++ MsgId ++ date_header(Spec, Extra) ++ Mime ++ Extra.
+
+%% A message has a Date (RFC 5322, section 3.6.1): the one the caller gave as the
+%% `date' (seconds since the epoch, UTC) or among the headers, else now.
+date_header(Spec, Extra) ->
+    Given = [N || {N, _} <- Extra, string:lowercase(N) =:= <<"date">>],
+    case Given of
+        [_ | _] ->
+            [];
+        [] ->
+            Secs = maps:get(date, Spec, erlang:system_time(second)),
+            [{<<"Date">>, format_date(Secs)}]
+    end.
+
+%% "Wed, 25 Nov 2026 15:04:05 +0000"
+-spec format_date(integer()) -> binary().
+format_date(Secs) ->
+    {{Y, Mo, D}, {H, Mi, S}} = calendar:gregorian_seconds_to_datetime(
+        Secs + calendar:datetime_to_gregorian_seconds({{1970, 1, 1}, {0, 0, 0}})
+    ),
+    Days = {<<"Mon">>, <<"Tue">>, <<"Wed">>, <<"Thu">>, <<"Fri">>, <<"Sat">>, <<"Sun">>},
+    Months = {
+        <<"Jan">>,
+        <<"Feb">>,
+        <<"Mar">>,
+        <<"Apr">>,
+        <<"May">>,
+        <<"Jun">>,
+        <<"Jul">>,
+        <<"Aug">>,
+        <<"Sep">>,
+        <<"Oct">>,
+        <<"Nov">>,
+        <<"Dec">>
+    },
+    Day = element(calendar:day_of_the_week(Y, Mo, D), Days),
+    iolist_to_binary(
+        io_lib:format("~s, ~2..0w ~s ~4..0w ~2..0w:~2..0w:~2..0w +0000", [
+            Day, D, element(Mo, Months), Y, H, Mi, S
+        ])
+    ).
 
 build_content(Spec, Headers) ->
     Text = maps:get(text, Spec, <<>>),
@@ -258,10 +359,19 @@ build_content(Spec, Headers) ->
             }
     end.
 
+%% 7bit text has lines of at most 998 characters (RFC 5322, section 2.1.1); text
+%% with longer ones, or with anything that is not ASCII, is encoded.
 encoding_for(Bin) ->
     case is_ascii(Bin) of
-        true -> <<"7bit">>;
-        false -> <<"base64">>
+        false ->
+            <<"base64">>;
+        true ->
+            case
+                lists:any(fun(L) -> byte_size(L) > 998 end, binary:split(Bin, <<"\n">>, [global]))
+            of
+                true -> <<"quoted-printable">>;
+                false -> <<"7bit">>
+            end
     end.
 
 is_ascii(Bin) ->
@@ -276,8 +386,83 @@ is_ascii(Bin) ->
 -spec encode_unstructured(binary()) -> binary().
 encode_unstructured(Value) ->
     case is_ascii(Value) of
-        true -> Value;
-        false -> <<"=?UTF-8?B?", (base64:encode(Value))/binary, "?=">>
+        true -> fold_ascii(Value);
+        false -> encoded_words(Value)
+    end.
+
+%% Encoded words are at most 75 characters (RFC 2047, section 2): 45 bytes of
+%% text make 60 of base64, and the words are folded onto lines of their own. A
+%% word never splits a UTF-8 character.
+encoded_words(Value0) ->
+    Value = scrub_utf8(Value0),
+    iolist_to_binary(
+        lists:join(<<"\r\n ">>, [encoded_word(Chunk) || Chunk <- utf8_chunks(Value, ?WORD_BYTES)])
+    ).
+
+%% Bytes that are not UTF-8 are replaced by U+FFFD, so that what is encoded is
+%% text and cutting it between characters is always possible.
+scrub_utf8(Bin) ->
+    iolist_to_binary(scrub_utf8(Bin, [])).
+
+scrub_utf8(Bin, Acc) ->
+    case unicode:characters_to_binary(Bin, utf8, utf8) of
+        Good when is_binary(Good) ->
+            lists:reverse([Good | Acc]);
+        {error, Good, <<_Bad, Rest/binary>>} ->
+            scrub_utf8(Rest, [<<16#FFFD/utf8>>, Good | Acc]);
+        {incomplete, Good, _Part} ->
+            lists:reverse([<<16#FFFD/utf8>>, Good | Acc])
+    end.
+
+encoded_word(Chunk) -> <<"=?UTF-8?B?", (base64:encode(Chunk))/binary, "?=">>.
+
+utf8_chunks(<<>>, _Max) ->
+    [];
+utf8_chunks(Bin, Max) when byte_size(Bin) =< Max ->
+    [Bin];
+utf8_chunks(Bin, Max) ->
+    Cut = utf8_cut(Bin, Max),
+    <<Head:Cut/binary, Rest/binary>> = Bin,
+    [Head | utf8_chunks(Rest, Max)].
+
+%% the longest prefix of at most Max bytes that ends on a character boundary
+utf8_cut(Bin, Max) ->
+    case Bin of
+        <<_:Max/binary, Next, _/binary>> when Next band 16#C0 =:= 16#80 ->
+            max(1, utf8_back(Bin, Max - 1));
+        _ ->
+            Max
+    end.
+
+utf8_back(Bin, N) ->
+    <<_:N/binary, C, _/binary>> = Bin,
+    case C band 16#C0 =:= 16#80 of
+        true -> utf8_back(Bin, N - 1);
+        false -> N
+    end.
+
+%% Text with only ASCII is folded at spaces onto lines that stay under the 78 of
+%% RFC 5322, section 2.2.3, with the header name in front. A word with no space that is longer than a line
+%% allows is sent as encoded words instead.
+fold_ascii(Value) when byte_size(Value) =< 68 ->
+    Value;
+fold_ascii(Value) ->
+    Words = binary:split(Value, <<" ">>, [global]),
+    %% spaces at the ends or in a row cannot be folded without changing them, and
+    %% a word that is longer than a line cannot be folded at all
+    case lists:any(fun(W) -> byte_size(W) =:= 0 orelse byte_size(W) > 68 end, Words) of
+        true -> encoded_words(Value);
+        false -> fold_words(Words, <<>>, [])
+    end.
+
+fold_words([], Line, Acc) ->
+    iolist_to_binary(lists:join(<<"\r\n ">>, lists:reverse([Line | Acc])));
+fold_words([W | Rest], <<>>, Acc) ->
+    fold_words(Rest, W, Acc);
+fold_words([W | Rest], Line, Acc) ->
+    case byte_size(Line) + 1 + byte_size(W) =< 68 of
+        true -> fold_words(Rest, <<Line/binary, " ", W/binary>>, Acc);
+        false -> fold_words(Rest, W, [Line | Acc])
     end.
 
 -spec format_address(mailio_rfc5322:address()) -> binary().
@@ -287,23 +472,35 @@ format_address(#{email := Email} = Addr) ->
             Email;
         Name ->
             EncName = encode_display_name(Name),
-            <<EncName/binary, " <", Email/binary, ">">>
+            %% An encoded name leaves the address on a line of its own, and so does
+            %% a name and address that would not fit one line with the header
+            %% name in front (RFC 2047, section 2: 76 characters).
+            Sep =
+                case
+                    not is_ascii(Name) orelse
+                        binary:match(EncName, <<"\r\n">>) =/= nomatch orelse
+                        byte_size(EncName) + byte_size(Email) + 14 > 76
+                of
+                    true -> <<"\r\n ">>;
+                    false -> <<" ">>
+                end,
+            <<EncName/binary, Sep/binary, "<", Email/binary, ">">>
     end.
 
 -spec format_addresses([mailio_rfc5322:address()]) -> binary().
 format_addresses(Addrs) ->
     Formatted = [format_address(A) || A <- Addrs],
-    iolist_to_binary(lists:join(<<", ">>, Formatted)).
+    iolist_to_binary(lists:join(<<",\r\n ">>, Formatted)).
 
 encode_display_name(Name) ->
-    case is_ascii(Name) of
+    case is_ascii(Name) andalso byte_size(Name) =< 60 of
         true ->
             case needs_quoting(Name) of
                 true -> <<"\"", (escape_quotes(Name))/binary, "\"">>;
                 false -> Name
             end;
         false ->
-            <<"=?UTF-8?B?", (base64:encode(Name))/binary, "?=">>
+            encoded_words(Name)
     end.
 
 %% Title-case a lowercased header name for nicer output (best effort).

@@ -45,14 +45,18 @@
 ]).
 
 %% Response decoding
--export([read_response/1, read_response/2, parse_response/1]).
+-export([read_response/1, read_response/2, read_response/3, parse_response/1]).
+
+%% Treat as opaque: only what read_response/3 returned, or `start`.
+-type resume() :: start | {non_neg_integer(), non_neg_integer()}.
+-export_type([resume/0]).
 
 -define(MAX_LITERAL, 67108864).
 -define(MAX_LINE, 65536).
 -define(MAX_RESPONSE, 100663296).
 
 %% Helpers exposed for the FSM/adapter
--export([quote/1, format_seqset/1, parse_uid_set/1]).
+-export([quote/1, format_seqset/1, parse_uid_ranges/1, expand_uid_ranges/2, uid_count/1]).
 
 -export_type([response/0, token/0]).
 
@@ -241,14 +245,32 @@ read_response(Buffer) ->
 -spec read_response(binary(), map()) ->
     {ok, binary(), binary()} | more | {error, response_too_large}.
 read_response(Buffer, Opts) ->
+    case read_response(Buffer, Opts, start) of
+        {more, _} -> more;
+        Other -> Other
+    end.
+
+%% @doc Like {@link read_response/2}, resuming a scan. Start with `start'. When
+%% a response is not complete the answer is `{more, Resume}'; give `Resume'
+%% back with the longer buffer and the work continues where it stopped, instead
+%% of from the first byte. A response that arrives in small pieces, however
+%% many lines and literals it has, is then framed in linear work.
+-spec read_response(binary(), map(), resume()) ->
+    {ok, binary(), binary()} | {more, resume()} | {error, response_too_large}.
+read_response(Buffer, Opts, Resume) ->
     Limits = #{
         literal => maps:get(max_literal, Opts, ?MAX_LITERAL),
         line => maps:get(max_line, Opts, ?MAX_LINE),
         response => maps:get(max_response, Opts, ?MAX_RESPONSE)
     },
-    case logical_length(Buffer, 0, Limits) of
-        more ->
-            more;
+    {Pos, Scan} =
+        case Resume of
+            start -> {0, 0};
+            {P, S} -> {P, S}
+        end,
+    case logical_length(Buffer, Pos, Limits, Scan) of
+        {more, _} = More ->
+            More;
         {error, _} = Err ->
             Err;
         {ok, TotalLen, CrlfLen} ->
@@ -258,27 +280,43 @@ read_response(Buffer, Opts) ->
     end.
 
 %% Walk physical lines, jumping over literal payloads, until a CRLF that is
-%% not preceded by a literal spec. Returns the total length up to and
-%% including that terminating CRLF.
-logical_length(Buffer, Pos, Limits) ->
-    case find_crlf(Buffer, Pos) of
+%% not preceded by a literal spec. `Pos' is where the physical line being read
+%% starts and `Scan' where the search for its CRLF goes on. Returns the total
+%% length up to and including that terminating CRLF.
+logical_length(Buffer, Pos, _Limits, _Scan) when byte_size(Buffer) < Pos ->
+    %% still inside a literal's payload: nothing to look at yet
+    {more, {Pos, Pos}};
+logical_length(Buffer, Pos, Limits, Scan) ->
+    case find_crlf(Buffer, max(Pos, Scan)) of
         nomatch ->
-            case byte_size(Buffer) - Pos > maps:get(line, Limits) of
+            %% A CR at the very end may be the first half of the CRLF; it does not
+            %% count against the line, so the limit does not depend on where the
+            %% packet ended.
+            Size = byte_size(Buffer),
+            Pending =
+                case Size > Pos andalso binary:last(Buffer) =:= $\r of
+                    true -> 1;
+                    false -> 0
+                end,
+            %% The response will be at least what is here plus its CRLF, so one that
+            %% cannot end within the limit is refused now.
+            case
+                Size - Pos - Pending > map_get(line, Limits) orelse
+                    Size - Pending + 2 > map_get(response, Limits)
+            of
                 true -> {error, response_too_large};
-                false -> more
+                false -> {more, {Pos, max(Pos, Size - 1)}}
             end;
         CrlfPos when CrlfPos - Pos > map_get(line, Limits) ->
             {error, response_too_large};
         CrlfPos ->
             case literal_before(Buffer, Pos, CrlfPos) of
                 {literal, N} ->
-                    DataStart = CrlfPos + 2,
-                    DataEnd = DataStart + N,
+                    DataEnd = CrlfPos + 2 + N,
                     if
                         N > map_get(literal, Limits) -> {error, response_too_large};
                         DataEnd > map_get(response, Limits) -> {error, response_too_large};
-                        byte_size(Buffer) >= DataEnd -> logical_length(Buffer, DataEnd, Limits);
-                        true -> more
+                        true -> logical_length(Buffer, DataEnd, Limits, DataEnd)
                     end;
                 none ->
                     case CrlfPos + 2 > map_get(response, Limits) of
@@ -288,10 +326,10 @@ logical_length(Buffer, Pos, Limits) ->
             end
     end.
 
-find_crlf(Buffer, Pos) when Pos + 1 < byte_size(Buffer) ->
-    case Buffer of
-        <<_:Pos/binary, "\r\n", _/binary>> -> Pos;
-        _ -> find_crlf(Buffer, Pos + 1)
+find_crlf(Buffer, Pos) when Pos < byte_size(Buffer) ->
+    case binary:match(Buffer, <<"\r\n">>, [{scope, {Pos, byte_size(Buffer) - Pos}}]) of
+        {At, 2} -> At;
+        nomatch -> nomatch
     end;
 find_crlf(_Buffer, _Pos) ->
     nomatch.
@@ -378,7 +416,10 @@ keyword_response(<<"LSUB">>, Rest) ->
 keyword_response(<<"STATUS">>, Rest) ->
     parse_status(Rest);
 keyword_response(<<"SEARCH">>, Rest) ->
-    {search, [N || {number, N} <- tokenize(Rest)]};
+    case parse_search(Rest) of
+        {ok, Numbers} -> {search, Numbers};
+        error -> {other, <<"SEARCH ", Rest/binary>>}
+    end;
 keyword_response(<<"VANISHED">>, Rest) ->
     parse_vanished(Rest);
 keyword_response(Status, Rest) when
@@ -428,17 +469,102 @@ find_list([{list, L} | _]) -> L;
 find_list([_ | Rest]) -> find_list(Rest);
 find_list([]) -> [].
 
+%% VANISHED [(EARLIER)] known-uids (RFC 7162, section 3.2.10). Read from the
+%% bytes themselves, not from tokens: the marker is not case sensitive, and a
+%% UID must be exactly what RFC 3501 allows.
 parse_vanished(Bin) ->
-    case tokenize(Bin) of
-        [{list, [{atom, <<"EARLIER">>}]} | Rest] ->
-            {vanished, true, uid_set_from_tokens(Rest)};
-        Toks ->
-            {vanished, false, uid_set_from_tokens(Toks)}
+    Trimmed = mailio_ascii:trim_leading(Bin),
+    case Trimmed of
+        <<"(", _/binary>> ->
+            %% the marker is exactly (EARLIER), in any case, then a space
+            case Trimmed of
+                <<Marker:9/binary, After/binary>> ->
+                    case {mailio_ascii:upper(Marker), After} of
+                        {<<"(EARLIER)">>, <<" ", _/binary>>} ->
+                            vanished_report(true, Bin, After);
+                        _ ->
+                            {other, <<"VANISHED ", Bin/binary>>}
+                    end;
+                _ ->
+                    {other, <<"VANISHED ", Bin/binary>>}
+            end;
+        _ ->
+            vanished_report(false, Bin, Trimmed)
     end.
 
-uid_set_from_tokens([{atom, Set} | _]) -> parse_uid_set(Set);
-uid_set_from_tokens([{number, N} | _]) -> [N];
-uid_set_from_tokens(_) -> [].
+%% The UIDs are required, and all of them must be well formed: a report that is
+%% not read in full is not acted on in part.
+vanished_report(Earlier, Whole, Rest) ->
+    %% one set and nothing after it (spaces apart)
+    case binary:split(mailio_ascii:trim(Rest), [<<" ">>, <<"\t">>]) of
+        [Set] when Set =/= <<>> ->
+            case parse_uid_ranges_strict(Set) of
+                {ok, Ranges} -> {vanished, Earlier, Ranges};
+                error -> {other, <<"VANISHED ", Whole/binary>>}
+            end;
+        _ ->
+            {other, <<"VANISHED ", Whole/binary>>}
+    end.
+
+%% `* SEARCH' and numbers, with (MODSEQ n) after them when CONDSTORE is in use
+%% (RFC 7162, section 3.1.6). Nothing else is part of an answer, and one that
+%% holds anything else is not read in part.
+parse_search(Rest) ->
+    {Numbers, Tail} =
+        case binary:match(Rest, <<"(">>) of
+            nomatch -> {Rest, <<>>};
+            {At, _} -> {binary:part(Rest, 0, At), binary:part(Rest, At, byte_size(Rest) - At)}
+        end,
+    Words = binary:split(Numbers, [<<" ">>, <<"\t">>], [global, trim_all]),
+    Spaced = Tail =:= <<>> orelse Numbers =:= <<>> orelse lists:member(binary:last(Numbers), " \t"),
+    case Spaced andalso search_modseq(mailio_ascii:trim(Tail)) of
+        false -> error;
+        %% the suffix is left out when nothing matched (RFC 7162, section 3.1.6):
+        %% one with no numbers before it is not an empty answer
+        ok when Tail =/= <<>>, Words =:= [] -> error;
+        ok -> search_numbers(Words, []);
+        error -> error
+    end.
+
+search_modseq(<<>>) ->
+    ok;
+search_modseq(<<"(", Rest/binary>>) ->
+    case binary:split(Rest, <<")">>) of
+        [Inner, <<>>] ->
+            case binary:split(Inner, <<" ">>, [global]) of
+                [Name, Value] ->
+                    case {string:uppercase(Name), modseq_value(Value)} of
+                        {<<"MODSEQ">>, true} -> ok;
+                        _ -> error
+                    end;
+                _ ->
+                    error
+            end;
+        _ ->
+            error
+    end;
+search_modseq(_) ->
+    error.
+
+%% A mod-sequence is a number from 1 to 2^63-1 (RFC 7162, section 7); leading
+%% zeros are digits like any other, and the value is checked after them.
+modseq_value(Bin) ->
+    digits(Bin) andalso
+        case string:trim(Bin, leading, "0") of
+            <<>> -> false;
+            Sig -> byte_size(Sig) =< 19 andalso binary_to_integer(Sig) =< 9223372036854775807
+        end.
+
+digits(<<>>) -> false;
+digits(Bin) -> lists:all(fun(C) -> C >= $0 andalso C =< $9 end, binary_to_list(Bin)).
+
+search_numbers([], Acc) ->
+    {ok, lists:reverse(Acc)};
+search_numbers([Word | Rest], Acc) ->
+    case uid(Word) of
+        {ok, N} -> search_numbers(Rest, [N | Acc]);
+        error -> error
+    end.
 
 %%====================================================================
 %% resp-text and codes:  "[CODE args] human text"
@@ -464,10 +590,24 @@ split_bracket(<<>>, _Acc) -> none.
 
 parse_code(CodeBin) ->
     {Name, Args} = split_word(CodeBin),
+    Upper = string:uppercase(Name),
     case tokenize(Args) of
-        [] -> {string:uppercase(Name)};
-        Toks -> {string:uppercase(Name), Toks}
+        [] ->
+            {Upper};
+        Toks ->
+            case nz_number_code(Upper) andalso not valid_nz_number(mailio_ascii:trim(Args)) of
+                %% not a number from 1 as written: it is not read as one
+                true -> {Upper, [{invalid, Args}]};
+                false -> {Upper, Toks}
+            end
     end.
+
+%% Codes whose argument is an nz-number (RFC 3501, section 9).
+nz_number_code(<<"UIDNEXT">>) -> true;
+nz_number_code(<<"UIDVALIDITY">>) -> true;
+nz_number_code(_) -> false.
+
+valid_nz_number(Bin) -> uid(Bin) =/= error.
 
 %%====================================================================
 %% FETCH item interpretation
@@ -631,17 +771,76 @@ format_seqset(Bin) when is_binary(Bin) -> Bin.
 to_set_bound('*') -> "*";
 to_set_bound(N) when is_integer(N) -> integer_to_binary(N).
 
-%% @doc Parse a uid-set ("1,3:5,9") into an expanded sorted list.
--spec parse_uid_set(binary()) -> [integer()].
-parse_uid_set(Bin) ->
+%% @doc Parse a uid-set ("1,3:5,9") into sorted, merged `{Lo, Hi}' ranges. Either
+%% end of `A:B' may come first (RFC 3501, section 9). Parts that are not
+%% numbers, or are larger than a 32-bit UID, are ignored. Nothing is expanded,
+%% so a short set cannot allocate a large list.
+-spec parse_uid_ranges(binary()) -> [{pos_integer(), pos_integer()}].
+parse_uid_ranges(Bin) ->
     Parts = binary:split(Bin, <<",">>, [global]),
-    lists:usort(lists:flatmap(fun parse_uid_range/1, Parts)).
+    merge_ranges(lists:sort(lists:filtermap(fun parse_uid_range/1, Parts))).
 
 parse_uid_range(Part) ->
     case binary:split(Part, <<":">>) of
-        [A, B] -> lists:seq(binary_to_integer(A), binary_to_integer(B));
-        [<<>>] -> [];
-        [Single] -> [binary_to_integer(Single)]
+        [A, B] ->
+            case {uid(A), uid(B)} of
+                {{ok, X}, {ok, Y}} -> {true, {min(X, Y), max(X, Y)}};
+                _ -> false
+            end;
+        [Single] ->
+            case uid(Single) of
+                {ok, X} -> {true, {X, X}};
+                error -> false
+            end
+    end.
+
+%% A UID is 1*DIGIT without a sign or a leading zero, from 1 to 2^32-1
+%% (RFC 3501, section 9: nz-number). The bytes are checked before they become a
+%% number, because the conversion alone also accepts "+2" and "01".
+uid(<<First, Rest/binary>> = Bin) when First >= $1, First =< $9, byte_size(Bin) =< 10 ->
+    case lists:all(fun(C) -> C >= $0 andalso C =< $9 end, binary_to_list(Rest)) of
+        true ->
+            case binary_to_integer(Bin) of
+                N when N =< 4294967295 -> {ok, N};
+                _ -> error
+            end;
+        false ->
+            error
+    end;
+uid(_) ->
+    error.
+
+merge_ranges([{A, B}, {C, D} | Rest]) when C =< B + 1 ->
+    merge_ranges([{A, max(B, D)} | Rest]);
+merge_ranges([R | Rest]) ->
+    [R | merge_ranges(Rest)];
+merge_ranges([]) ->
+    [].
+
+%% Like parse_uid_ranges/1, but an empty set, or any part that is not a UID or a
+%% range of UIDs, is an error.
+parse_uid_ranges_strict(<<>>) ->
+    error;
+parse_uid_ranges_strict(Bin) ->
+    Parts = binary:split(Bin, <<",">>, [global]),
+    Parsed = [parse_uid_range(P) || P <- Parts],
+    case lists:all(fun(R) -> R =/= false end, Parsed) of
+        true -> {ok, merge_ranges(lists:sort([R || {true, R} <- Parsed]))};
+        false -> error
+    end.
+
+%% @doc How many UIDs the ranges stand for.
+-spec uid_count([{integer(), integer()}]) -> non_neg_integer().
+uid_count(Ranges) ->
+    lists:sum([Hi - Lo + 1 || {Lo, Hi} <- Ranges]).
+
+%% @doc The UIDs of the ranges as a list, unless there are more than `Max'.
+-spec expand_uid_ranges([{integer(), integer()}], non_neg_integer()) ->
+    {ok, [integer()]} | {error, too_many}.
+expand_uid_ranges(Ranges, Max) ->
+    case uid_count(Ranges) > Max of
+        true -> {error, too_many};
+        false -> {ok, lists:append([lists:seq(Lo, Hi) || {Lo, Hi} <- Ranges])}
     end.
 
 %%====================================================================
@@ -687,7 +886,6 @@ token_to_bin({number, N}) -> integer_to_binary(N);
 token_to_bin(nil) -> <<>>;
 token_to_bin(_) -> <<>>.
 
-is_all_digits(<<>>) -> false;
 is_all_digits(Bin) -> is_all_digits_1(Bin).
 is_all_digits_1(<<>>) -> true;
 is_all_digits_1(<<D, Rest/binary>>) when D >= $0, D =< $9 -> is_all_digits_1(Rest);

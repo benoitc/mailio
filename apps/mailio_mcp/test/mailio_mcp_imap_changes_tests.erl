@@ -208,3 +208,64 @@ no_checkpoint_is_unsupported_test() ->
 pop3_has_no_idle_test() ->
     Acc = #{incoming => #{protocol => pop3}},
     ?assertEqual(unsupported, mailio_mcp_adapter:wait_for_change(Acc, <<"INBOX">>, #{}, 1000)).
+
+%% A VANISHED report that lists nothing is not a report of no removals: the
+%% mailbox is compared in full, and the removal is found.
+an_unreadable_vanished_report_falls_back_to_a_full_comparison_test() ->
+    with(fun(Srv, Acc) ->
+        Snap = baseline(Acc),
+        ok = mailio_fake_imap:expunge(Srv, 100),
+        ok = mailio_fake_imap:set_option(Srv, bad_vanished, true),
+        {ok, R} = changes(Acc, Snap),
+        ?assertEqual([100], maps:get(removed, R))
+    end).
+
+%% A flag listing that the server refuses is an error: it must not read as a
+%% mailbox with nothing in it, which would report every known message removed.
+a_failed_flag_listing_is_an_error_not_an_empty_mailbox_test() ->
+    with(fun(Srv, Acc) ->
+        Snap = baseline(Acc),
+        ok = mailio_fake_imap:set_option(Srv, fail_flags_fetch, true),
+        ?assertMatch({error, _}, changes(Acc, Snap#{modseq := undefined}))
+    end).
+
+%% A snapshot never holds more than `max_snapshot' entries, however the change
+%% was found: one more delivery does not make it one bigger.
+a_snapshot_stays_within_its_limit_test() ->
+    with(fun(Srv, Acc) ->
+        application:set_env(mailio_mcp, limits, #{max_snapshot => 2}),
+        try
+            Snap = baseline(Acc),
+            ?assertEqual(2, maps:size(maps:get(flags, Snap))),
+            ok = mailio_fake_imap:deliver(Srv, <<"Third message">>),
+            {ok, R} = changes(Acc, Snap),
+            %% nothing was removed: UID 100 fell out of the capped window only
+            ?assertEqual([], maps:get(removed, R)),
+            Snap2 = maps:get(snapshot, R),
+            ?assert(maps:size(maps:get(flags, Snap2)) =< 2),
+            ?assert(maps:get(partial, Snap2))
+        after
+            application:unset_env(mailio_mcp, limits)
+        end
+    end).
+
+%% A message that comes back into the capped window was there before: it is not
+%% a new one.
+a_message_entering_the_capped_window_is_not_added_test() ->
+    with(fun(Srv, Acc) ->
+        application:set_env(mailio_mcp, limits, #{max_snapshot => 2}),
+        try
+            Snap = baseline(Acc),
+            ok = mailio_fake_imap:deliver(Srv, <<"Third message">>),
+            {ok, R1} = changes(Acc, Snap),
+            Snap2 = maps:get(snapshot, R1),
+            ?assertEqual([101, 102], lists:sort(maps:keys(maps:get(flags, Snap2)))),
+            ok = mailio_fake_imap:expunge(Srv, 102),
+            {ok, R2} = changes(Acc, Snap2),
+            ?assertEqual([102], maps:get(removed, R2)),
+            ?assertEqual([], maps:get(added, R2)),
+            ?assertEqual(0, maps:get(added_total, R2))
+        after
+            application:unset_env(mailio_mcp, limits)
+        end
+    end).

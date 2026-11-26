@@ -154,11 +154,17 @@ mailbox_id(ImapName) -> ImapName.
 -spec encode_state(#{
     uidvalidity := non_neg_integer(),
     highestmodseq => non_neg_integer() | undefined,
-    uidnext := non_neg_integer()
+    uidnext := non_neg_integer(),
+    page => undefined | {added | updated, pos_integer(), non_neg_integer() | undefined}
 }) -> binary().
 encode_state(#{uidvalidity := UidValidity, uidnext := UidNext} = S) ->
     ModSeq = maps:get(highestmodseq, S, undefined),
-    term_to_binary({imap_state, 1, UidValidity, ModSeq, UidNext}).
+    case maps:get(page, S, undefined) of
+        undefined ->
+            term_to_binary({imap_state, 1, UidValidity, ModSeq, UidNext});
+        Page ->
+            term_to_binary({imap_state, 2, UidValidity, ModSeq, UidNext, Page})
+    end.
 
 %% @doc Decode an adapter state binary (or `initial').
 -spec decode_state(binary() | initial) ->
@@ -173,6 +179,13 @@ decode_state(Bin) when is_binary(Bin) ->
     try binary_to_term(Bin, [safe]) of
         {imap_state, 1, UidValidity, ModSeq, UidNext} ->
             #{uidvalidity => UidValidity, highestmodseq => ModSeq, uidnext => UidNext};
+        {imap_state, 2, UidValidity, ModSeq, UidNext, Page} ->
+            #{
+                uidvalidity => UidValidity,
+                highestmodseq => ModSeq,
+                uidnext => UidNext,
+                page => Page
+            };
         _ ->
             decode_state(initial)
     catch
