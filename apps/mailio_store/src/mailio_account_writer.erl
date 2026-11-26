@@ -28,6 +28,9 @@
 -export([gc_blobs/2, migrate_blobs/2]).
 -export([set_counters/4, patch/3]).
 -export([uidmap_id/3, lookup_uid/3]).
+-ifdef(TEST).
+-export([deleted/1]).
+-endif.
 -export([init/1, handle_call/3, handle_cast/2, handle_info/2, terminate/2]).
 
 -record(state, {
@@ -153,12 +156,26 @@ existing_uidmap_id(Db, MailboxId, Uid) ->
 
 %% A UID has no mapping left, in either namespace.
 delete_uidmap(Db, MailboxId, Uid) ->
-    _ = mailio_db:delete(Db, uidmap_id(<<>>, MailboxId, Uid)),
-    drop_legacy(Db, MailboxId, Uid).
+    maybe
+        ok ?= deleted(mailio_db:delete(Db, uidmap_id(<<>>, MailboxId, Uid))),
+        drop_legacy(Db, MailboxId, Uid)
+    end.
 
 drop_legacy(Db, MailboxId, Uid) ->
-    _ = [mailio_db:delete(Db, Old) || {Old, _} <- legacy_mappings(Db, MailboxId, Uid)],
-    ok.
+    lists:foldl(
+        fun
+            ({Old, _}, ok) -> deleted(mailio_db:delete(Db, Old));
+            (_, Error) -> Error
+        end,
+        ok,
+        legacy_mappings(Db, MailboxId, Uid)
+    ).
+
+%% A mapping that is already gone is deleted; one the database refuses to delete
+%% is not, and the caller is told.
+deleted({ok, _}) -> ok;
+deleted({error, not_found}) -> ok;
+deleted({error, _} = Error) -> Error.
 
 %%====================================================================
 %% gen_server
@@ -171,8 +188,10 @@ init(AccountId) ->
     {ok, #state{account_id = AccountId, db = Db, emit_cursor = Hlc}}.
 
 handle_call({ingest, MailboxId, Raw, Opts}, _From, State) ->
-    ok = repair_dirty(State, MailboxId),
-    Result = do_ingest(State#state.db, MailboxId, Raw, Opts),
+    Result = safely(fun() ->
+        ok = repair_dirty(State, MailboxId),
+        do_ingest(State#state.db, MailboxId, Raw, Opts)
+    end),
     State1 = emit_events(State),
     {reply, Result, State1};
 handle_call({apply_flags, MailboxId, EmailId, ServerKeywords}, _From, State) ->
@@ -267,7 +286,7 @@ merge_existing(Db, Existing, MailboxId, Opts) ->
     E2 = apply_keywords(E1, maps:get(keywords, Opts, [])),
     E3 = add_imap_entry(E2, MailboxId, Opts),
     {ok, _, _} = mailio_db:put(Db, E3),
-    maybe_write_uidmap(Db, MailboxId, Opts, mailio_email:id_of(Existing)),
+    ok = maybe_write_uidmap(Db, MailboxId, Opts, mailio_email:id_of(Existing)),
     NowSeen = mailio_email:is_seen(E3),
     %% the mailboxes that held it already: merging keywords may have read it
     adjust_unread(Db, mailio_email:mailbox_ids(Existing), WasSeen, NowSeen),
@@ -586,7 +605,7 @@ full_ingest(Db, EmailId, DocId, MailboxId, Raw, Opts) ->
     Supporting = [ThreadDoc | MsgidDocs] ++ [TextDoc],
     _ = mailio_db:put_batch(Db, Supporting),
     {ok, _, _} = mailio_db:put(Db, EmailDoc),
-    maybe_write_uidmap(Db, MailboxId, Opts, EmailId),
+    ok = maybe_write_uidmap(Db, MailboxId, Opts, EmailId),
     bump_mailbox(Db, MailboxId, +1, seen_delta(is_seen_kw(Keywords), false)).
 
 %%====================================================================
@@ -802,7 +821,6 @@ maybe_list(undefined) -> [];
 maybe_list(X) -> [X].
 
 null_or(undefined) -> null;
-null_or(null) -> null;
 null_or(X) -> X.
 
 null_or_list([]) -> null;

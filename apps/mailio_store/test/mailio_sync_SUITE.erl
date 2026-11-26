@@ -71,6 +71,8 @@
     a_refused_removal_in_a_reconcile_is_an_error/1,
     a_refused_removal_in_a_replacing_read_is_an_error/1,
     a_full_read_of_a_recreated_mailbox_is_not_accepted/1,
+    an_empty_read_of_another_generation_is_not_accepted/1,
+    a_refused_mapping_delete_is_an_error/1,
 
     opaque_ids_are_synced_and_reconciled/1,
     an_unreliable_listing_does_not_remove_local_mail/1,
@@ -131,6 +133,8 @@ all() ->
         a_refused_removal_in_a_reconcile_is_an_error,
         a_refused_removal_in_a_replacing_read_is_an_error,
         a_full_read_of_a_recreated_mailbox_is_not_accepted,
+        an_empty_read_of_another_generation_is_not_accepted,
+        a_refused_mapping_delete_is_an_error,
 
         opaque_ids_are_synced_and_reconciled,
         an_unreliable_listing_does_not_remove_local_mail,
@@ -1332,6 +1336,37 @@ a_full_read_of_a_recreated_mailbox_is_not_accepted(Config) ->
         application:unset_env(mailio_store, mailbox_validity)
     end,
     ?assertEqual(Before, cursor(Db, LocalId)).
+
+%% A read that lists nothing has no message to say which generation it read: the
+%% state it ends with does. The mailbox is another one now, so it is read again.
+an_empty_read_of_another_generation_is_not_accepted(Config) ->
+    Account = ?config(account, Config),
+    Db = mailio_account:db_name(Account),
+    restart_with(Config, #{}, mailio_failing_adapter),
+    {ok, _} = mailio_sync_mgr:sync_mailbox(Account, <<"INBOX">>),
+    {ok, LocalId} = ensure_inbox(Account),
+    Before = cursor(Db, LocalId),
+    application:set_env(mailio_store, script, fun
+        (initial) -> {ok, [], state(1, 1), done};
+        (S) -> {ok, [resync], S, done}
+    end),
+    application:set_env(mailio_store, mailbox_size, 0),
+    application:set_env(mailio_store, mailbox_validity, 2),
+    try
+        ?assertMatch({error, _}, mailio_sync_mgr:sync_mailbox(Account, <<"INBOX">>))
+    after
+        application:unset_env(mailio_store, script),
+        application:unset_env(mailio_store, mailbox_size),
+        application:unset_env(mailio_store, mailbox_validity)
+    end,
+    ?assertEqual(Before, cursor(Db, LocalId)),
+    ?assertEqual(2, length(all_emails(Db))).
+
+%% A delete the database refuses is not a delete.
+a_refused_mapping_delete_is_an_error(_Config) ->
+    ?assertEqual(ok, mailio_account_writer:deleted({ok, <<"rev">>})),
+    ?assertEqual(ok, mailio_account_writer:deleted({error, not_found})),
+    ?assertEqual({error, io_failure}, mailio_account_writer:deleted({error, io_failure})).
 
 idle_count(Srv) ->
     length([

@@ -405,7 +405,11 @@ full_resync(Mode, ImapName, LocalId, State, Attempts, Replace) ->
     end,
     case mailio_sync_pages:walk(Fetch, initial, page_opts(), Acc0, Step) of
         {ok, #{seen := Seen, removed := Removed, stats := Stats, validity := Validity}, Final} ->
-            case inventory_matches(State, ImapName, Seen, Removed, Validity) of
+            case
+                inventory_matches(
+                    State, ImapName, Seen, Removed, read_generation(State, Validity, Final)
+                )
+            of
                 true ->
                     finish_resync(State, LocalId, Seen, Removed, Stats, Final);
                 false ->
@@ -445,6 +449,16 @@ inventory_matches(#state{adapter = Adapter, conn = Conn}, ImapName, Seen, Gone, 
                     Error
             end
     end.
+
+%% A read that listed messages knows the generation from them; one that listed
+%% none has the one of the state it ends with.
+read_generation(#state{adapter = Adapter}, undefined, Final) ->
+    case adapter_has(Adapter, state_uidvalidity, 1) of
+        true -> Adapter:state_uidvalidity(Final);
+        false -> undefined
+    end;
+read_generation(_State, Validity, _Final) ->
+    Validity.
 
 %% The generation the listed messages were read under is the one the mailbox has
 %% now. A read that listed nothing has no generation to compare.

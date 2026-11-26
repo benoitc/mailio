@@ -16,6 +16,7 @@
     fetch_message/5,
     list_uids/2,
     mailbox_info/2,
+    state_uidvalidity/1,
     watch/3,
     unwatch/2
 ]).
@@ -47,6 +48,8 @@ mailbox_info(Conn, Box) ->
         undefined ->
             mailio_imap:mailbox_info(Conn, Box)
     end.
+
+state_uidvalidity(State) -> mailio_imap:state_uidvalidity(State).
 
 watch(Conn, Box, Pid) -> mailio_imap:watch(Conn, Box, Pid).
 unwatch(Conn, Ref) -> mailio_imap:unwatch(Conn, Ref).

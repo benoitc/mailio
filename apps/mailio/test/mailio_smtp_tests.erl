@@ -70,16 +70,36 @@ deferred_and_refused_recipients_are_rejected_test() ->
 
 %% A greeting or an EHLO answer that is not what the protocol says is an error
 %% value, never an exception out of submit.
-an_unexpected_greeting_is_an_error_value_test() ->
+%% 554 at the greeting and 502 for EHLO are permanent: retrying changes nothing.
+a_permanent_greeting_is_not_retryable_test() ->
     with(#{mode => bad_greeting}, fun(Srv) ->
         E = mailio_smtp:submit(cfg(Srv), <<"a@x">>, [<<"b@y">>], ?MSG),
-        ?assertEqual(smtp_transient, code(E))
+        ?assertEqual(smtp_rejected, code(E)),
+        ?assertNot(retryable(E))
     end).
 
-an_unexpected_ehlo_answer_is_an_error_value_test() ->
+a_permanent_ehlo_answer_is_not_retryable_test() ->
     with(#{mode => bad_ehlo}, fun(Srv) ->
         E = mailio_smtp:submit(cfg(Srv), <<"a@x">>, [<<"b@y">>], ?MSG),
-        ?assertEqual(smtp_transient, code(E))
+        ?assertEqual(smtp_rejected, code(E)),
+        ?assertNot(retryable(E))
+    end).
+
+%% A temporary answer at the greeting is a retry.
+a_busy_greeting_is_retryable_test() ->
+    with(#{mode => busy_greeting}, fun(Srv) ->
+        E = mailio_smtp:submit(cfg(Srv), <<"a@x">>, [<<"b@y">>], ?MSG),
+        ?assertEqual(smtp_transient, code(E)),
+        ?assert(retryable(E))
+    end).
+
+%% No recipient is an error in the call, and nothing is sent anywhere.
+no_recipient_is_not_retryable_test() ->
+    with(#{}, fun(Srv) ->
+        E = mailio_smtp:submit(cfg(Srv), <<"a@x">>, [], ?MSG),
+        ?assertEqual(smtp_rejected, code(E)),
+        ?assertNot(retryable(E)),
+        ?assertEqual(0, mailio_fake_smtp:data_count(Srv))
     end).
 
 all_recipients_refused_test() ->

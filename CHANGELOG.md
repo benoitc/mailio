@@ -33,6 +33,23 @@
 
 ### Fixed
 
+- After a STARTTLS session was lost, the reconnect tried TLS at once on the
+  plain port. It now starts in plain text and upgrades again. A TLS setting
+  that is not understood is refused at start instead of being used as plain
+  text.
+- Header encoding no longer loops on text that is not valid UTF-8. Subjects and
+  names that need encoding are cut so that no line is longer than 76
+  characters, long subjects keep their spaces when they are folded, and a
+  body with a line over 998 characters is encoded instead of sent as is.
+  Quoted-printable no longer needs tens of megabytes to encode one long line.
+- A permanent answer from an SMTP server at the greeting or to EHLO is no
+  longer reported as a retryable error, and neither is a call with no
+  recipient.
+- The store reports an error when the database refuses to delete a UID
+  mapping, and a full read that listed nothing now checks the mailbox
+  generation too.
+- The registry and event tables can only be written by their owners.
+
 - A POP3 or SMTP connection that fails while it is being set up is now closed.
   A finished SMTP submission is closed too. Before, each left a socket open for
   as long as the caller lived.

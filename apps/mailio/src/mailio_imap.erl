@@ -27,7 +27,8 @@
     unwatch/2,
     list_uids/2,
     list_uids/3,
-    mailbox_info/2
+    mailbox_info/2,
+    state_uidvalidity/1
 ]).
 
 %% A connection handle: the FSM pid plus cached capabilities.
@@ -101,7 +102,8 @@ connect(Config) ->
 close(#{pid := Pid} = Conn) ->
     stop_lock(Conn),
     try
-        run(Pid, fun(T) -> {mailio_imap_proto:logout(T), undefined} end)
+        _ = run(Pid, fun(T) -> {mailio_imap_proto:logout(T), undefined} end),
+        ok
     catch
         _:_ -> ok
     end,
@@ -704,6 +706,10 @@ unwatch(_Conn, _Ref) ->
 -spec list_uids(conn(), binary()) -> {ok, [integer()]} | {error, term()}.
 list_uids(Conn, MailboxId) ->
     list_uids(Conn, MailboxId, #{}).
+
+%% The UIDVALIDITY of a saved state.
+-spec state_uidvalidity(mailio_adapter:remote_state()) -> term().
+state_uidvalidity(State) -> mailio_imap_map:state_uidvalidity(State).
 
 %% How many messages the server says the mailbox holds, and under which UIDVALIDITY.
 -spec mailbox_info(conn(), binary()) ->

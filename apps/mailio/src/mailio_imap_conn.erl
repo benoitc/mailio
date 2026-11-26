@@ -18,6 +18,7 @@
 
 -export([
     start_link/1,
+    child_spec/1,
     run/2, run/3,
     idle_start/2,
     idle_stop/1,
@@ -94,6 +95,22 @@
 %% untrusted certificate, a wrong host name): `{error, tls_failed}'. With
 %% `tls => starttls' the connection is upgraded before any credential is sent,
 %% and refused if the server does not offer STARTTLS.
+%% @doc A child specification for a supervisor. A connection started with
+%% `start_link/1' is linked to the process that started it and goes down with it;
+%% an application that keeps a connection for a long time starts it under its
+%% own supervisor with this. The connection handles its own reconnects, so it is
+%% restarted only when it crashes.
+-spec child_spec(map()) -> supervisor:child_spec().
+child_spec(Config) ->
+    #{
+        id => {?MODULE, maps:get(host, Config, undefined), maps:get(port, Config, undefined)},
+        start => {?MODULE, start_link, [Config]},
+        restart => transient,
+        shutdown => 5000,
+        type => worker,
+        modules => [?MODULE]
+    }.
+
 -spec start_link(map()) -> {ok, pid()} | {error, term()}.
 start_link(Config) ->
     gen_statem:start_link(?MODULE, Config, []).
@@ -159,17 +176,23 @@ callback_mode() -> [state_functions, state_enter].
 init(Config0) ->
     %% like POP3 and SMTP: the connection is protected unless it is said not to be
     Config = maps:merge(#{tls => starttls}, Config0),
-    Transport =
-        case maps:get(tls, Config) of
-            true -> ssl;
-            _ -> gen_tcp
-        end,
-    Data = #data{
-        config = Config,
-        transport = Transport,
-        notify = maps:get(notify, Config, undefined)
-    },
-    {ok, connect, Data}.
+    case lists:member(maps:get(tls, Config), [true, starttls, false]) of
+        false ->
+            %% a setting that is not understood must not end up as plain text
+            {stop, {invalid_tls_option, maps:get(tls, Config)}};
+        true ->
+            Data = #data{
+                config = Config,
+                transport = initial_transport(Config),
+                notify = maps:get(notify, Config, undefined)
+            },
+            {ok, connect, Data}
+    end.
+
+%% What a new connection starts as. A STARTTLS connection becomes TLS on the way,
+%% and a new one after it was lost starts in plain text again.
+initial_transport(#{tls := true}) -> ssl;
+initial_transport(_) -> gen_tcp.
 
 terminate(_Reason, _State, #data{sock = undefined}) ->
     ok;
@@ -745,6 +768,7 @@ drop(#data{transport = T, sock = Sock} = Data, Replies, Why) ->
     {Cleared, Pending} = pending_replies(Data, Why),
     {next_state, backoff,
         Cleared#data{
+            transport = initial_transport(Data#data.config),
             sock = undefined,
             buffer = <<>>,
             scan = start,

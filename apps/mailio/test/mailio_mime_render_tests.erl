@@ -154,7 +154,7 @@ encoded_words_stay_within_75_and_round_trip_test() ->
             }),
             Head = header_block(Mail),
             Lines = binary:split(Head, <<"\r\n">>, [global]),
-            [?assert(byte_size(L) =< 998) || L <- Lines],
+            [?assert(byte_size(L) =< 76) || L <- Lines],
             Words = [
                 W
              || [W] <- element(
@@ -250,3 +250,97 @@ build_adds_a_date_test() ->
         })
     ),
     ?assertEqual(1, length(binary:matches(Given, <<"Date: ">>))).
+
+%% Bytes that are not UTF-8 are replaced, and the encoding ends.
+malformed_utf8_in_a_header_is_encoded_test_() ->
+    {timeout, 20, fun() ->
+        [
+            begin
+                Mail = mailio_mime_render:build(#{
+                    from => [#{email => <<"a@x">>}],
+                    to => [#{email => <<"b@y">>, name => Bad}],
+                    subject => Bad,
+                    text => <<"hi">>
+                }),
+                [
+                    ?assert(byte_size(L) =< 76)
+                 || L <- binary:split(header_block(Mail), <<"\r\n">>, [global])
+                ]
+            end
+         || Bad <- [
+                <<255, 254, 253>>,
+                <<"abc", 16#C3>>,
+                <<16#E2, 16#82>>,
+                binary:copy(<<16#80>>, 200),
+                <<"é", 255, "é">>
+            ]
+        ]
+    end}.
+
+%% Spaces in a long subject are kept exactly: folded, then unfolded, it is the same.
+ascii_folding_keeps_the_spaces_test() ->
+    [
+        begin
+            Mail = mailio_mime_render:build(#{
+                from => [#{email => <<"a@x">>}],
+                to => [#{email => <<"b@y">>}],
+                subject => Subject,
+                text => <<"hi">>
+            }),
+            Lines = binary:split(header_block(Mail), <<"\r\n">>, [global]),
+            [?assert(byte_size(L) =< 76) || L <- Lines],
+            [Got] = [V || <<"Subject: ", V/binary>> <- unfold(Lines)],
+            ?assertEqual(Subject, mailio_mime_decode:decode_words(Got))
+        end
+     || Subject <- [
+            <<" leading and a long tail ", (binary:copy(<<"word ">>, 40))/binary>>,
+            <<(binary:copy(<<"word ">>, 40))/binary, " ">>,
+            <<(binary:copy(<<"word  ">>, 40))/binary, "end">>,
+            binary:copy(<<"x">>, 200)
+        ]
+    ],
+    ok.
+
+%% A text with a line longer than 998 characters is not sent as 7bit.
+a_long_body_line_is_encoded_test() ->
+    Mail = mailio_mime_render:build(#{
+        from => [#{email => <<"a@x">>}],
+        to => [#{email => <<"b@y">>}],
+        text => binary:copy(<<"x">>, 1200)
+    }),
+    [_, Body] = binary:split(Mail, <<"\r\n\r\n">>),
+    [?assert(byte_size(L) =< 998) || L <- binary:split(Body, <<"\r\n">>, [global])],
+    ?assertEqual(binary:copy(<<"x">>, 1200), mailio_mime_decode:decode_quoted_printable(Body)).
+
+%% One very long line is encoded in about its own size, not many times it: the
+%% work runs in a process that is killed when its heap passes 24 MiB.
+a_very_long_quoted_printable_line_is_cheap_test_() ->
+    {timeout, 30, fun() ->
+        Line = binary:copy(<<"é ">>, 140 * 1024 div 3),
+        Self = self(),
+        {Pid, Ref} = spawn_opt(
+            fun() ->
+                Out = mailio_mime_render:render(#{
+                    type => <<"text">>,
+                    subtype => <<"plain">>,
+                    encoding => <<"quoted-printable">>,
+                    headers => [],
+                    body => Line
+                }),
+                Self ! {done, self(), Out}
+            end,
+            [
+                monitor,
+                {max_heap_size, #{size => 3 * 1024 * 1024, kill => true, error_logger => false}}
+            ]
+        ),
+        Out =
+            receive
+                {done, Pid, O} -> O;
+                {'DOWN', Ref, process, Pid, Reason} -> error({too_much_memory, Reason})
+            after 20000 -> error(timeout)
+            end,
+        [_, Body] = binary:split(Out, <<"\r\n\r\n">>),
+        [?assert(byte_size(L) =< 76) || L <- binary:split(Body, <<"\r\n">>, [global])],
+        ?assertEqual(Line, mailio_mime_decode:decode_quoted_printable(Body))
+    end}.

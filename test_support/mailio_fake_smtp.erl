@@ -3,7 +3,7 @@
 %%%
 %%% A scriptable SMTP server for tests. Options:
 %%%   mode: ok | drop_after_data | reject_data | defer_data | reject_mail_from
-%%%         | defer_mail_from | auth_fail | bad_greeting | bad_ehlo
+%%%         | defer_mail_from | auth_fail | bad_greeting | busy_greeting | bad_ehlo
 %%%   tls:  none | implicit | starttls | starttls_not_offered
 %%%   tls_opts: ssl server options (certificate and key) for the TLS modes
 %%%   auth: plain | login | none (what AUTH mechanism the EHLO advertises)
@@ -88,6 +88,9 @@ accept_loop(L, Opts, Tab) ->
 
 session(Mod, Sock, #{mode := bad_greeting} = Opts, Tab) ->
     send(Mod, Sock, "554 no service\r\n"),
+    loop(Mod, Sock, Opts, Tab, #{});
+session(Mod, Sock, #{mode := busy_greeting} = Opts, Tab) ->
+    send(Mod, Sock, "421 busy\r\n"),
     loop(Mod, Sock, Opts, Tab, #{});
 session(Mod, Sock, Opts, Tab) ->
     send(Mod, Sock, "220 fake ESMTP\r\n"),

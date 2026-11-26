@@ -166,6 +166,10 @@
     {ok, #{exists := non_neg_integer(), uidvalidity := term()}}
     | {error, mailio_error:error_map()}.
 
+%% The UIDVALIDITY a saved state belongs to, for a full read that listed no
+%% message and so has no other way to say which generation it read.
+-callback state_uidvalidity(remote_state()) -> term().
+
 -optional_callbacks([
     watch/3,
     unwatch/2,
@@ -175,5 +179,6 @@
     list_uids/2,
     list_uids/3,
     fetch_message/5,
-    mailbox_info/2
+    mailbox_info/2,
+    state_uidvalidity/1
 ]).

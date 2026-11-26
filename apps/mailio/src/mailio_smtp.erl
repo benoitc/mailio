@@ -45,10 +45,13 @@
 
 -spec submit(config(), binary(), [binary()], iodata()) ->
     {ok, result()} | mailio_error:t().
+submit(_Config, _From, [], _Data) ->
+    %% nothing to send to: no connection is made, and a retry would be the same
+    mailio_error:new(smtp_rejected, <<"there is no recipient">>, #{stage => rcpt_to, rejected => []});
 submit(Config, From, Rcpts, Data) ->
     try
         C0 = track(connect(Config)),
-        {220, _} = read_reply(C0),
+        greeting(C0),
         {C1, Caps} = ehlo(C0, Config),
         C2 = auth(track(C1), Config, Caps),
         session(C2, From, Rcpts, Data)
@@ -78,6 +81,14 @@ unexpected(Detail) ->
             catch
                 throw:{mailio_smtp, Error} -> Error
             end
+    end.
+
+%% A service that is not ready says so with 4yz (try later) or 5yz (not for us, as
+%% 554 does): only the first is worth a retry.
+greeting(C) ->
+    case read_reply(C) of
+        {220, _} -> ok;
+        {Code, Text} -> rejected_or_transient(C, greeting, Code, Text, [])
     end.
 
 %% The newest connection of a submission in progress. Whatever ends the call,
@@ -164,7 +175,11 @@ tls_error(R) ->
 
 ehlo(#c{config = Config} = C, Config) ->
     Name = maps:get(ehlo_name, Config, <<"localhost">>),
-    {250, Text} = cmd(C, [<<"EHLO ">>, Name]),
+    Text =
+        case cmd(C, [<<"EHLO ">>, Name]) of
+            {250, T} -> T;
+            {Code, Reply} -> rejected_or_transient(C, ehlo, Code, Reply, [])
+        end,
     Caps = caps(Text),
     case {C#c.mod, maps:get(tls, Config, starttls)} of
         {gen_tcp, starttls} ->
