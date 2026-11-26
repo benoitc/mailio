@@ -585,21 +585,17 @@ store(Pid, Uid, Action, Flags) ->
 
 -spec move(conn(), binary(), term(), binary()) ->
     {ok, term() | undefined} | {error, term()}.
-move(#{pid := Pid, caps := Caps} = Conn, FromMailbox, Uid, ToMailbox) ->
-    case maps:get(move, Caps, false) orelse maps:get(uidplus, Caps, false) of
-        true ->
-            session(Conn, fun() -> do_move(Pid, Caps, FromMailbox, Uid, ToMailbox) end);
-        false ->
-            %% neither MOVE nor UIDPLUS: a copy would be followed by an expunge that
-            %% can take other messages, so nothing is copied
-            {error, uidplus_required_error()}
-    end.
+move(#{pid := Pid} = Conn, FromMailbox, Uid, ToMailbox) ->
+    session(Conn, fun() -> do_move(Pid, FromMailbox, Uid, ToMailbox) end).
 
-do_move(Pid, Caps, FromMailbox, Uid, ToMailbox) ->
+%% What the connection offers is read after the mailbox is selected and before
+%% anything is changed: a connection that was made again may offer less than the
+%% one this handle was opened on.
+do_move(Pid, FromMailbox, Uid, ToMailbox) ->
     case do_select(Pid, FromMailbox) of
         {ok, _} ->
-            case maps:get(move, Caps, false) of
-                true ->
+            case current_caps(Pid) of
+                {ok, #{move := true}} ->
                     case
                         run(Pid, fun(T) ->
                             {mailio_imap_proto:uid_move(T, Uid, ToMailbox), undefined}
@@ -608,11 +604,24 @@ do_move(Pid, Caps, FromMailbox, Uid, ToMailbox) ->
                         {ok, _, {ok, _, _}} -> {ok, undefined};
                         Other -> command_error(Other)
                     end;
-                false ->
-                    move_by_copy(Pid, Uid, ToMailbox)
+                {ok, #{uidplus := true}} ->
+                    move_by_copy(Pid, Uid, ToMailbox);
+                {ok, _} ->
+                    %% neither MOVE nor UIDPLUS: a copy would be followed by an
+                    %% expunge that can take other messages, so nothing is copied
+                    {error, uidplus_required_error()};
+                {error, _} = Error ->
+                    Error
             end;
         Other ->
             command_error(Other)
+    end.
+
+%% What the connection offers now, as the adapter reads it.
+current_caps(Pid) ->
+    case mailio_imap_conn:capabilities(Pid) of
+        CapList when is_list(CapList) -> {ok, caps_map(CapList)};
+        Other -> command_error(Other)
     end.
 
 move_by_copy(Pid, Uid, ToMailbox) ->
@@ -652,11 +661,8 @@ appenduid(_) -> undefined.
 %% flagged \\Deleted, and another client can flag one at any moment, so a check
 %% beforehand would not hold. The call is refused before anything is changed.
 -spec expunge(conn(), binary(), [term()]) -> ok | {error, term()}.
-expunge(#{pid := Pid, caps := Caps} = Conn, MailboxId, Uids) ->
-    case maps:get(uidplus, Caps, false) of
-        true -> session(Conn, fun() -> do_expunge_set(Pid, MailboxId, Uids) end);
-        false -> {error, uidplus_required_error()}
-    end.
+expunge(#{pid := Pid} = Conn, MailboxId, Uids) ->
+    session(Conn, fun() -> do_expunge_set(Pid, MailboxId, Uids) end).
 
 uidplus_required_error() ->
     mailio_error_map(imap_operation_unsupported, uidplus_required).
@@ -665,10 +671,18 @@ uidplus_required_error() ->
 do_expunge_set(Pid, MailboxId, Uids) ->
     case do_select(Pid, MailboxId) of
         {ok, _} ->
-            ok_chain([
-                fun() -> store(Pid, Uids, add, [<<"\\Deleted">>]) end,
-                fun() -> expunge_targets(Pid, Uids) end
-            ]);
+            %% the capabilities of this connection, read before anything is marked
+            case current_caps(Pid) of
+                {ok, #{uidplus := true}} ->
+                    ok_chain([
+                        fun() -> store(Pid, Uids, add, [<<"\\Deleted">>]) end,
+                        fun() -> expunge_targets(Pid, Uids) end
+                    ]);
+                {ok, _} ->
+                    {error, uidplus_required_error()};
+                {error, _} = Error ->
+                    Error
+            end;
         Other ->
             command_error(Other)
     end.

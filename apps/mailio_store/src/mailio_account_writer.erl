@@ -354,9 +354,18 @@ do_apply_flags(Db, _MailboxId, EmailId, ServerKeywords) ->
             ],
             New = lists:usort(ServerKeywords ++ LocalOnly),
             Email1 = Email#{<<"keywords">> => keywords_map(New)},
-            {ok, _, _} = mailio_db:put(Db, Email1),
             NowSeen = lists:member(?KW_SEEN, New),
+            %% the counters move only when the email became read or unread: then the
+            %% mailboxes are marked first and cleared once they are written
+            Touched =
+                case WasSeen =:= NowSeen of
+                    true -> [];
+                    false -> mailio_email:mailbox_ids(Email1)
+                end,
+            ok = mark_ingesting(Db, Touched),
+            {ok, _, _} = mailio_db:put(Db, Email1),
             adjust_unread(Db, mailio_email:mailbox_ids(Email1), WasSeen, NowSeen),
+            ok = clear_ingesting(Db, Touched),
             ok;
         {error, not_found} ->
             {error, not_found}
@@ -456,6 +465,15 @@ do_patch(Db, EmailId, Patch) ->
                 maps:get(remove_mailboxes, Patch, [])
             ),
             NewSeen = lists:member(?KW_SEEN, NewKw),
+            %% a patch that changes membership or the read state moves counters:
+            %% the mailboxes are marked before anything is written and cleared
+            %% after the counters are
+            Touched =
+                case {OldMbx =:= NewMbx, OldSeen =:= NewSeen} of
+                    {true, true} -> [];
+                    _ -> lists:usort(OldMbx ++ NewMbx)
+                end,
+            ok = mark_ingesting(Db, Touched),
             case NewMbx of
                 [] ->
                     %% No mailboxes left -> destroy, undo its counters.
@@ -469,6 +487,7 @@ do_patch(Db, EmailId, Patch) ->
                     {ok, _, _} = mailio_db:put(Db, Email1),
                     update_patch_counters(Db, OldMbx, NewMbx, OldSeen, NewSeen)
             end,
+            ok = clear_ingesting(Db, Touched),
             ok;
         {error, not_found} ->
             {error, not_found}

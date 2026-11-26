@@ -83,7 +83,11 @@ child_spec_refuses_a_secret_test() ->
                         {mailio_credentials_static, #{<<"a">> => {password, <<"u">>, <<"s3cret">>}}},
                         <<"a">>, imap}
             },
-            #{username => <<"u">>, password => <<"s3cret">>}
+            #{username => <<"u">>, password => <<"s3cret">>},
+            %% a value of a shape that is not known is not kept either
+            #{credentials => <<"s3cret">>},
+            #{credentials => #{password => <<"s3cret">>}},
+            #{credentials => {token_fun, <<"s3cret">>}}
         ]
     ],
     Spec = mailio_imap_conn:child_spec(Base#{
@@ -106,3 +110,12 @@ a_provider_reference_is_resolved_test() ->
 %% the provider callback
 fetch(<<"acct">>, imap, []) -> {ok, {password, <<"u">>, <<"from provider">>}}.
 invalidate(_, _, _) -> ok.
+
+%% the error does not repeat what was refused
+child_spec_error_does_not_echo_the_value_test() ->
+    try
+        mailio_imap_conn:child_spec(#{host => <<"h">>, port => 1, credentials => <<"s3cret">>}),
+        error(not_refused)
+    catch
+        error:Reason -> ?assertEqual(nomatch, string:find(io_lib:format("~p", [Reason]), "s3cret"))
+    end.

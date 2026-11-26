@@ -76,6 +76,9 @@
     an_ingest_that_stopped_before_the_counter_is_repaired_by_the_retry/1,
     a_uid_taken_over_by_another_email_keeps_the_counters_right/1,
     a_flag_update_repairs_a_mailbox_whose_counter_write_failed/1,
+    a_flag_update_that_fails_at_the_counter_is_repaired_by_the_retry/1,
+    a_patch_that_fails_at_the_counter_is_repaired_by_the_retry/1,
+
     a_delivery_to_another_mailbox_repairs_the_shared_email_s_first_mailbox/1,
 
     opaque_ids_are_synced_and_reconciled/1,
@@ -142,6 +145,9 @@ all() ->
         an_ingest_that_stopped_before_the_counter_is_repaired_by_the_retry,
         a_uid_taken_over_by_another_email_keeps_the_counters_right,
         a_flag_update_repairs_a_mailbox_whose_counter_write_failed,
+        a_flag_update_that_fails_at_the_counter_is_repaired_by_the_retry,
+        a_patch_that_fails_at_the_counter_is_repaired_by_the_retry,
+
         a_delivery_to_another_mailbox_repairs_the_shared_email_s_first_mailbox,
 
         opaque_ids_are_synced_and_reconciled,
@@ -1445,6 +1451,42 @@ a_delivery_to_another_mailbox_repairs_the_shared_email_s_first_mailbox(Config) -
     ?assertEqual({ok, []}, mailio_fsck:check_counters(Account)),
     {ok, Fixed} = mailio_db:get(Db, <<?ID_MAILBOX, "mbI">>),
     ?assertNot(maps:is_key(<<"counters_dirty_ingest">>, Fixed)).
+
+%% The counter of the mailbox cannot be moved (its field is not a number): the call
+%% fails after the email was changed. Once the field is right again the retry
+%% gets the counters of a recount, not the stale ones.
+failing_counter_then_retry(Config, Name, Call) ->
+    Account = ?config(account, Config),
+    Db = mailio_account:db_name(Account),
+    Raw =
+        <<"From: a@x\r\nTo: b@y\r\nSubject: ", Name/binary, "\r\nMessage-ID: <", Name/binary,
+            "@x>\r\n\r\nbody\r\n">>,
+    {ok, EmailId} = mailio_account_writer:ingest(Account, <<"mbC">>, Raw, #{uid => 1}),
+    ?assertEqual({1, 1}, mailbox_counts(Account, <<"mbC">>)),
+    {ok, Mbx} = mailio_db:get(Db, <<?ID_MAILBOX, "mbC">>),
+    {ok, _, _} = mailio_db:put(Db, Mbx#{<<"unreadEmails">> => <<"not a number">>}),
+    process_flag(trap_exit, true),
+    try
+        Call(Account, EmailId)
+    catch
+        exit:_ -> ok
+    end,
+    wait_until(fun() -> mailio_registry:whereis_name({writer, Account}) =/= undefined end, 3000),
+    {ok, Broken} = mailio_db:get(Db, <<?ID_MAILBOX, "mbC">>),
+    {ok, _, _} = mailio_db:put(Db, Broken#{<<"unreadEmails">> => 1}),
+    ?assertEqual(ok, Call(Account, EmailId)),
+    ?assertEqual({1, 0}, mailbox_counts(Account, <<"mbC">>)),
+    ?assertEqual({ok, []}, mailio_fsck:check_counters(Account)).
+
+a_flag_update_that_fails_at_the_counter_is_repaired_by_the_retry(Config) ->
+    failing_counter_then_retry(Config, <<"flagfail">>, fun(Account, EmailId) ->
+        mailio_account_writer:apply_flags(Account, <<"mbC">>, EmailId, [<<"$seen">>])
+    end).
+
+a_patch_that_fails_at_the_counter_is_repaired_by_the_retry(Config) ->
+    failing_counter_then_retry(Config, <<"patchfail">>, fun(Account, EmailId) ->
+        mailio_account_writer:patch(Account, EmailId, #{add_keywords => [<<"$seen">>]})
+    end).
 
 idle_count(Srv) ->
     length([

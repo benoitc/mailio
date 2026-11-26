@@ -33,6 +33,17 @@
 
 ### Fixed
 
+- Deleting or moving a message now checks what the current connection offers
+  before it marks anything, so a connection that was made again to a server
+  without UID removal no longer leaves a message marked as deleted.
+- A flag update or a patch that changes the read state marks the mailboxes
+  before it changes the email and clears the mark once the counters are
+  written, so a failure between the two is repaired by the retry.
+- The connection specification for a supervisor accepts only a named credential
+  or a token function. Any other value is refused without being repeated.
+- A credential lookup is cancelled when its caller goes away, and its time limit
+  no longer depends on the caller.
+
 - A supervised IMAP connection is now given the name of a credential kept with
   `register_ref`, not a credential or a provider with its arguments, because
   the arguments of the bundled static provider are the secret. Looking up a

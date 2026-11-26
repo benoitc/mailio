@@ -16,10 +16,10 @@
 %%%   <li>`{ref, Name}' - a credential kept under a name with `register_ref/2'; the
 %%%   name is what a supervised connection is given, so that no secret is in its
 %%%   start arguments</li>
-%%%   <li>`{provider, {Module, Args}, AccountId, Service}' - a reference: the
-%%%   secret is fetched from `Module' each time it is needed and is never part of
-%%%   the configuration, which is what lets a supervisor hold the configuration
-%%%   without a crash report showing the secret</li>
+%%%   <li>`{provider, {Module, Args}, AccountId, Service}' - the secret is fetched
+%%%   from `Module' each time it is needed. `Args' can hold secrets (the static
+%%%   provider's do), so a supervised connection is not given this form: it is
+%%%   given a `{ref, Name}' that stands for it</li>
 %%% </ul>
 -module(mailio_credentials).
 
@@ -97,23 +97,37 @@ resolve(Cred, Opts) ->
     Timeout = maps:get(timeout, Opts, ?DEFAULT_TIMEOUT),
     MaxDepth = maps:get(max_depth, Opts, ?DEFAULT_MAX_DEPTH),
     Ref = make_ref(),
-    Self = self(),
-    {Pid, MRef} = spawn_monitor(fun() ->
-        Self ! {Ref, chase(Cred, MaxDepth)}
-    end),
+    Caller = self(),
+    %% The resolver holds the deadline and watches the caller, so neither a caller
+    %% that goes away nor a provider that never answers leaves a worker running.
+    {Resolver, MRef} = spawn_monitor(fun() -> resolver(Caller, Ref, Cred, MaxDepth, Timeout) end),
     receive
         {Ref, Result} ->
             erlang:demonitor(MRef, [flush]),
             Result;
-        {'DOWN', MRef, process, Pid, Reason} ->
+        {'DOWN', MRef, process, Resolver, Reason} ->
             {error, {credentials_failed, Reason}}
-    after Timeout ->
-        exit(Pid, kill),
-        erlang:demonitor(MRef, [flush]),
-        receive
-            {Ref, Result} -> Result
-        after 0 -> {error, credentials_timeout}
-        end
+    end.
+
+resolver(Caller, Ref, Cred, MaxDepth, Timeout) ->
+    CallerMon = erlang:monitor(process, Caller),
+    Resolver = self(),
+    {Worker, WorkerMon} = spawn_monitor(fun() ->
+        Resolver ! {result, self(), chase(Cred, MaxDepth)}
+    end),
+    Deadline = erlang:send_after(Timeout, self(), deadline),
+    receive
+        {result, Worker, Result} ->
+            _ = erlang:cancel_timer(Deadline),
+            Caller ! {Ref, Result};
+        {'DOWN', WorkerMon, process, Worker, Reason} ->
+            _ = erlang:cancel_timer(Deadline),
+            Caller ! {Ref, {error, {credentials_failed, Reason}}};
+        deadline ->
+            exit(Worker, kill),
+            Caller ! {Ref, {error, credentials_timeout}};
+        {'DOWN', CallerMon, process, Caller, _} ->
+            exit(Worker, kill)
     end.
 
 %% one step at a time, `Left' steps at most

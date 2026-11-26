@@ -343,3 +343,29 @@ a_timed_out_provider_leaves_nothing_running_test() ->
         end,
     timer:sleep(50),
     ?assertNot(is_process_alive(Helper)).
+
+%% A caller that goes away takes the lookup with it, and the deadline is the
+%% resolver's, not the caller's.
+a_caller_that_dies_cancels_the_lookup_test() ->
+    Self = self(),
+    Caller = spawn(fun() ->
+        Self !
+            {caller, self(),
+                mailio_credentials:resolve({provider, {?MODULE, Self}, <<"slow">>, imap}, #{
+                    timeout => 5000
+                })}
+    end),
+    Helper =
+        receive
+            {helper, H} -> H
+        after 2000 -> error(no_helper)
+        end,
+    %% the provider process is the parent of the helper
+    {links, Links} = process_info(Helper, links),
+    Worker = hd([P || P <- Links, P =/= Self, is_pid(P)]),
+    WorkerMon = erlang:monitor(process, Worker),
+    exit(Caller, kill),
+    receive
+        {'DOWN', WorkerMon, process, Worker, _} -> ok
+    after 500 -> error(worker_still_running)
+    end.

@@ -129,11 +129,13 @@ child_spec(Config) ->
 
 secret_in(Config) ->
     maps:is_key(password, Config) orelse maps:is_key(token, Config) orelse
-        case maps:get(credentials, Config, undefined) of
-            {password, _, _} -> true;
-            {oauth2, _, _} -> true;
-            {provider, _, _, _} -> true;
-            _ -> false
+        maps:is_key(secret, Config) orelse
+        case maps:find(credentials, Config) of
+            error -> false;
+            {ok, {ref, _Name}} -> false;
+            {ok, {token_fun, Fun}} when is_function(Fun, 0) -> false;
+            %% anything else could be, or hold, the secret: it is not kept
+            {ok, _Other} -> true
         end.
 
 -spec start_link(map()) -> {ok, pid()} | {error, term()}.

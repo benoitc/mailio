@@ -59,6 +59,8 @@
     qresync_is_negotiated_after_a_preauth_greeting/1,
     an_empty_enabled_answer_leaves_qresync_unused/1,
     a_server_that_lost_its_extensions_is_read_without_them/1,
+    expunge_after_a_reconnect_checks_the_session_not_the_handle/1,
+    move_after_a_reconnect_checks_the_session_not_the_handle/1,
 
     writes_open_read_write/1
 ]).
@@ -108,6 +110,8 @@ all() ->
         qresync_is_negotiated_after_a_preauth_greeting,
         an_empty_enabled_answer_leaves_qresync_unused,
         a_server_that_lost_its_extensions_is_read_without_them,
+        expunge_after_a_reconnect_checks_the_session_not_the_handle,
+        move_after_a_reconnect_checks_the_session_not_the_handle,
 
         writes_open_read_write
     ].
@@ -655,3 +659,48 @@ a_server_that_lost_its_extensions_is_read_without_them(Config) ->
             fun(C) -> re:run(C, <<"CHANGEDSINCE|QRESYNC">>, [caseless]) =/= nomatch end, After
         )
     ).
+
+%% The handle was opened on a server with UIDPLUS and MOVE; the connection was lost
+%% and made again to one with neither. Nothing is marked or copied.
+after_reconnect_without_extensions(Config, Call) ->
+    Srv = ?config(srv, Config),
+    Conn = conn_with(Config, #{}),
+    ?assertMatch(#{uidplus := true}, mailio_imap:capabilities(Conn)),
+    Flags = mailio_fake_imap:last_flags(Srv, 101),
+    ok = mailio_fake_imap:set_capabilities(Srv, <<>>),
+    ok = mailio_fake_imap:drop_connection(Srv),
+    Result = until_unsupported(Conn, Call, 50),
+    ?assertEqual(imap_operation_unsupported, mailio_error:code(Result)),
+    ?assertEqual(Flags, mailio_fake_imap:last_flags(Srv, 101)),
+    ?assertNot(
+        lists:any(
+            fun(C) -> re:run(C, <<"STORE|COPY|MOVE|EXPUNGE">>, [caseless]) =/= nomatch end,
+            mailio_fake_imap:commands(Srv)
+        )
+    ).
+
+until_unsupported(Conn, Call, 0) ->
+    Call(Conn);
+until_unsupported(Conn, Call, N) ->
+    case Call(Conn) of
+        {error, _} = E ->
+            case mailio_error:code(E) of
+                imap_operation_unsupported ->
+                    E;
+                _ ->
+                    timer:sleep(200),
+                    until_unsupported(Conn, Call, N - 1)
+            end;
+        Other ->
+            Other
+    end.
+
+expunge_after_a_reconnect_checks_the_session_not_the_handle(Config) ->
+    after_reconnect_without_extensions(Config, fun(Conn) ->
+        mailio_imap:expunge(Conn, <<"INBOX">>, [101])
+    end).
+
+move_after_a_reconnect_checks_the_session_not_the_handle(Config) ->
+    after_reconnect_without_extensions(Config, fun(Conn) ->
+        mailio_imap:move(Conn, <<"INBOX">>, 101, <<"Archive">>)
+    end).
