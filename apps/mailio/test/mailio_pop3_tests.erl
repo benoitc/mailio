@@ -312,3 +312,13 @@ retr_returns_the_message_bytes_test() ->
         ?assertMatch({_, _}, binary:match(Top, <<"Subject: exact\r\n">>)),
         mailio_pop3:close(C)
     end).
+
+%% A tls setting that is not understood is an error before any socket is opened,
+%% never plain text with a password.
+an_unknown_tls_setting_is_refused_test() ->
+    with(#{messages => msgs()}, fun(Srv) ->
+        [
+            ?assertEqual(pop3_tls_failed, code(mailio_pop3:open(cfg(Srv, #{tls => Bad}))))
+         || Bad <- [none, implicit, maybe_, <<"starttls">>]
+        ]
+    end).

@@ -50,6 +50,12 @@ submit(_Config, _From, [], _Data) ->
     mailio_error:new(smtp_rejected, <<"there is no recipient">>, #{stage => rcpt_to, rejected => []});
 submit(Config, From, Rcpts, Data) ->
     try
+        %% a setting that is not understood must not end up as plain text
+        lists:member(maps:get(tls, Config, starttls), [true, starttls, false]) orelse
+            throw(
+                {mailio_smtp,
+                    mailio_error:new(smtp_tls_failed, <<"the tls setting is not understood">>, #{})}
+            ),
         C0 = track(connect(Config)),
         greeting(C0),
         {C1, Caps} = ehlo(C0, Config),
@@ -175,11 +181,7 @@ tls_error(R) ->
 
 ehlo(#c{config = Config} = C, Config) ->
     Name = maps:get(ehlo_name, Config, <<"localhost">>),
-    Text =
-        case cmd(C, [<<"EHLO ">>, Name]) of
-            {250, T} -> T;
-            {Code, Reply} -> rejected_or_transient(C, ehlo, Code, Reply, [])
-        end,
+    Text = read_ehlo(C, Name),
     Caps = caps(Text),
     case {C#c.mod, maps:get(tls, Config, starttls)} of
         {gen_tcp, starttls} ->
@@ -202,13 +204,20 @@ ehlo(#c{config = Config} = C, Config) ->
                 {ok, S} ->
                     ok = ssl:setopts(S, [{packet, line}, {packet_size, ?MAX_REPLY_LINE}]),
                     C2 = C#c{mod = ssl, sock = S},
-                    {250, Text2} = cmd(C2, [<<"EHLO ">>, Name]),
-                    {C2, caps(Text2)};
+                    {C2, caps(read_ehlo(track(C2), Name))};
                 {error, R} ->
                     throw({mailio_smtp, tls_error(R)})
             end;
         _ ->
             {C, Caps}
+    end.
+
+%% EHLO and what the server answers: 250, or a 4yz that asks for a retry, or a
+%% refusal that retrying does not change (RFC 5321, section 4.2.1).
+read_ehlo(C, Name) ->
+    case cmd(C, [<<"EHLO ">>, Name]) of
+        {250, Text} -> Text;
+        {Code, Reply} -> rejected_or_transient(C, ehlo, Code, Reply, [])
     end.
 
 caps(Text) ->

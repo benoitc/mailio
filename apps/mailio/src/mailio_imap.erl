@@ -67,17 +67,17 @@
 
 -spec connect(map()) -> {ok, conn()} | {error, mailio_error:error_map()}.
 connect(Config) ->
-    case mailio_imap_conn:start_link(Config) of
+    case mailio_imap_conn:start_link(Config#{enable_qresync => maps:get(qresync, Config, true)}) of
         {ok, Pid} ->
             %% Blocks (postponed) until the FSM reaches `ready' after login.
             case run(Pid, fun(T) -> {mailio_imap_proto:capability(T), undefined} end) of
                 {ok, Untagged, {ok, _, _}} ->
                     Caps = caps_map(collect_caps(Untagged, Pid)),
-                    maybe_enable_qresync(Pid, Caps),
                     {ok, Lock} = mailio_imap_lock:start_link(Pid),
                     {ok, #{
                         pid => Pid,
                         lock => Lock,
+                        qresync => maps:get(qresync, Config, true),
                         caps => Caps,
                         max_vanished => min(
                             maps:get(max_vanished, Config, ?MAX_VANISHED), ?MAX_VANISHED
@@ -126,14 +126,6 @@ session(_Conn, Fun) ->
 -spec capabilities(conn()) -> #{atom() => boolean()}.
 capabilities(#{caps := Caps}) -> Caps.
 
-%% QRESYNC requires an explicit ENABLE (RFC 7162) before the QRESYNC SELECT
-%% parameter may be used.
-maybe_enable_qresync(Pid, #{qresync := true}) ->
-    _ = run(Pid, fun(T) -> {mailio_imap_proto:enable(T, [<<"QRESYNC">>]), undefined} end),
-    ok;
-maybe_enable_qresync(_Pid, _Caps) ->
-    ok.
-
 %%====================================================================
 %% Mailboxes
 %%====================================================================
@@ -173,7 +165,21 @@ to_mailbox({list, Attrs, Delim, Name}) ->
 fetch_changes_since(Conn, MailboxId, State, Opts) ->
     session(Conn, fun() -> do_fetch_changes(Conn, MailboxId, State, Opts) end).
 
-do_fetch_changes(#{caps := Caps} = Conn, MailboxId, State, _Opts) ->
+do_fetch_changes(#{pid := Pid} = Conn, MailboxId, State, _Opts) ->
+    %% what the server offers now: a connection that was made again may differ, and
+    %% QRESYNC is enabled on it by the connection itself after each login
+    case mailio_imap_conn:capabilities(Pid) of
+        CapList when is_list(CapList) ->
+            Caps0 = caps_map(CapList),
+            Caps = Caps0#{
+                qresync := maps:get(qresync, Caps0, false) andalso maps:get(qresync, Conn, true)
+            },
+            do_fetch_changes_with(Conn, Caps, MailboxId, State);
+        Other ->
+            command_error(Other)
+    end.
+
+do_fetch_changes_with(Conn, Caps, MailboxId, State) ->
     %% only the literal `initial' is a first read; a saved cursor, even one that
     %% decodes to nothing, is compared with the mailbox
     Prev = (mailio_imap_map:decode_state(State))#{first_read => State =:= initial},

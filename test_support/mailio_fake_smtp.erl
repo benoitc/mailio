@@ -3,7 +3,7 @@
 %%%
 %%% A scriptable SMTP server for tests. Options:
 %%%   mode: ok | drop_after_data | reject_data | defer_data | reject_mail_from
-%%%         | defer_mail_from | auth_fail | bad_greeting | busy_greeting | bad_ehlo
+%%%         | defer_mail_from | auth_fail | bad_greeting | busy_greeting | bad_ehlo | bad_ehlo_after_tls
 %%%   tls:  none | implicit | starttls | starttls_not_offered
 %%%   tls_opts: ssl server options (certificate and key) for the TLS modes
 %%%   auth: plain | login | none (what AUTH mechanism the EHLO advertises)
@@ -122,6 +122,9 @@ loop(Mod, Sock, Opts, Tab, St) ->
             U = string:uppercase(binary_to_list(Line)),
             Mode = maps:get(mode, Opts),
             case U of
+                "EHLO" ++ _ when Mode =:= bad_ehlo_after_tls, Mod =:= ssl ->
+                    send(Mod, Sock, "502 not implemented\r\n"),
+                    loop(Mod, Sock, Opts, Tab, St);
                 "EHLO" ++ _ when Mode =:= bad_ehlo ->
                     send(Mod, Sock, "502 not implemented\r\n"),
                     loop(Mod, Sock, Opts, Tab, St);

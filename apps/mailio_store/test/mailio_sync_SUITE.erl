@@ -73,6 +73,8 @@
     a_full_read_of_a_recreated_mailbox_is_not_accepted/1,
     an_empty_read_of_another_generation_is_not_accepted/1,
     a_refused_mapping_delete_is_an_error/1,
+    an_ingest_that_stopped_before_the_counter_is_repaired_by_the_retry/1,
+    a_uid_taken_over_by_another_email_keeps_the_counters_right/1,
 
     opaque_ids_are_synced_and_reconciled/1,
     an_unreliable_listing_does_not_remove_local_mail/1,
@@ -135,6 +137,8 @@ all() ->
         a_full_read_of_a_recreated_mailbox_is_not_accepted,
         an_empty_read_of_another_generation_is_not_accepted,
         a_refused_mapping_delete_is_an_error,
+        an_ingest_that_stopped_before_the_counter_is_repaired_by_the_retry,
+        a_uid_taken_over_by_another_email_keeps_the_counters_right,
 
         opaque_ids_are_synced_and_reconciled,
         an_unreliable_listing_does_not_remove_local_mail,
@@ -1367,6 +1371,39 @@ a_refused_mapping_delete_is_an_error(_Config) ->
     ?assertEqual(ok, mailio_account_writer:deleted({ok, <<"rev">>})),
     ?assertEqual(ok, mailio_account_writer:deleted({error, not_found})),
     ?assertEqual({error, io_failure}, mailio_account_writer:deleted({error, io_failure})).
+
+%% The email and its mapping were written and the counter was not: the mailbox is
+%% marked, and the retry counts it again from the emails.
+an_ingest_that_stopped_before_the_counter_is_repaired_by_the_retry(Config) ->
+    Account = ?config(account, Config),
+    Db = mailio_account:db_name(Account),
+    Raw = <<"From: a@x\r\nTo: b@y\r\nSubject: retry\r\nMessage-ID: <r@x>\r\n\r\nbody\r\n">>,
+    {ok, _} = mailio_account_writer:ingest(Account, <<"mbR">>, Raw, #{uid => 1}),
+    ?assertEqual({1, 1}, mailbox_counts(Account, <<"mbR">>)),
+    {ok, Mbx} = mailio_db:get(Db, <<?ID_MAILBOX, "mbR">>),
+    {ok, _, _} = mailio_db:put(Db, Mbx#{
+        <<"totalEmails">> => 0, <<"unreadEmails">> => 0, <<"counters_dirty_ingest">> => true
+    }),
+    {ok, _} = mailio_account_writer:ingest(Account, <<"mbR">>, Raw, #{uid => 1}),
+    ?assertEqual({1, 1}, mailbox_counts(Account, <<"mbR">>)),
+    ?assertEqual({ok, []}, mailio_fsck:check_counters(Account)),
+    {ok, Fixed} = mailio_db:get(Db, <<?ID_MAILBOX, "mbR">>),
+    ?assertNot(maps:is_key(<<"counters_dirty_ingest">>, Fixed)).
+
+%% Another email arrives under a UID that was another one's: the old one leaves,
+%% the new one counts, and the counters are what a recount gives.
+a_uid_taken_over_by_another_email_keeps_the_counters_right(Config) ->
+    Account = ?config(account, Config),
+    Mail = fun(N) ->
+        <<"From: a@x\r\nTo: b@y\r\nSubject: m", N/binary, "\r\nMessage-ID: <", N/binary,
+            "@x>\r\n\r\nbody ", N/binary, "\r\n">>
+    end,
+    {ok, _} = mailio_account_writer:ingest(Account, <<"mbT">>, Mail(<<"one">>), #{uid => 1}),
+    {ok, _} = mailio_account_writer:ingest(
+        Account, <<"mbT">>, Mail(<<"two">>), #{uid => 1, keywords => [<<"$seen">>]}
+    ),
+    ?assertEqual({1, 0}, mailbox_counts(Account, <<"mbT">>)),
+    ?assertEqual({ok, []}, mailio_fsck:check_counters(Account)).
 
 idle_count(Srv) ->
     length([

@@ -287,6 +287,32 @@ starttls_test() ->
         ?assertEqual(0, mailio_fake_smtp:data_count(Srv))
     end).
 
+%% The second EHLO, after STARTTLS, is classified like the first.
+a_permanent_ehlo_answer_after_starttls_is_not_retryable_test() ->
+    {Server, Client} = certs(),
+    CACerts = proplists:get_value(cacerts, Client),
+    with(#{tls => starttls, tls_opts => Server, mode => bad_ehlo_after_tls}, fun(Srv) ->
+        E = mailio_smtp:submit(
+            tls_cfg(Srv, #{tls => starttls, cacerts => CACerts}), <<"a@x">>, [<<"b@y">>], ?MSG
+        ),
+        ?assertEqual(smtp_rejected, code(E)),
+        ?assertNot(retryable(E))
+    end).
+
+%% A tls setting that is not understood is an error before any socket is opened,
+%% not plain text.
+an_unknown_tls_setting_is_refused_test() ->
+    with(#{}, fun(Srv) ->
+        [
+            begin
+                E = mailio_smtp:submit(cfg(Srv, #{tls => Bad}), <<"a@x">>, [<<"b@y">>], ?MSG),
+                ?assertEqual(smtp_tls_failed, code(E))
+            end
+         || Bad <- [none, implicit, maybe_, <<"starttls">>]
+        ],
+        ?assertEqual(0, mailio_fake_smtp:data_count(Srv))
+    end).
+
 %%====================================================================
 %% Bounded replies
 %%====================================================================

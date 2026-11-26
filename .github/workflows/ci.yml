@@ -42,15 +42,10 @@ jobs:
             echo "mailio_mcp must not depend on mailio_store or barrel_docdb"; exit 1
           fi
 
-      # Four warnings in old code are accepted. A fifth fails the build.
-      - name: Dialyzer (at most 4 known warnings)
-        run: |
-          set +e
-          rebar3 dialyzer 2>&1 | tee dialyzer.out
-          N=$(sed -n 's/.*Warnings occurred running dialyzer: \([0-9]*\).*/\1/p' dialyzer.out | tail -1)
-          N=${N:-0}
-          echo "dialyzer warnings: $N"
-          [ "$N" -le 4 ]
+      # Dialyzer reports no warnings and a change must not add one: the command
+      # itself must succeed, so a run that fails without a summary fails the build.
+      - name: Dialyzer
+        run: rebar3 dialyzer
 
   tests:
     name: Unit and component tests, OTP ${{ matrix.otp }}

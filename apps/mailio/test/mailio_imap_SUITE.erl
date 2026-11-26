@@ -55,6 +55,7 @@
     a_saved_cursor_with_nothing_known_is_reset/1,
     a_listing_that_misses_messages_is_an_error/1,
     a_listing_beyond_the_limit_stops/1,
+    qresync_is_enabled_again_after_a_reconnect/1,
     writes_open_read_write/1
 ]).
 
@@ -99,6 +100,7 @@ all() ->
         a_saved_cursor_with_nothing_known_is_reset,
         a_listing_that_misses_messages_is_an_error,
         a_listing_beyond_the_limit_stops,
+        qresync_is_enabled_again_after_a_reconnect,
         writes_open_read_write
     ].
 
@@ -316,10 +318,8 @@ a_large_mailbox_is_listed_in_windows(Config) ->
 flag_changes_are_listed_in_windows(Config) ->
     Srv = ?config(srv, Config),
     [ok = mailio_fake_imap:deliver(Srv, integer_to_binary(N)) || N <- lists:seq(1, 3)],
-    Conn0 = conn_with(Config, #{listing_window => 2}),
     %% the flag windows are for a server without QRESYNC: read as one without
-    #{caps := Caps} = Conn0,
-    Conn = Conn0#{caps := Caps#{qresync := false}},
+    Conn = conn_with(Config, #{listing_window => 2, qresync => false}),
     {_, State, _} = read_pages(Conn, initial),
     [ok = mailio_fake_imap:set_flags(Srv, U, [<<"\\Seen">>]) || U <- [100, 101, 102, 103, 104]],
     {Changes, _Final, Pages} = read_pages(Conn, State),
@@ -584,3 +584,25 @@ a_listing_beyond_the_limit_stops(Config) ->
     Conn = conn_with(Config, #{}),
     ?assertMatch({ok, [100, 101]}, mailio_imap:list_uids(Conn, <<"INBOX">>, #{max => 2})),
     ?assertMatch({error, _}, mailio_imap:list_uids(Conn, <<"INBOX">>, #{max => 1})).
+
+%% A server that wants ENABLE QRESYNC on every connection: a read after the
+%% connection was lost and made again still works.
+qresync_is_enabled_again_after_a_reconnect(Config) ->
+    Srv = ?config(srv, Config),
+    ok = mailio_fake_imap:set_option(Srv, enforce_enable, true),
+    Conn = conn_with(Config, #{}),
+    {ok, _, S1, done} = mailio_imap:fetch_changes_since(Conn, <<"INBOX">>, initial, #{}),
+    ?assertMatch({ok, _, _, done}, mailio_imap:fetch_changes_since(Conn, <<"INBOX">>, S1, #{})),
+    ok = mailio_fake_imap:drop_connection(Srv),
+    ?assertMatch({ok, _, _, done}, retry_until_connected(Conn, S1, 50)).
+
+retry_until_connected(Conn, State, 0) ->
+    mailio_imap:fetch_changes_since(Conn, <<"INBOX">>, State, #{});
+retry_until_connected(Conn, State, N) ->
+    case mailio_imap:fetch_changes_since(Conn, <<"INBOX">>, State, #{}) of
+        {error, _} ->
+            timer:sleep(200),
+            retry_until_connected(Conn, State, N - 1);
+        Ok ->
+            Ok
+    end.

@@ -180,10 +180,12 @@ qp(<<>>, _Len) ->
     [];
 qp(Bin, Len) ->
     Size = byte_size(Bin),
-    case qp_run(Bin, Size, 0) of
+    %% Only as far as this line has room is looked at, so that a long line is
+    %% scanned once, a line at a time, and not once for every line of it.
+    case qp_run(Bin, Size, 0, 76 - Len) of
         0 ->
-            %% a run of bytes that are written as escapes, as many as the line has room for
-            Unsafe = qp_unsafe_run(Bin, Size, 0),
+            Limit = (76 - Len) div 3 + 1,
+            Unsafe = qp_unsafe_run(Bin, Size, 0, Limit),
             case Unsafe =:= Size andalso Len + 3 * Unsafe =< 76 of
                 true ->
                     [qp_escapes(Bin)];
@@ -214,15 +216,14 @@ qp(Bin, Len) ->
             end
     end.
 
-%% how many bytes from here are written as they are: printable ASCII except `=',
-%% and a space or tab that does not end the line
-qp_run(Bin, Size, I) when I < Size ->
-    C = binary:at(Bin, I),
-    case qp_literal(C, I =:= Size - 1) of
-        true -> qp_run(Bin, Size, I + 1);
+%% how many bytes from here are written as they are, looking at no more than
+%% `Limit': printable ASCII except `=', and a space or tab that does not end the line
+qp_run(Bin, Size, I, Limit) when I < Size, I < Limit ->
+    case qp_literal(binary:at(Bin, I), I =:= Size - 1) of
+        true -> qp_run(Bin, Size, I + 1, Limit);
         false -> I
     end;
-qp_run(_Bin, _Size, I) ->
+qp_run(_Bin, _Size, I, _Limit) ->
     I.
 
 qp_literal(C, _AtEnd) when C =:= $=; C < 32; C > 126 -> false;
@@ -231,13 +232,13 @@ qp_literal(_, _) -> true.
 
 qp_escapes(Bin) -> <<<<$=, (hex_hi(C)), (hex_lo(C))>> || <<C>> <= Bin>>.
 
-%% how many bytes from here are written as escapes
-qp_unsafe_run(Bin, Size, I) when I < Size ->
+%% how many bytes from here are written as escapes, looking at no more than `Limit'
+qp_unsafe_run(Bin, Size, I, Limit) when I < Size, I < Limit ->
     case qp_literal(binary:at(Bin, I), I =:= Size - 1) of
-        false -> qp_unsafe_run(Bin, Size, I + 1);
+        false -> qp_unsafe_run(Bin, Size, I + 1, Limit);
         true -> I
     end;
-qp_unsafe_run(_Bin, _Size, I) ->
+qp_unsafe_run(_Bin, _Size, I, _Limit) ->
     I.
 
 hex_hi(C) -> hex_digit(C bsr 4).
@@ -401,13 +402,16 @@ encoded_words(Value0) ->
 %% Bytes that are not UTF-8 are replaced by U+FFFD, so that what is encoded is
 %% text and cutting it between characters is always possible.
 scrub_utf8(Bin) ->
+    iolist_to_binary(scrub_utf8(Bin, [])).
+
+scrub_utf8(Bin, Acc) ->
     case unicode:characters_to_binary(Bin, utf8, utf8) of
         Good when is_binary(Good) ->
-            Good;
+            lists:reverse([Good | Acc]);
         {error, Good, <<_Bad, Rest/binary>>} ->
-            <<Good/binary, 16#FFFD/utf8, (scrub_utf8(Rest))/binary>>;
+            scrub_utf8(Rest, [<<16#FFFD/utf8>>, Good | Acc]);
         {incomplete, Good, _Part} ->
-            <<Good/binary, 16#FFFD/utf8>>
+            lists:reverse([<<16#FFFD/utf8>>, Good | Acc])
     end.
 
 encoded_word(Chunk) -> <<"=?UTF-8?B?", (base64:encode(Chunk))/binary, "?=">>.
@@ -468,11 +472,17 @@ format_address(#{email := Email} = Addr) ->
             Email;
         Name ->
             EncName = encode_display_name(Name),
-            %% a name in encoded words leaves the address on a line of its own
+            %% An encoded name leaves the address on a line of its own, and so does
+            %% a name and address that would not fit one line with the header
+            %% name in front (RFC 2047, section 2: 76 characters).
             Sep =
-                case binary:match(EncName, <<"\r\n">>) of
-                    nomatch -> <<" ">>;
-                    _ -> <<"\r\n ">>
+                case
+                    not is_ascii(Name) orelse
+                        binary:match(EncName, <<"\r\n">>) =/= nomatch orelse
+                        byte_size(EncName) + byte_size(Email) + 14 > 76
+                of
+                    true -> <<"\r\n ">>;
+                    false -> <<" ">>
                 end,
             <<EncName/binary, Sep/binary, "<", Email/binary, ">">>
     end.

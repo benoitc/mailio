@@ -40,6 +40,8 @@
 }).
 
 -define(PARSE_VERSION, 1).
+%% An ingest has its own mark: the removal it may do inside it clears the other.
+-define(INGEST_MARK, <<"counters_dirty_ingest">>).
 
 %%====================================================================
 %% API
@@ -244,7 +246,9 @@ safely(Fun) ->
 %% before anything else is written to the mailbox.
 repair_dirty(#state{db = Db, account_id = AccountId}, MailboxId) ->
     case mailio_db:get(Db, <<?ID_MAILBOX, MailboxId/binary>>) of
-        {ok, #{<<"counters_dirty">> := true}} ->
+        {ok, Mbx} when
+            is_map_key(<<"counters_dirty">>, Mbx); is_map_key(?INGEST_MARK, Mbx)
+        ->
             {Total, Unread} = maps:get(MailboxId, mailio_fsck:recompute(AccountId), {0, 0}),
             do_set_counters(Db, MailboxId, Total, Unread);
         _ ->
@@ -273,7 +277,10 @@ do_ingest(Db, MailboxId, Raw, Opts) ->
             merge_existing(Db, Existing, MailboxId, Opts),
             {ok, EmailId};
         {error, not_found} ->
+            %% a new email changes the counters, and so may the UID it takes over
+            ok = mark_ingesting(Db, [MailboxId]),
             full_ingest(Db, EmailId, DocId, MailboxId, Raw, Opts),
+            ok = clear_ingesting(Db, [MailboxId]),
             {ok, EmailId}
     end.
 
@@ -285,16 +292,26 @@ merge_existing(Db, Existing, MailboxId, Opts) ->
     E1 = mailio_email:add_mailbox(Existing, MailboxId),
     E2 = apply_keywords(E1, maps:get(keywords, Opts, [])),
     E3 = add_imap_entry(E2, MailboxId, Opts),
+    NowSeen = mailio_email:is_seen(E3),
+    %% Counters change on a new membership, or when the email became read or
+    %% unread. The mailboxes are marked first and cleared last, so that a stop
+    %% in between is found and counted again by the next write to them.
+    Touched =
+        case {AlreadyMember, WasSeen =:= NowSeen} of
+            {true, true} -> [];
+            _ -> lists:usort([MailboxId | mailio_email:mailbox_ids(Existing)])
+        end,
+    ok = mark_ingesting(Db, Touched),
     {ok, _, _} = mailio_db:put(Db, E3),
     ok = maybe_write_uidmap(Db, MailboxId, Opts, mailio_email:id_of(Existing)),
-    NowSeen = mailio_email:is_seen(E3),
     %% the mailboxes that held it already: merging keywords may have read it
     adjust_unread(Db, mailio_email:mailbox_ids(Existing), WasSeen, NowSeen),
     case AlreadyMember of
         true -> ok;
         %% a new membership is unread only if the email is, as it is now
         false -> bump_mailbox(Db, MailboxId, +1, seen_delta(NowSeen, false))
-    end.
+    end,
+    ok = clear_ingesting(Db, Touched).
 
 %%====================================================================
 %% Server flag application and membership removal
@@ -464,8 +481,8 @@ do_set_counters(Db, MailboxId, Total, Unread) ->
     DocId = <<?ID_MAILBOX, MailboxId/binary>>,
     case mailio_db:get(Db, DocId) of
         {ok, Doc} ->
-            Doc1 = maps:remove(
-                <<"counters_dirty">>,
+            Doc1 = maps:without(
+                [<<"counters_dirty">>, ?INGEST_MARK],
                 Doc#{<<"totalEmails">> => Total, <<"unreadEmails">> => Unread}
             ),
             {ok, _, _} = mailio_db:put(Db, Doc1),
@@ -691,14 +708,34 @@ bump_mailbox(Db, MailboxId, TotalDelta, UnreadDelta) ->
     end.
 
 mark_dirty(Db, MailboxId) ->
+    mark_dirty(Db, MailboxId, <<"counters_dirty">>).
+
+mark_dirty(Db, MailboxId, Key) ->
     DocId = <<?ID_MAILBOX, MailboxId/binary>>,
     case mailio_db:get(Db, DocId) of
         {ok, Doc} ->
-            {ok, _, _} = mailio_db:put(Db, Doc#{<<"counters_dirty">> => true}),
+            {ok, _, _} = mailio_db:put(Db, Doc#{Key => true}),
             ok;
         {error, not_found} ->
             ok
     end.
+
+mark_ingesting(Db, Mailboxes) ->
+    lists:foreach(fun(M) -> ok = mark_dirty(Db, M, ?INGEST_MARK) end, Mailboxes).
+
+clear_ingesting(Db, Mailboxes) ->
+    lists:foreach(
+        fun(M) ->
+            DocId = <<?ID_MAILBOX, M/binary>>,
+            case mailio_db:get(Db, DocId) of
+                {ok, #{?INGEST_MARK := _} = Doc} ->
+                    {ok, _, _} = mailio_db:put(Db, maps:remove(?INGEST_MARK, Doc));
+                _ ->
+                    ok
+            end
+        end,
+        Mailboxes
+    ).
 
 %% The counters moved and the mark gone, in the one write of the mailbox.
 settle_counter(Db, MailboxId, TotalDelta, UnreadDelta) ->

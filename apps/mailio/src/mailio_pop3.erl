@@ -48,6 +48,11 @@
 -spec open(map()) -> {ok, conn()} | mailio_error:t().
 open(#{host := Host} = Config) ->
     try
+        %% a setting that is not understood must not end up as plain text
+        lists:member(maps:get(tls, Config, starttls), [true, starttls, false]) orelse
+            fail(
+                mailio_error:new(pop3_tls_failed, <<"the tls setting is not understood">>, #{})
+            ),
         Port = maps:get(port, Config, default_port(maps:get(tls, Config, starttls))),
         {Mod, Sock} = connect(to_list(Host), Port, Config),
         C0 = track(#{mod => Mod, sock => Sock, caps => [], config => Config}),

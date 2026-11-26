@@ -33,6 +33,23 @@
 
 ### Fixed
 
+- The connection specification for a supervisor no longer takes a password or a
+  token, because a supervisor writes its start arguments in its reports. Give a
+  reference to your credentials module instead. POP3 and SMTP now also refuse a
+  TLS setting they do not know, instead of using plain text.
+- After a lost IMAP connection was made again, reading changes could fail on a
+  server that wants QRESYNC enabled on every connection. It is now enabled
+  after each login, and the server's capabilities are read again.
+- A retried ingest no longer leaves the unread and total counts of a mailbox
+  wrong: the next write counts them again from the emails.
+- Encoding a long quoted-printable line took time that grew with the square of
+  its length, and so did replacing many invalid bytes in a header. Both are
+  linear now.
+- A permanent refusal of the second EHLO after STARTTLS is no longer reported as
+  a retryable error, and a name and address that were too long for one line are
+  folded.
+- CI now runs Dialyzer as it is and fails on any warning.
+
 - After a STARTTLS session was lost, the reconnect tried TLS at once on the
   plain port. It now starts in plain text and upgrades again. A TLS setting
   that is not understood is refused at start instead of being used as plain

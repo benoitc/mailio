@@ -13,6 +13,10 @@
 %%%   <li>`{password, User, Pass}' - plain SASL PLAIN/LOGIN</li>
 %%%   <li>`{oauth2, User, AccessToken}' - XOAUTH2 bearer token (OAUTHBEARER is not implemented)</li>
 %%%   <li>`{token_fun, Fun}' - lazy/refreshable; Fun/0 yields one of the above</li>
+%%%   <li>`{provider, {Module, Args}, AccountId, Service}' - a reference: the
+%%%   secret is fetched from `Module' each time it is needed and is never part of
+%%%   the configuration, which is what lets a supervisor hold the configuration
+%%%   without a crash report showing the secret</li>
 %%% </ul>
 -module(mailio_credentials).
 
@@ -26,7 +30,8 @@
 -type provider() :: {module(), ProviderArgs :: term()}.
 -type service() :: imap | smtp | jmap.
 -type cred() ::
-    {password, binary(), binary()}
+    {provider, provider(), binary(), service()}
+    | {password, binary(), binary()}
     | {oauth2, binary(), binary()}
     | {token_fun, fun(() -> {ok, cred()} | {error, term()})}.
 
@@ -86,6 +91,8 @@ resolve({token_fun, Fun}, Opts) when is_function(Fun, 0) ->
         after 0 -> {error, credentials_timeout}
         end
     end;
+resolve({provider, Provider, AccountId, Service}, Opts) ->
+    resolve({token_fun, fun() -> fetch(Provider, AccountId, Service) end}, Opts);
 resolve({error, _} = Error, _Opts) ->
     Error;
 resolve(Cred, _Opts) ->

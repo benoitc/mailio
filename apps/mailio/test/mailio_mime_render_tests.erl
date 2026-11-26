@@ -344,3 +344,74 @@ a_very_long_quoted_printable_line_is_cheap_test_() ->
         [?assert(byte_size(L) =< 76) || L <- binary:split(Body, <<"\r\n">>, [global])],
         ?assertEqual(Line, mailio_mime_decode:decode_quoted_printable(Body))
     end}.
+
+%% The work grows with the size: a line four times as long costs about four times
+%% as much, not sixteen.
+quoted_printable_work_grows_with_the_size_test() ->
+    Cost = fun(Size) ->
+        Line = binary:copy(<<"abcdefgh ">>, Size div 9),
+        Self = self(),
+        spawn_link(fun() ->
+            {reductions, R0} = process_info(self(), reductions),
+            _ = mailio_mime_render:render(#{
+                type => <<"text">>,
+                subtype => <<"plain">>,
+                encoding => <<"quoted-printable">>,
+                headers => [],
+                body => Line
+            }),
+            {reductions, R1} = process_info(self(), reductions),
+            Self ! {cost, R1 - R0}
+        end),
+        receive
+            {cost, N} -> N
+        after 20000 -> error(timeout)
+        end
+    end,
+    Small = Cost(16 * 1024),
+    Large = Cost(64 * 1024),
+    ?assert(Large < 6 * Small).
+
+%% Many bytes that are not UTF-8 are replaced in one pass.
+many_bad_bytes_in_a_header_cost_linear_time_test() ->
+    Cost = fun(Size) ->
+        Bad = binary:copy(<<255>>, Size),
+        Self = self(),
+        spawn_link(fun() ->
+            {reductions, R0} = process_info(self(), reductions),
+            _ = mailio_mime_render:encode_unstructured(Bad),
+            {reductions, R1} = process_info(self(), reductions),
+            Self ! {cost, R1 - R0}
+        end),
+        receive
+            {cost, N} -> N
+        after 20000 -> error(timeout)
+        end
+    end,
+    ?assert(Cost(32 * 1024) < 6 * Cost(8 * 1024)).
+
+%% A name that needs encoding and an address on one line would be over 76
+%% characters with the header name: the address is on a line of its own.
+an_encoded_name_and_its_address_fit_the_line_test() ->
+    Mail = mailio_mime_render:build(#{
+        from => [
+            #{email => <<"someone.long@example.org">>, name => <<"Zoë Müller-Lindström"/utf8>>}
+        ],
+        to => [#{email => <<"b@y">>, name => <<"Zoë Müller-Lindström"/utf8>>}],
+        text => <<"hi">>
+    }),
+    [?assert(byte_size(L) =< 76) || L <- binary:split(header_block(Mail), <<"\r\n">>, [global])].
+
+%% An ASCII name that is long next to a long address is folded too.
+a_long_ascii_name_and_address_fit_the_line_test() ->
+    Mail = mailio_mime_render:build(#{
+        from => [
+            #{
+                email => <<"a.very.long.mailbox.name@subdomain.example.org">>,
+                name => <<"Alexander Bartholomew Smith">>
+            }
+        ],
+        to => [#{email => <<"b@y">>}],
+        text => <<"hi">>
+    }),
+    [?assert(byte_size(L) =< 76) || L <- binary:split(header_block(Mail), <<"\r\n">>, [global])].

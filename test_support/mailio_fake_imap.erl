@@ -15,7 +15,7 @@
 
 -export([start/0, start/1, stop/1, port/1, commands/1]).
 -export([last_flags/2, set_flags/3, deliver/2, expunge/2, new_validity/2, set_failure/3]).
--export([set_option/3, inject/2, set_uidnext/2, set_search/2]).
+-export([set_option/3, inject/2, set_uidnext/2, set_search/2, drop_connection/1]).
 
 -record(srv, {port, pid, ref, tab}).
 
@@ -81,7 +81,8 @@ set_failure(Srv, Kind, Bool) when
 %% which RFC 3501 allows), `fail_max_uid' (UID FETCH * answers NO) and
 %% `bad_vanished' (a QRESYNC answer with a VANISHED line that lists nothing) and
 %% `no_exists' (EXAMINE does not report EXISTS), `zero_max_uid' (UID FETCH *
-%% answers with UID 0), `fail_flags_fetch' (FETCH 1:* answers NO) and `bad_validity' (UIDVALIDITY 01). `set_search/2' makes UID SEARCH
+%% answers with UID 0), `fail_flags_fetch' (FETCH 1:* answers NO), `enforce_enable' (a QRESYNC parameter
+%% on SELECT or EXAMINE is BAD unless this connection sent ENABLE QRESYNC) and `bad_validity' (UIDVALIDITY 01). `set_search/2' makes UID SEARCH
 %% answer badly.
 set_option(Srv, Option, Bool) when
     Option =:= no_uidnext;
@@ -89,6 +90,7 @@ set_option(Srv, Option, Bool) when
     Option =:= fail_max_uid;
     Option =:= zero_max_uid;
     Option =:= fail_flags_fetch;
+    Option =:= enforce_enable;
     Option =:= bad_validity;
     Option =:= bad_vanished
 ->
@@ -118,6 +120,9 @@ set_search(Srv, Mode) when
 %% @doc The UIDNEXT the server reports, for a mailbox whose UIDs are far apart. A
 %% binary is sent as it is, to send one that is not a valid number.
 set_uidnext(Srv, N) -> call(Srv, {set_uidnext, N}, ok).
+
+%% @doc The server closes the connection it has now, as a network failure would.
+drop_connection(Srv) -> call(Srv, drop_connection, ok).
 
 %% @doc Raw lines the server volunteers with its next answer to a UID FETCH,
 %% for example a flag update for a message that was not asked for.
@@ -149,7 +154,9 @@ accept_loop(LSock, Opts, Ref, State) ->
                 <<"* OK [CAPABILITY IMAP4rev1 IDLE CONDSTORE QRESYNC MOVE UIDPLUS SPECIAL-USE] ready\r\n">>
             ),
             inet:setopts(Sock, [{active, once}]),
-            State1 = loop(Sock, State#{selected => undefined, idling => undefined}, Ref),
+            State1 = loop(
+                Sock, State#{selected => undefined, idling => undefined, enabled => false}, Ref
+            ),
             accept_loop(LSock, Opts, Ref, State1);
         {error, timeout} ->
             receive
@@ -185,6 +192,10 @@ loop(Sock, State, Ref) ->
                     gen_tcp:close(Sock),
                     State
             end;
+        {control, From, Ref, drop_connection} ->
+            From ! {ok, Ref, ok},
+            gen_tcp:close(Sock),
+            State;
         {control, From, Ref, Msg} ->
             {Reply, State1} = handle_control(Sock, Ref, Msg, State),
             From ! Reply,
@@ -224,6 +235,8 @@ handle_control(Sock, Ref, {deliver, Subject}, #{messages := Ms, uidnext := Uid} 
     {{ok, Ref, ok}, State1};
 handle_control(_Sock, Ref, {set_option, Option, Bool}, State) ->
     {{ok, Ref, ok}, State#{{opt, Option} => Bool}};
+handle_control(_Sock, Ref, drop_connection, State) ->
+    {{ok, Ref, ok}, State};
 handle_control(_Sock, Ref, {set_search, Mode}, State) ->
     {{ok, Ref, ok}, State#{search_mode => Mode}};
 handle_control(_Sock, Ref, {set_uidnext, N}, State) ->
@@ -397,7 +410,7 @@ dispatch(Sock, Tag, Rest, State) ->
         <<"ENABLE">> ->
             send(Sock, <<"* ENABLED QRESYNC\r\n">>),
             tagged(Sock, Tag, <<"OK ENABLE done">>),
-            {continue, State};
+            {continue, State#{enabled => true}};
         <<"NOOP">> ->
             tagged(Sock, Tag, <<"OK NOOP done">>),
             {continue, State};
@@ -428,6 +441,18 @@ dispatch(Sock, Tag, Rest, State) ->
     end.
 
 handle_select(Sock, Tag, Args, State) ->
+    case
+        maps:get({opt, enforce_enable}, State, false) andalso
+            not maps:get(enabled, State, false) andalso qresync_modseq(Args) =/= none
+    of
+        true ->
+            tagged(Sock, Tag, <<"BAD QRESYNC was not enabled">>),
+            {continue, State};
+        false ->
+            handle_select_ok(Sock, Tag, Args, State)
+    end.
+
+handle_select_ok(Sock, Tag, Args, State) ->
     Mailbox = unquote(first_token(Args)),
     send_select(Sock, State),
     case qresync_modseq(Args) of

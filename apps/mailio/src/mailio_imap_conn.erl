@@ -37,7 +37,8 @@
     ready/3,
     running/3,
     idle/3,
-    backoff/3
+    backoff/3,
+    negotiate/3
 ]).
 
 -define(CONNECT_TIMEOUT, 30000).
@@ -74,6 +75,8 @@
     untagged = [] :: [term()],
     literal :: binary() | [binary()] | undefined,
     caps = [] :: [binary()],
+    %% where the extensions negotiation after login stands: capability | enable
+    neg :: capability | enable | undefined,
     notify :: pid() | undefined,
     unsolicited = [] :: [term()],
     backoff = ?BACKOFF_MIN :: pos_integer()
@@ -100,8 +103,18 @@
 %% an application that keeps a connection for a long time starts it under its
 %% own supervisor with this. The connection handles its own reconnects, so it is
 %% restarted only when it crashes.
+%%
+%% A supervisor puts the start arguments in its reports, so they must not hold a
+%% secret: the config may not have a password, a token or a `username'/`password'
+%% pair. Give `credentials => {provider, {Module, Args}, AccountId, imap}' (see
+%% {@link mailio_credentials}) and the connection fetches the secret itself each
+%% time it logs in. A `token_fun' is accepted too, as the fun shows no secret.
 -spec child_spec(map()) -> supervisor:child_spec().
 child_spec(Config) ->
+    case secret_in(Config) of
+        true -> error(secret_in_child_spec);
+        false -> ok
+    end,
     #{
         id => {?MODULE, maps:get(host, Config, undefined), maps:get(port, Config, undefined)},
         start => {?MODULE, start_link, [Config]},
@@ -110,6 +123,14 @@ child_spec(Config) ->
         type => worker,
         modules => [?MODULE]
     }.
+
+secret_in(Config) ->
+    maps:is_key(password, Config) orelse maps:is_key(token, Config) orelse
+        case maps:get(credentials, Config, undefined) of
+            {password, _, _} -> true;
+            {oauth2, _, _} -> true;
+            _ -> false
+        end.
 
 -spec start_link(map()) -> {ok, pid()} | {error, term()}.
 start_link(Config) ->
@@ -141,7 +162,7 @@ call(Pid, Request) ->
 
 now_ms() -> erlang:monotonic_time(millisecond).
 
--spec capabilities(pid()) -> [binary()].
+-spec capabilities(pid()) -> [binary()] | {error, term()}.
 capabilities(Pid) ->
     case call(Pid, capabilities) of
         [] ->
@@ -387,9 +408,16 @@ auth(info, {T, Sock, Bin}, #data{sock = Sock} = Data) when
         Data,
         Bin,
         fun(Status, _Code, _Text, Data1) ->
-            case Status of
-                ok -> {next_state, ready, Data1#data{tag = undefined, literal = undefined}};
-                _ -> {next_state, auth_failed, Data1#data{tag = undefined, literal = undefined}}
+            Data2 = Data1#data{tag = undefined, literal = undefined},
+            case {Status, Data2#data.config} of
+                {ok, #{enable_qresync := true}} ->
+                    %% what the server offers is read again on every login, and
+                    %% QRESYNC enabled on each connection (RFC 7162, section 3.2.3)
+                    {next_state, negotiate, Data2#data{caps = [], neg = capability}};
+                {ok, _} ->
+                    {next_state, ready, Data2};
+                _ ->
+                    {next_state, auth_failed, Data2}
             end
         end
     );
@@ -397,6 +425,50 @@ auth(info, Event, Data) ->
     handle_socket_closed(Event, Data);
 auth({call, _From}, _Req, Data) ->
     {keep_state, Data, [{postpone, true}]}.
+
+%%====================================================================
+%% State: negotiate (after login: the capabilities, then ENABLE QRESYNC)
+%%====================================================================
+
+negotiate(enter, _Old, #data{neg = capability} = Data) ->
+    negotiate_send(Data, fun mailio_imap_proto:capability/1);
+negotiate(state_timeout, handshake_timeout, Data) ->
+    drop(Data);
+negotiate(info, {T, Sock, Bin}, #data{sock = Sock} = Data) when
+    T =:= tcp; T =:= ssl
+->
+    process_until_tagged(
+        Data,
+        Bin,
+        fun
+            (ok, _Code, _Text, #data{neg = capability, caps = Caps} = Data1) ->
+                case lists:member(<<"QRESYNC">>, [string:uppercase(C) || C <- Caps]) of
+                    true ->
+                        Data2 = Data1#data{neg = enable, tag = undefined, untagged = []},
+                        {next_state, negotiate, Data2, [{state_timeout, 0, send_enable}]};
+                    false ->
+                        {next_state, ready, Data1#data{neg = undefined, tag = undefined}}
+                end;
+            (ok, _Code, _Text, #data{neg = enable} = Data1) ->
+                {next_state, ready, Data1#data{neg = undefined, tag = undefined}};
+            (_Status, _Code, _Text, Data1) ->
+                %% the server refused: this connection is not used, a new one is made
+                drop(Data1)
+        end
+    );
+negotiate(state_timeout, send_enable, #data{neg = enable} = Data) ->
+    negotiate_send(Data, fun(Tag) -> mailio_imap_proto:enable(Tag, [<<"QRESYNC">>]) end);
+negotiate(info, Event, Data) ->
+    handle_socket_closed(Event, Data);
+negotiate({call, _From}, _Req, Data) ->
+    {keep_state, Data, [{postpone, true}]}.
+
+negotiate_send(Data, Build) ->
+    {Tag, Data1} = next_tag(Data),
+    _ = send(Data1, Build(Tag)),
+    {keep_state, Data1#data{tag = Tag, untagged = []}, [
+        {state_timeout, cmd_timeout(Data1), handshake_timeout}
+    ]}.
 
 %%====================================================================
 %% State: auth_failed (terminal: the server refused the credentials)

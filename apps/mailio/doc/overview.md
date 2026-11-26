@@ -63,6 +63,7 @@ These affect code that calls `mailio_imap_proto` directly, which is public API.
 | `{vanished, Earlier, [Uid]}` | `{vanished, Earlier, [{Lo, Hi}]}` |
 | `read_response/3` took a byte offset | it takes `start`, then the state it returned in `{more, State}` |
 | An IMAP connection without a `tls` option used plain text | the default is `starttls`, as for POP3 and SMTP. Plain text needs `tls => false`. A server that greets with PREAUTH on a connection that has to be protected is refused with `tls_failed` |
+| POP3 and SMTP took any `tls` value they did not know as plain text | an unknown value is refused (`pop3_tls_failed`, `smtp_tls_failed`) before a socket is opened |
 | `build/1` left out the Date header | it adds one (now, or the `date` you give in seconds since the epoch) unless you pass a `Date` header |
 
 The sync adapter (`mailio_adapter`) reports more than before:
@@ -80,7 +81,7 @@ The rest of this section is about `reset` and `resync`. `reset` means the UIDs t
 
 ## Sharing one connection
 
-The IMAP adapter lets several processes use one handle. A call that selects a mailbox and then acts on it (reading a message, changing flags, moving, expunging, listing, starting IDLE) holds the connection for the whole call, so it never acts on a mailbox somebody else selected in between. Callers wait for their turn in the order they asked, for up to two minutes, and a caller that dies gives its turn up. If you use `mailio_imap_conn` directly you select and send on your own, so give each connection one user or use `mailio_imap_lock` the same way. A connection started with `start_link/1` is linked to the process that started it and goes down with it; to keep one for a long time start it under your own supervisor with `mailio_imap_conn:child_spec/1`.
+The IMAP adapter lets several processes use one handle. A call that selects a mailbox and then acts on it (reading a message, changing flags, moving, expunging, listing, starting IDLE) holds the connection for the whole call, so it never acts on a mailbox somebody else selected in between. Callers wait for their turn in the order they asked, for up to two minutes, and a caller that dies gives its turn up. If you use `mailio_imap_conn` directly you select and send on your own, so give each connection one user or use `mailio_imap_lock` the same way. A connection started with `start_link/1` is linked to the process that started it and goes down with it; to keep one for a long time start it under your own supervisor with `mailio_imap_conn:child_spec/1`. A supervisor puts the start arguments in its reports, so the config you give it may not hold a password or a token: use `credentials => {provider, {Module, Args}, AccountId, imap}` and the connection fetches the secret from your `mailio_credentials` module each time it logs in.
 
 `expunge/3` removes the UIDs you name and no other message, with `UID EXPUNGE`. A server without UIDPLUS has only `EXPUNGE`, which would also take every message another client flagged `\\Deleted` at that moment, so the call returns `imap_operation_unsupported` before it changes anything. Moving a message uses `UID MOVE` when the server has MOVE, and copy then `UID EXPUNGE` when it has UIDPLUS; with neither it is refused the same way.
 
