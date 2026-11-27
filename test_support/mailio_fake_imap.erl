@@ -84,7 +84,9 @@ set_failure(Srv, Kind, Bool) when
 %% answers with UID 0), `fail_flags_fetch' (FETCH 1:* answers NO), `enforce_enable' (a QRESYNC parameter
 %% on SELECT or EXAMINE is BAD unless this connection sent ENABLE QRESYNC) and `bad_validity' (UIDVALIDITY 01). `set_search/2' makes UID SEARCH
 %% answer badly. `meta_headers' adds a Message-ID header section to every
-%% metadata FETCH answer, so search hits carry a Message-ID.
+%% metadata FETCH answer, so search hits carry a Message-ID. `stall_section'
+%% never answers a UID FETCH that asks for a body section, so the client
+%% hangs on it as on a server that stopped responding.
 set_option(Srv, Option, Bool) when
     Option =:= no_uidnext;
     Option =:= no_exists;
@@ -96,7 +98,8 @@ set_option(Srv, Option, Bool) when
     Option =:= empty_enabled;
     Option =:= bad_validity;
     Option =:= bad_vanished;
-    Option =:= meta_headers
+    Option =:= meta_headers;
+    Option =:= stall_section
 ->
     call(Srv, {set_option, Option, Bool}, ok).
 
@@ -610,21 +613,32 @@ body_uid_fails(SetBin, ItemsBin, State) ->
     end.
 
 handle_uid_fetch_checked(Sock, Tag, SetBin, ItemsBin, State) ->
-    case {is_body_fetch(ItemsBin), maps:get({fail, body}, State, false)} of
-        {true, true} ->
-            tagged(Sock, Tag, <<"NO cannot read the message">>),
+    case maps:get({opt, stall_section}, State, false) andalso is_section_fetch(ItemsBin) of
+        true ->
+            %% never answer: the client waits until it gives up
             {continue, State};
-        {false, _} ->
-            case maps:get({fail, meta}, State, false) of
-                true ->
-                    tagged(Sock, Tag, <<"NO cannot list">>),
+        false ->
+            case {is_body_fetch(ItemsBin), maps:get({fail, body}, State, false)} of
+                {true, true} ->
+                    tagged(Sock, Tag, <<"NO cannot read the message">>),
                     {continue, State};
-                false ->
+                {false, _} ->
+                    case maps:get({fail, meta}, State, false) of
+                        true ->
+                            tagged(Sock, Tag, <<"NO cannot list">>),
+                            {continue, State};
+                        false ->
+                            handle_uid_fetch_data(Sock, Tag, SetBin, ItemsBin, State)
+                    end;
+                _ ->
                     handle_uid_fetch_data(Sock, Tag, SetBin, ItemsBin, State)
-            end;
-        _ ->
-            handle_uid_fetch_data(Sock, Tag, SetBin, ItemsBin, State)
+            end
     end.
+
+%% A UID FETCH that asks for a body section (TEXT or a part number), as
+%% opposed to metadata (headers, bodystructure).
+is_section_fetch(ItemsBin) ->
+    re:run(string:uppercase(ItemsBin), <<"BODY(\\.PEEK)?\\[(TEXT|[0-9])">>) =/= nomatch.
 
 handle_uid_fetch_data(Sock, Tag, SetBin, ItemsBin, #{messages := Ms} = State) ->
     case is_body_fetch(ItemsBin) of

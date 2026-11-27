@@ -724,52 +724,65 @@ thread(Account, #{mailbox := Box, uv := UV, uid := Uid}, Max) ->
     with_conn(Account, fun(C) ->
         case examine(C, Box) of
             {ok, #{uv := UV} = Sel} ->
-                {ok, [M]} = fetch_meta(C, [Uid]),
-                Self = to_hit(Account, Box, Sel, M),
-                Root =
-                    case maps:get(references, Self) of
-                        [R | _] ->
-                            R;
-                        [] ->
-                            case maps:get(in_reply_to, Self) of
-                                undefined -> maps:get(msgid, Self);
-                                I -> I
-                            end
-                    end,
-                Uids =
-                    case Root of
-                        undefined ->
-                            [Uid];
-                        _ ->
-                            Q = mailio_mcp_imap_io:quote(Root),
-                            case
-                                mailio_mcp_imap_io:cmd(C, [
-                                    <<"UID SEARCH OR OR HEADER Message-ID ">>,
-                                    Q,
-                                    <<" HEADER References ">>,
-                                    Q,
-                                    <<" HEADER In-Reply-To ">>,
-                                    Q
-                                ])
-                            of
-                                {ok, U, _} -> lists:usort([Uid | search_uids(U)]);
-                                _ -> [Uid]
-                            end
-                    end,
-                Capped = length(Uids) > Max,
-                Take = lists:nthtail(max(0, length(Uids) - Max), Uids),
-                {ok, Ms} = fetch_meta(C, Take),
-                Hits = [to_hit(Account, Box, Sel, X) || X <- Ms],
-                Sorted = lists:sort(
-                    fun(A, B) -> sort_key(A) =< sort_key(B) end, Hits
-                ),
-                {ok, Sorted, Capped};
+                case fetch_meta(C, [Uid]) of
+                    {ok, [M]} ->
+                        thread_from(C, Account, Box, Sel, Uid, M, Max);
+                    {ok, []} ->
+                        {error, stale_handle};
+                    {error, _} = E ->
+                        E
+                end;
             {ok, _} ->
                 {error, stale_handle};
             {error, _} = E ->
                 E
         end
     end).
+
+thread_from(C, Account, Box, Sel, Uid, M, Max) ->
+    Self = to_hit(Account, Box, Sel, M),
+    Root =
+        case maps:get(references, Self) of
+            [R | _] ->
+                R;
+            [] ->
+                case maps:get(in_reply_to, Self) of
+                    undefined -> maps:get(msgid, Self);
+                    I -> I
+                end
+        end,
+    Uids =
+        case Root of
+            undefined ->
+                [Uid];
+            _ ->
+                Q = mailio_mcp_imap_io:quote(Root),
+                case
+                    mailio_mcp_imap_io:cmd(C, [
+                        <<"UID SEARCH OR OR HEADER Message-ID ">>,
+                        Q,
+                        <<" HEADER References ">>,
+                        Q,
+                        <<" HEADER In-Reply-To ">>,
+                        Q
+                    ])
+                of
+                    {ok, U, _} -> lists:usort([Uid | search_uids(U)]);
+                    _ -> [Uid]
+                end
+        end,
+    Capped = length(Uids) > Max,
+    Take = lists:nthtail(max(0, length(Uids) - Max), Uids),
+    case fetch_meta(C, Take) of
+        {ok, Ms} ->
+            Hits = [to_hit(Account, Box, Sel, X) || X <- Ms],
+            Sorted = lists:sort(
+                fun(A, B) -> sort_key(A) =< sort_key(B) end, Hits
+            ),
+            {ok, Sorted, Capped};
+        {error, _} = E ->
+            E
+    end.
 
 sort_key(H) ->
     {
@@ -1123,23 +1136,29 @@ qresync_apply_within(C, Account, Box, Prev, Old, #{exists := Exists} = Sel, Even
                 partial => false
             },
             ShowAdd = lists:nthtail(max(0, length(Added) - 50), Added),
-            {ok, Metas} = fetch_meta(C, ShowAdd),
-            {ok, #{
-                unchanged => lists:append([Added, Gone, Updated]) =:= [],
-                snapshot => Snap,
-                added => [to_hit(Account, Box, Sel, M) || M <- Metas],
-                added_total => length(Added),
-                updated => [
-                    #{
-                        uid => U,
-                        flags => bits_flags(maps:get(U, Cur)),
-                        unread => (maps:get(U, Cur) band 1) =:= 0
-                    }
-                 || U <- Updated
-                ],
-                removed => Gone,
-                uv => maps:get(uv, Sel)
-            }}
+            case fetch_meta(C, ShowAdd) of
+                {ok, Metas} ->
+                    {ok, #{
+                        unchanged => lists:append([Added, Gone, Updated]) =:= [],
+                        snapshot => Snap,
+                        added => [to_hit(Account, Box, Sel, M) || M <- Metas],
+                        added_total => length(Added),
+                        updated => [
+                            #{
+                                uid => U,
+                                flags => bits_flags(maps:get(U, Cur)),
+                                unread => (maps:get(U, Cur) band 1) =:= 0
+                            }
+                         || U <- Updated
+                        ],
+                        removed => Gone,
+                        uv => maps:get(uv, Sel)
+                    }};
+                {error, _} = E ->
+                    %% the previous checkpoint stays usable: the caller keeps
+                    %% it and a retry reports the delivery
+                    E
+            end
     end.
 
 full_changes(C, Account, Box, Sel, Prev) ->
@@ -1231,25 +1250,31 @@ full_changes(C, Account, Box, Sel, Prev, Cap, Cur) ->
                 maps:get(U, Old) =/= F
             ]),
             ShowAdd = lists:nthtail(max(0, length(Added) - 50), Added),
-            {ok, Metas} = fetch_meta(C, ShowAdd),
-            AddedHits = [to_hit(Account, Box, Sel, M) || M <- Metas],
-            Unchanged = lists:append([Added, Removed, Updated]) =:= [],
-            {ok, #{
-                unchanged => Unchanged,
-                snapshot => Snap,
-                added => AddedHits,
-                added_total => length(Added),
-                updated => [
-                    #{
-                        uid => U,
-                        flags => bits_flags(maps:get(U, Cur)),
-                        unread => (maps:get(U, Cur) band 1) =:= 0
-                    }
-                 || U <- Updated
-                ],
-                removed => Removed,
-                uv => maps:get(uv, Sel)
-            }}
+            case fetch_meta(C, ShowAdd) of
+                {ok, Metas} ->
+                    AddedHits = [to_hit(Account, Box, Sel, M) || M <- Metas],
+                    Unchanged = lists:append([Added, Removed, Updated]) =:= [],
+                    {ok, #{
+                        unchanged => Unchanged,
+                        snapshot => Snap,
+                        added => AddedHits,
+                        added_total => length(Added),
+                        updated => [
+                            #{
+                                uid => U,
+                                flags => bits_flags(maps:get(U, Cur)),
+                                unread => (maps:get(U, Cur) band 1) =:= 0
+                            }
+                         || U <- Updated
+                        ],
+                        removed => Removed,
+                        uv => maps:get(uv, Sel)
+                    }};
+                {error, _} = E ->
+                    %% the previous checkpoint stays usable: the caller keeps
+                    %% it and a retry reports the delivery
+                    E
+            end
     end.
 
 flag_bits(Flags) ->

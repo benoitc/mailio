@@ -23,7 +23,14 @@ init([]) ->
     erlang:send_after(60000, self(), sweep),
     {ok, #{}}.
 
-handle_call(_, _, S) -> {reply, ok, S}.
+handle_call({put, Account, Key, Value, Epoch}, _From, S) ->
+    {reply, do_put(Account, Key, Value, Epoch), S};
+handle_call({invalidate_account, Account}, _From, S) ->
+    {reply, do_invalidate_account(Account), S};
+handle_call({invalidate_mailbox, Account, Mailbox}, _From, S) ->
+    {reply, do_invalidate_mailbox(Account, Mailbox), S};
+handle_call(_, _, S) ->
+    {reply, ok, S}.
 handle_cast(_, S) -> {noreply, S}.
 
 handle_info(sweep, S) ->
@@ -63,11 +70,23 @@ bump(Account) ->
 put(Account, Key, Value) ->
     put(Account, Key, Value, epoch(Account)).
 
-%% @doc Insert only if the account's generation is still Epoch. A search that
-%% captured the generation before an invalidation must never land its stale
-%% result after the invalidation deleted the entries.
+%% @doc Insert only if the account's generation is still Epoch. The check and
+%% the insert run in the cache owner, so an invalidation is either entirely
+%% before or entirely after the write: a search that captured the generation
+%% before an invalidation can never land its stale result afterwards.
 -spec put(binary(), term(), term(), non_neg_integer()) -> ok | stale.
 put(Account, Key, Value, Epoch) ->
+    gen_server:call(?MODULE, {put, Account, Key, Value, Epoch}).
+
+invalidate_account(Account) ->
+    gen_server:call(?MODULE, {invalidate_account, Account}).
+
+invalidate_mailbox(Account, Mailbox) ->
+    gen_server:call(?MODULE, {invalidate_mailbox, Account, Mailbox}).
+
+stats() -> #{entries => ets:info(?T, size)}.
+
+do_put(Account, Key, Value, Epoch) ->
     case epoch(Account) of
         Epoch ->
             Max = mailio_mcp_config:limit(cache_max_entries, 2000),
@@ -84,12 +103,12 @@ put(Account, Key, Value, Epoch) ->
             stale
     end.
 
-invalidate_account(Account) ->
+do_invalidate_account(Account) ->
     ets:match_delete(?T, {{Account, '_'}, '_', '_'}),
     bump(Account),
     ok.
 
-invalidate_mailbox(Account, Mailbox) ->
+do_invalidate_mailbox(Account, Mailbox) ->
     ets:match_delete(?T, {{Account, {'_', Mailbox, '_'}}, '_', '_'}),
     %% Search entries cover a set of mailboxes; drop the ones that include
     %% this one so changed mail are never served from a stale search result.
@@ -100,8 +119,6 @@ invalidate_mailbox(Account, Mailbox) ->
     ],
     bump(Account),
     ok.
-
-stats() -> #{entries => ets:info(?T, size)}.
 
 sweep() ->
     Cut = erlang:system_time(second) - mailio_mcp_config:limit(cache_ttl, 300),

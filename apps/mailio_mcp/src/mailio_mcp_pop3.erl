@@ -114,8 +114,18 @@ ensure_index(C, #{id := AccId}, Cap) ->
         end,
     Todo = lists:sublist(lists:reverse(lists:sort(New ++ NoUidl)), Cap),
     Resolved = lists:filtermap(fun(E) -> index_one(C, AccId, E, HasUidl) end, Todo),
-    Incomplete = length(New) > length(Todo),
-    {Entries, Resolved, Incomplete, HasUidl, length(New) - length(Todo)}.
+    %% Messages the index cannot answer for: outside the batch, or whose
+    %% headers could not be read. Counted from the actual listing, so a
+    %% short batch makes the coverage partial instead of complete.
+    NewNs = [N || {N, _, _} <- New],
+    ResolvedNs = [N || {N, _} <- Resolved],
+    Unresolved = length([
+        1
+     || {N, Id, _} <- Entries,
+        not ((Id =/= undefined andalso not lists:member(N, NewNs)) orelse
+            lists:member(N, ResolvedNs))
+    ]),
+    {Entries, Resolved, Unresolved > 0, HasUidl, Unresolved}.
 
 index_one(C, AccId, {N, Id0, Size}, HasUidl) ->
     case headers(C, N, Size) of
@@ -242,10 +252,13 @@ index_hits(Account, Q, Entries, Map, AccId, Incomplete, Missing) ->
                                     false -> {Acc, F}
                                 end;
                             error ->
+                                %% no metadata: not a non-match, the
+                                %% coverage must stay partial
                                 {Acc, F + 1}
                         end;
                     error ->
-                        {Acc, F}
+                        %% outside the resolved set: not a non-match either
+                        {Acc, F + 1}
                 end
             end,
             {[], 0},

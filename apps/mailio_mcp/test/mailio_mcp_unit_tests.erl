@@ -241,6 +241,87 @@ cache_generation_blocks_stale_write_test_() ->
             ]
         end}.
 
+%% A put and an invalidation that race must not leave the deleted entry
+%% behind. Invariant: whatever an invalidation leaves readable must have
+%% been written with the generation that invalidation created, because the
+%% generation check and the insert are serialized in the cache owner. A
+%% value carrying an older generation that is readable after an
+%% invalidation is a stale survivor. A tiny cache_max_entries makes the
+%% writer sweep and evict between its generation capture and the insert,
+%% which is the window the old check-then-insert code could lose.
+cache_concurrent_write_and_invalidation_test_() ->
+    {setup,
+        fun() ->
+            application:set_env(mailio_mcp, limits, #{cache_max_entries => 1}),
+            {ok, P} = mailio_mcp_cache:start_link(),
+            P
+        end,
+        fun(P) ->
+            unlink(P),
+            exit(P, shutdown),
+            timer:sleep(50),
+            ok = application:unset_env(mailio_mcp, limits)
+        end,
+        fun(_) ->
+            [
+                fun() ->
+                    Acc = <<"accr">>,
+                    Mailbox = [<<"INBOX">>],
+                    Key = {search, Mailbox, <<"k">>},
+                    Rounds = 100,
+                    Writer =
+                        spawn_link(fun() -> writer(Acc, Key, Rounds) end),
+                    Invalidator =
+                        spawn_link(fun() -> invalidator(Acc, hd(Mailbox), Key, Rounds) end),
+                    Writer ! go,
+                    Invalidator ! go,
+                    wait_done(2)
+                end
+            ]
+        end}.
+
+writer(Acc, Key, N) ->
+    receive
+        go -> ok
+    end,
+    writer_loop(Acc, Key, N).
+
+writer_loop(_Acc, _Key, 0) ->
+    ok;
+writer_loop(Acc, Key, N) ->
+    E = mailio_mcp_cache:epoch(Acc),
+    _ = mailio_mcp_cache:put(Acc, Key, {v, E}, E),
+    writer_loop(Acc, Key, N - 1).
+
+invalidator(Acc, Mailbox, Key, N) ->
+    receive
+        go -> ok
+    end,
+    invalidator_loop(Acc, Mailbox, Key, N).
+
+invalidator_loop(_Acc, _Mailbox, _Key, 0) ->
+    ok;
+invalidator_loop(Acc, Mailbox, Key, N) ->
+    ok = mailio_mcp_cache:invalidate_mailbox(Acc, Mailbox),
+    Current = mailio_mcp_cache:epoch(Acc),
+    %% anything readable now was written after the invalidation was
+    %% serialized, so it carries the current generation
+    case mailio_mcp_cache:get(Acc, Key) of
+        {ok, {v, E}, _} when E =/= Current -> exit({stale_survivor, E, Current});
+        _ -> ok
+    end,
+    invalidator_loop(Acc, Mailbox, Key, N - 1).
+
+wait_done(N) -> wait_done(N, 0).
+wait_done(N, N) ->
+    ok;
+wait_done(N, Got) ->
+    receive
+        {'EXIT', Pid, Reason} when Reason =/= normal -> exit({worker_died, Pid, Reason});
+        _ -> wait_done(N, Got + 1)
+    after 15000 -> exit(timeout)
+    end.
+
 %%--------------------------------------------------------------------
 %% Query-centered excerpts
 

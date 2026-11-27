@@ -22,7 +22,11 @@ run(Principal, Args) ->
         QHash = qhash(Accounts, Q),
         {ok, After} ?= decode_cursor(Principal, QHash, Args),
         CountOnly = maps:get(count_only, Q),
-        Results = parallel(Principal, Accounts, Q),
+        %% One absolute deadline for the whole request: account workers,
+        %% fingerprint workers and excerpt fetching share it, so the total
+        %% wait does not grow with the number of accounts or stages.
+        Deadline = erlang:monotonic_time(millisecond) + deadline_ms(),
+        Results = parallel(Principal, Accounts, Q, Deadline),
         {Hits0, Cov, Ages} = merge(Results),
         Hits1 = [H || H <- Hits0, first_seen_ok(H, Q)],
         Sorted = lists:sort(fun(A, B) -> sort_key(A, Q) =< sort_key(B, Q) end, Hits1),
@@ -31,7 +35,7 @@ run(Principal, Args) ->
                 %% count_only never triggers provider fingerprint fetches;
                 %% the count may then include copies a grouped search would
                 %% have merged, so it is reported as approximate
-                {true, false} -> group_copies(Principal, Sorted);
+                {true, false} -> group_copies(Principal, Sorted, Deadline);
                 _ -> Sorted
             end,
         Approx =
@@ -66,7 +70,7 @@ run(Principal, Args) ->
                 {Page, Remaining} = take(Rest, Limit),
                 Page2 =
                     case maps:get(excerpt, Q) of
-                        true -> with_excerpts(Accounts, Page, Q);
+                        true -> with_excerpts(Page, Q, Deadline);
                         false -> Page
                     end,
                 Basis = maps:get(basis, Q),
@@ -230,8 +234,7 @@ decode_cursor(Principal, QHash, Args) ->
 %% Per-account search
 %%====================================================================
 
-parallel(Principal, Accounts, Q) ->
-    Deadline = erlang:monotonic_time(millisecond) + deadline_ms(),
+parallel(Principal, Accounts, Q, Deadline) ->
     Self = self(),
     Workers = [
         begin
@@ -243,6 +246,9 @@ parallel(Principal, Accounts, Q) ->
     ],
     [collect(W, Deadline) || W <- Workers].
 
+%% @doc Milliseconds left until the absolute deadline, 0 when it has passed.
+left_ms(Deadline) -> max(0, Deadline - erlang:monotonic_time(millisecond)).
+
 collect({Id, Ref, Pid, MRef}, Deadline) ->
     receive
         {Ref, R} ->
@@ -250,9 +256,15 @@ collect({Id, Ref, Pid, MRef}, Deadline) ->
             {Id, R};
         {'DOWN', MRef, process, Pid, Reason} ->
             {Id, {error, {unavailable, Reason}}}
-    after max(0, Deadline - erlang:monotonic_time(millisecond)) ->
+    after left_ms(Deadline) ->
+        %% kill and drop the monitor and any late result, so no message is
+        %% left behind in the caller's mailbox
         exit(Pid, kill),
         erlang:demonitor(MRef, [flush]),
+        receive
+            {Ref, _} -> ok
+        after 0 -> ok
+        end,
         {Id, {error, {unavailable, <<"timeout">>}}}
     end.
 
@@ -447,7 +459,9 @@ skip_to(Hits, After, Q) -> [H || H <- Hits, tuple_to_list(sort_key(H, Q)) > tupl
 take(L, N) when length(L) =< N -> {L, []};
 take(L, N) -> lists:split(N, L).
 
-with_excerpts(_Accounts, Page, Q) ->
+with_excerpts(Page, _Q, _Deadline) when Page =:= [] ->
+    Page;
+with_excerpts(Page, Q, Deadline) ->
     Query =
         case maps:get(text, Q, undefined) of
             undefined -> maps:get(subject, Q, undefined);
@@ -458,22 +472,30 @@ with_excerpts(_Accounts, Page, Q) ->
         #{},
         Page
     ),
-    Ex = maps:fold(
-        fun(Id, Hs, Acc) ->
-            {ok, Account} = mailio_mcp_config:account(Id),
-            maps:merge(
-                Acc,
-                maps:from_list([
-                    {{Id, K}, V}
-                 || {K, V} <- maps:to_list(
-                        mailio_mcp_adapter:call(Account, excerpts, [lists:reverse(Hs), Query])
-                    )
-                ])
-            )
-        end,
-        #{},
-        ByAcc
-    ),
+    Ex =
+        lists:foldl(
+            fun(Id, Acc) ->
+                case left_ms(Deadline) of
+                    0 ->
+                        %% out of budget: the hits keep their prefix excerpts
+                        Acc;
+                    _ ->
+                        {ok, Account} = mailio_mcp_config:account(Id),
+                        Hs = lists:reverse(maps:get(Id, ByAcc)),
+                        maps:merge(
+                            Acc,
+                            maps:from_list([
+                                {{Id, K}, V}
+                             || {K, V} <- maps:to_list(
+                                    mailio_mcp_adapter:call(Account, excerpts, [Hs, Query])
+                                )
+                            ])
+                        )
+                end
+            end,
+            #{},
+            lists:reverse(lists:sort(maps:keys(ByAcc)))
+        ),
     [
         case maps:find({maps:get(account, H), excerpt_key(H)}, Ex) of
             {ok, Text} -> H#{excerpt => Text};
@@ -491,7 +513,7 @@ excerpt_key(#{mailbox := M, uidl := L}) -> {M, L}.
 
 %% Copies are grouped only when a content fingerprint confirms they are the
 %% same message. Message-ID is used to pick candidates and nothing else.
-group_copies(Principal, Sorted) ->
+group_copies(Principal, Sorted, Deadline) ->
     ByMsgid = lists:foldl(
         fun(H, M) ->
             case maps:get(msgid, H, undefined) of
@@ -507,7 +529,7 @@ group_copies(Principal, Sorted) ->
         [] ->
             Sorted;
         _ ->
-            Fp = fingerprints(lists:append(Cands)),
+            Fp = fingerprints(lists:append(Cands), Deadline),
             Merged = lists:foldl(
                 fun(Group, Acc) -> merge_group(Principal, Group, Fp, Acc) end, #{}, Cands
             ),
@@ -556,9 +578,8 @@ copy_out(Principal, H) ->
         <<"unread">> => maps:get(unread, H, false)
     }.
 
-fingerprints(Hits) ->
+fingerprints(Hits, Deadline) ->
     Self = self(),
-    Deadline = erlang:monotonic_time(millisecond) + deadline_ms(),
     Workers = [
         begin
             Ref = make_ref(),
@@ -579,8 +600,15 @@ fingerprints(Hits) ->
                         false;
                     {'DOWN', MRef, process, Pid, _} ->
                         false
-                after max(0, Deadline - erlang:monotonic_time(millisecond)) ->
+                after left_ms(Deadline) ->
+                    %% kill and drop the monitor and any late result, so no
+                    %% message is left behind in the caller's mailbox
                     exit(Pid, kill),
+                    erlang:demonitor(MRef, [flush]),
+                    receive
+                        {Ref, _} -> ok
+                    after 0 -> ok
+                    end,
                     false
                 end
             end,

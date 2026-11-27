@@ -97,8 +97,79 @@ grouping_still_runs_without_count_only_test() ->
         ?assert(has_text_fetch(mailio_fake_imap:commands(Srv)))
     end).
 
-%% Two accounts whose servers never answer are cut off by one shared
-%% deadline, not one after the other.
+%% The deadline created once in run/2 covers every stage: account workers,
+%% fingerprint workers and excerpt fetching. One account never answers, so
+%% the account stage consumes the whole budget; the other account returns
+%% two hits sharing a Message-ID, whose fingerprint fetches then hang on a
+%% server that never answers a body-section fetch. A deadline that restarts
+%% for the fingerprint stage would let them wait the full budget again.
+deadline_covers_stalled_stages_test_() ->
+    {timeout, 30, fun deadline_covers_stalled_stages/0}.
+
+deadline_covers_stalled_stages() ->
+    {ok, L} = gen_tcp:listen(0, [binary, {active, false}, {reuseaddr, true}]),
+    {ok, Port} = inet:port(L),
+    Stall = spawn(fun() -> stall(L) end),
+    ok = mailio_mcp_stats:init(),
+    application:set_env(
+        mailio_mcp,
+        data_dir,
+        "/tmp/mcp_search_" ++ integer_to_list(erlang:unique_integer([positive]))
+    ),
+    {ok, Store} = mailio_mcp_store:start_link(),
+    {ok, Cache} = mailio_mcp_cache:start_link(),
+    Srv = mailio_fake_imap:start(),
+    Accs = [
+        imap_account(<<"silent">>, Port),
+        imap_account(<<"dup">>, mailio_fake_imap:port(Srv))
+    ],
+    ok = application:set_env(mailio_mcp, accounts, Accs),
+    ok = application:set_env(mailio_mcp, principals, [
+        #{
+            id => <<"p4">>,
+            grants => #{
+                <<"silent">> => #{role => read, identities => []},
+                <<"dup">> => #{role => read, identities => []}
+            }
+        }
+    ]),
+    ok = application:set_env(mailio_mcp, limits, #{search_deadline_ms => 3000}),
+    ok = mailio_fake_imap:set_option(Srv, meta_headers, true),
+    ok = mailio_fake_imap:set_option(Srv, stall_section, true),
+    ok = mailio_fake_imap:deliver(Srv, <<"Dup one">>),
+    ok = mailio_fake_imap:deliver(Srv, <<"Dup two">>),
+    T0 = erlang:monotonic_time(millisecond),
+    try
+        {ok, Env} = mailio_mcp_search:run(<<"p4">>, #{
+            <<"account_ids">> => [<<"silent">>, <<"dup">>], <<"excerpt">> => true
+        }),
+        Elapsed = erlang:monotonic_time(millisecond) - T0,
+        %% the account stage used the whole budget on the silent account
+        ?assert(Elapsed > 2500),
+        %% a deadline that restarts for the fingerprint stage would double
+        %% the total wait
+        ?assert(Elapsed < 5000),
+        #{<<"coverage">> := [Cov]} = Env,
+        ?assertEqual(<<"offline">>, maps:get(<<"status">>, Cov)),
+        ?assertEqual(<<"silent">>, maps:get(<<"account">>, Cov))
+    after
+        exit(Stall, kill),
+        mailio_fake_imap:stop(Srv),
+        unlink(Cache),
+        exit(Cache, shutdown),
+        unlink(Store),
+        exit(Store, shutdown),
+        timer:sleep(50),
+        ok = application:unset_env(mailio_mcp, accounts),
+        ok = application:unset_env(mailio_mcp, principals),
+        ok = application:unset_env(mailio_mcp, limits),
+        ok = application:unset_env(mailio_mcp, data_dir)
+    end.
+
+%% Accounts whose servers never answer are all cut off by one shared
+%% deadline: the total wait stays at the deadline no matter how many accounts
+%% are searched. A deadline that restarts per account (or per stage) would
+%% take four times as long here.
 shared_deadline_test() ->
     {ok, L} = gen_tcp:listen(0, [binary, {active, false}, {reuseaddr, true}]),
     {ok, Port} = inet:port(L),
@@ -111,27 +182,36 @@ shared_deadline_test() ->
     ),
     {ok, Store} = mailio_mcp_store:start_link(),
     {ok, Cache} = mailio_mcp_cache:start_link(),
-    Accs = [imap_account(<<"slow1">>, Port), imap_account(<<"slow2">>, Port)],
+    Accs = [
+        imap_account(<<"slow1">>, Port),
+        imap_account(<<"slow2">>, Port),
+        imap_account(<<"slow3">>, Port),
+        imap_account(<<"slow4">>, Port)
+    ],
     ok = application:set_env(mailio_mcp, accounts, Accs),
     ok = application:set_env(mailio_mcp, principals, [
         #{
             id => <<"p2">>,
             grants => #{
                 <<"slow1">> => #{role => read, identities => []},
-                <<"slow2">> => #{role => read, identities => []}
+                <<"slow2">> => #{role => read, identities => []},
+                <<"slow3">> => #{role => read, identities => []},
+                <<"slow4">> => #{role => read, identities => []}
             }
         }
     ]),
-    ok = application:set_env(mailio_mcp, limits, #{search_deadline_ms => 700}),
+    ok = application:set_env(mailio_mcp, limits, #{search_deadline_ms => 500}),
     T0 = erlang:monotonic_time(millisecond),
     try
         {ok, Env} = mailio_mcp_search:run(<<"p2">>, #{
-            <<"account_ids">> => [<<"slow1">>, <<"slow2">>]
+            <<"account_ids">> => [<<"slow1">>, <<"slow2">>, <<"slow3">>, <<"slow4">>]
         }),
         Elapsed = erlang:monotonic_time(millisecond) - T0,
-        ?assert(Elapsed < 10000),
+        %% one deadline, not one per account: four waits of 500 ms would
+        %% take 2000 ms
+        ?assert(Elapsed < 1500),
         #{<<"coverage">> := Cov} = Env,
-        ?assertEqual(2, length(Cov)),
+        ?assertEqual(4, length(Cov)),
         ?assert(lists:all(fun(C) -> maps:get(<<"status">>, C) =:= <<"offline">> end, Cov))
     after
         exit(Stall, kill),
@@ -154,6 +234,62 @@ stall(L) ->
     spawn_link(fun() -> stall(L) end),
     receive
         never -> ok
+    end.
+
+%% On the no-UIDL fallback the header-hash identity can only resolve the
+%% newest batch. A mailbox bigger than the batch must report the unresolved
+%% messages and partial coverage, not a complete result over a fraction of
+%% the mailbox.
+pop3_short_batch_is_partial_test() ->
+    ok = mailio_mcp_stats:init(),
+    application:set_env(
+        mailio_mcp,
+        data_dir,
+        "/tmp/mcp_search_" ++ integer_to_list(erlang:unique_integer([positive]))
+    ),
+    {ok, Store} = mailio_mcp_store:start_link(),
+    {ok, Cache} = mailio_mcp_cache:start_link(),
+    Msg =
+        <<
+            "From: a@x.test\r\nTo: me@x.test\r\nSubject: Batch\r\n"
+            "Date: Mon, 2 Jun 2025 09:00:00 +0000\r\nMessage-ID: <b@x>\r\n\r\nBody.\r\n"
+        >>,
+    Srv = mailio_fake_pop3:start(#{
+        messages => [{<<"m1">>, Msg}, {<<"m2">>, Msg}], uidl => false, caps => [<<"TOP">>]
+    }),
+    Acc = #{
+        id => <<"p3acc">>,
+        incoming => #{
+            protocol => pop3, host => "127.0.0.1", port => mailio_fake_pop3:port(Srv), tls => none
+        },
+        auth => #{user => <<"u">>, secret => {value, <<"p">>}, mechanism => plain}
+    },
+    ok = application:set_env(mailio_mcp, accounts, [Acc]),
+    ok = application:set_env(mailio_mcp, principals, [
+        #{id => <<"p3">>, grants => #{<<"p3acc">> => #{role => read, identities => []}}}
+    ]),
+    ok = application:set_env(mailio_mcp, limits, #{pop3_index_batch => 1}),
+    try
+        {ok, Env} = mailio_mcp_search:run(<<"p3">>, #{
+            <<"account_ids">> => [<<"p3acc">>],
+            <<"subject">> => <<"Batch">>,
+            <<"time_basis">> => <<"sent_at">>
+        }),
+        ?assertEqual(1, maps:get(<<"count">>, Env)),
+        ?assert(maps:get(<<"count_approximate">>, Env)),
+        #{<<"coverage">> := [Cov]} = Env,
+        ?assertEqual(<<"partial">>, maps:get(<<"status">>, Cov))
+    after
+        mailio_fake_pop3:stop(Srv),
+        unlink(Cache),
+        exit(Cache, shutdown),
+        unlink(Store),
+        exit(Store, shutdown),
+        timer:sleep(50),
+        ok = application:unset_env(mailio_mcp, accounts),
+        ok = application:unset_env(mailio_mcp, principals),
+        ok = application:unset_env(mailio_mcp, limits),
+        ok = application:unset_env(mailio_mcp, data_dir)
     end.
 
 %%--------------------------------------------------------------------
