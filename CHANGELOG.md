@@ -15,7 +15,7 @@
 - A POP3 server without UIDL resolves only as many messages as the index batch covers. The messages outside the batch are now counted as unresolved and the coverage is reported as partial, instead of presenting a fraction of the mailbox as a complete result.
 - A cached search result can no longer be returned for a different query. Search cache entries are keyed by a hash of the full query instead of a small hash bucket.
 - Mail arriving in a mailbox now invalidates the cached search results that cover it, instead of waiting for the cache to expire. Cache writes and invalidations are serialized in the cache owner, so a search that started before an invalidation can never write its stale result back afterwards.
-- One time limit now covers a whole search request: account lookups, fingerprint fetches for copy grouping and excerpt fetching share the `search_deadline_ms` budget, so a slow server in any stage no longer multiplies the total wait.
+- One time limit now covers a whole search request: account lookups, fingerprint fetches for copy grouping and excerpt fetching share the `search_deadline_ms` budget, so a slow server in any stage no longer multiplies the total wait. An excerpt fetch that already started is cut off with whatever budget is left, and the search returns its hits without the enrichment.
 - With `excerpt`, the excerpt now centers on the searched text when the server can supply the body, instead of always starting at the beginning of the message. Punctuation, addresses and non-ASCII search terms are matched literally.
 - A search worker that is cut off by the time limit no longer leaves stray messages in the caller's mailbox.
 

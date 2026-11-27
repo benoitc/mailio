@@ -257,15 +257,45 @@ collect({Id, Ref, Pid, MRef}, Deadline) ->
         {'DOWN', MRef, process, Pid, Reason} ->
             {Id, {error, {unavailable, Reason}}}
     after left_ms(Deadline) ->
-        %% kill and drop the monitor and any late result, so no message is
-        %% left behind in the caller's mailbox
-        exit(Pid, kill),
-        erlang:demonitor(MRef, [flush]),
-        receive
-            {Ref, _} -> ok
-        after 0 -> ok
-        end,
+        cut_worker({Ref, Pid, MRef}, Deadline),
         {Id, {error, {unavailable, <<"timeout">>}}}
+    end.
+
+%% @doc Kill a worker that ran past the deadline and clean up so that no
+%% message of this request is left in the caller's mailbox. Killing is
+%% asynchronous, so the monitor is only deactivated by a plain demonitor:
+%% a reply the worker managed to send would then arrive after the drain.
+%% Observe the exact worker's termination first (its 'DOWN'), which orders
+%% every message it sent before our mailbox, then drain its tagged reply.
+cut_worker({Ref, Pid, MRef}, _Deadline) ->
+    exit(Pid, kill),
+    receive
+        {'DOWN', MRef, process, Pid, _} -> ok
+    after 5000 ->
+        %% unreachable for a killed local process; keep the mailbox safe anyway
+        erlang:demonitor(MRef, [flush])
+    end,
+    receive
+        {Ref, _} -> ok
+    after 0 -> ok
+    end.
+
+%% @doc Run Fun in a monitored worker and wait for its tagged reply until
+%% the absolute deadline. {ok, Result} on success, cut when out of budget,
+%% {error, Reason} when the worker died.
+call_worker(Fun, Deadline) ->
+    Ref = make_ref(),
+    Self = self(),
+    {Pid, MRef} = spawn_monitor(fun() -> Self ! {Ref, Fun()} end),
+    receive
+        {Ref, Result} ->
+            erlang:demonitor(MRef, [flush]),
+            {ok, Result};
+        {'DOWN', MRef, process, Pid, Reason} ->
+            {error, Reason}
+    after left_ms(Deadline) ->
+        cut_worker({Ref, Pid, MRef}, Deadline),
+        cut
     end.
 
 account_search(Principal, Id, Q) ->
@@ -472,29 +502,33 @@ with_excerpts(Page, Q, Deadline) ->
         #{},
         Page
     ),
+    %% Each account's excerpt fetch runs in its own worker bounded by the
+    %% same absolute deadline as the rest of the request: a fetch that
+    %% started with budget left can no longer hold the search open past
+    %% it. When the budget is gone the remaining hits keep their prefix
+    %% excerpts; excerpts are optional enrichment.
     Ex =
         lists:foldl(
             fun(Id, Acc) ->
                 case left_ms(Deadline) of
                     0 ->
-                        %% out of budget: the hits keep their prefix excerpts
                         Acc;
                     _ ->
                         {ok, Account} = mailio_mcp_config:account(Id),
                         Hs = lists:reverse(maps:get(Id, ByAcc)),
-                        maps:merge(
-                            Acc,
-                            maps:from_list([
-                                {{Id, K}, V}
-                             || {K, V} <- maps:to_list(
-                                    mailio_mcp_adapter:call(Account, excerpts, [Hs, Query])
-                                )
-                            ])
-                        )
+                        case call_worker(fun() -> excerpt_call(Account, Hs, Query) end, Deadline) of
+                            {ok, Map} ->
+                                maps:merge(
+                                    Acc,
+                                    maps:from_list([{{Id, K}, V} || {K, V} <- maps:to_list(Map)])
+                                );
+                            _ ->
+                                Acc
+                        end
                 end
             end,
             #{},
-            lists:reverse(lists:sort(maps:keys(ByAcc)))
+            lists:sort(maps:keys(ByAcc))
         ),
     [
         case maps:find({maps:get(account, H), excerpt_key(H)}, Ex) of
@@ -503,6 +537,9 @@ with_excerpts(Page, Q, Deadline) ->
         end
      || H <- Page
     ].
+
+excerpt_call(Account, Hits, Query) ->
+    mailio_mcp_adapter:call(Account, excerpts, [Hits, Query]).
 
 excerpt_key(#{mailbox := M, uv := V, uid := U}) -> {M, V, U};
 excerpt_key(#{mailbox := M, uidl := L}) -> {M, L}.
@@ -601,14 +638,7 @@ fingerprints(Hits, Deadline) ->
                     {'DOWN', MRef, process, Pid, _} ->
                         false
                 after left_ms(Deadline) ->
-                    %% kill and drop the monitor and any late result, so no
-                    %% message is left behind in the caller's mailbox
-                    exit(Pid, kill),
-                    erlang:demonitor(MRef, [flush]),
-                    receive
-                        {Ref, _} -> ok
-                    after 0 -> ok
-                    end,
+                    cut_worker({Ref, Pid, MRef}, Deadline),
                     false
                 end
             end,

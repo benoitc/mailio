@@ -166,6 +166,101 @@ deadline_covers_stalled_stages() ->
         ok = application:unset_env(mailio_mcp, data_dir)
     end.
 
+%% The deadline bounds an excerpt fetch that already started: a fast
+%% account returns a hit, the server answers search and metadata but never
+%% a body-section fetch, and the two baseline messages have distinct
+%% Message-IDs, so fingerprinting has nothing to do and cannot consume the
+%% budget first. Without the bound the excerpt call would wait for the
+%% adapter's own 30 s command timeout.
+deadline_bounds_excerpt_fetch_test_() ->
+    {timeout, 20, fun deadline_bounds_excerpt_fetch/0}.
+
+deadline_bounds_excerpt_fetch() ->
+    with(fun(Srv, _Acc) ->
+        ok = mailio_fake_imap:set_option(Srv, meta_headers, true),
+        ok = mailio_fake_imap:set_option(Srv, stall_section, true),
+        ok = application:set_env(mailio_mcp, limits, #{search_deadline_ms => 1000}),
+        T0 = erlang:monotonic_time(millisecond),
+        {ok, Env} = run(#{<<"subject">> => <<"Second">>, <<"excerpt">> => true}),
+        Elapsed = erlang:monotonic_time(millisecond) - T0,
+        ok = application:unset_env(mailio_mcp, limits),
+        %% the excerpt request actually reached the server before it was cut
+        ?assert(
+            lists:any(
+                fun(C) -> re:run(C, <<"BODY.PEEK\\[1\\]">>) =/= nomatch end,
+                mailio_fake_imap:commands(Srv)
+            )
+        ),
+        %% the search itself returned the hits; only the enrichment was cut
+        ?assertEqual(2, maps:get(<<"count">>, Env)),
+        ?assertEqual(2, length(maps:get(<<"hits">>, Env))),
+        %% well below the adapter's 30 s command timeout: the search
+        %% deadline cut the excerpt worker off
+        ?assert(Elapsed < 5000)
+    end).
+
+%% A caller that stays alive after the deadline keeps its mailbox clean: no
+%% reply, monitor message or other message of the request remains, and an
+%% unrelated message sent before the request is preserved.
+worker_cleanup_keeps_caller_mailbox_clean_test_() ->
+    {timeout, 20, fun worker_cleanup_keeps_caller_mailbox_clean/0}.
+
+worker_cleanup_keeps_caller_mailbox_clean() ->
+    Parent = self(),
+    %% One silent account per stage: the account search is cut first, so
+    %% the fingerprints and excerpts of this request never start.
+    {ok, L} = gen_tcp:listen(0, [binary, {active, false}, {reuseaddr, true}]),
+    {ok, Port} = inet:port(L),
+    Stall = spawn(fun() -> stall(L) end),
+    ok = mailio_mcp_stats:init(),
+    application:set_env(
+        mailio_mcp,
+        data_dir,
+        "/tmp/mcp_search_" ++ integer_to_list(erlang:unique_integer([positive]))
+    ),
+    {ok, Store} = mailio_mcp_store:start_link(),
+    {ok, Cache} = mailio_mcp_cache:start_link(),
+    Acc = imap_account(<<"slowx">>, Port),
+    ok = application:set_env(mailio_mcp, accounts, [Acc]),
+    ok = application:set_env(mailio_mcp, principals, [
+        #{id => <<"p5">>, grants => #{<<"slowx">> => #{role => read, identities => []}}}
+    ]),
+    ok = application:set_env(mailio_mcp, limits, #{search_deadline_ms => 300}),
+    spawn_link(fun() ->
+        %% an unrelated message that must survive the request
+        self() ! unrelated,
+        {ok, _} = mailio_mcp_search:run(<<"p5">>, #{
+            <<"account_ids">> => [<<"slowx">>], <<"excerpt">> => true
+        }),
+        %% The request's workers are dead and collected when run/2
+        %% returns, so nothing of this request can arrive afterwards.
+        Leftovers = drain_all(),
+        Parent ! {leftovers, Leftovers}
+    end),
+    Leftovers =
+        receive
+            {leftovers, Ls} -> Ls
+        after 15000 -> exit(cleanup_caller_timeout)
+        end,
+    exit(Stall, kill),
+    unlink(Cache),
+    exit(Cache, shutdown),
+    unlink(Store),
+    exit(Store, shutdown),
+    timer:sleep(50),
+    ok = application:unset_env(mailio_mcp, accounts),
+    ok = application:unset_env(mailio_mcp, principals),
+    ok = application:unset_env(mailio_mcp, limits),
+    ok = application:unset_env(mailio_mcp, data_dir),
+    ?assertEqual([unrelated], Leftovers).
+
+drain_all() -> drain_all([]).
+drain_all(Acc) ->
+    receive
+        M -> drain_all([M | Acc])
+    after 0 -> lists:reverse(Acc)
+    end.
+
 %% Accounts whose servers never answer are all cut off by one shared
 %% deadline: the total wait stays at the deadline no matter how many accounts
 %% are searched. A deadline that restarts per account (or per stage) would
@@ -341,3 +436,49 @@ pop3_index_scan_test_() ->
                 end
             ]
         end}.
+
+%% The unresolved-entry accounting must stay linear in the size of the
+%% listing. The old implementation scanned a list per entry, which is
+%% quadratic when many messages share the listing and the batch is small.
+%% The check runs the pure accounting alone, in an isolated process, and
+%% compares Erlang reductions, which do not depend on machine speed.
+unresolved_count_is_linear_test_() ->
+    {timeout, 20, fun unresolved_count_is_linear/0}.
+
+unresolved_count_is_linear() ->
+    %% The worst case from the review: many unseen entries that carry a
+    %% UIDL, with a small index batch. Every entry outside the already
+    %% indexed first half (and outside the tiny resolved batch) is
+    %% unresolved, so the old per-entry list scan over the unseen set was
+    %% quadratic here; the map accounting stays linear.
+    {R1, C1} = measure_reductions(fun() -> count_unresolved(4000) end),
+    {R2, C2} = measure_reductions(fun() -> count_unresolved(8000) end),
+    ?assertEqual(1999, C1),
+    ?assertEqual(3999, C2),
+    %% linear growth roughly doubles the reductions; the old per-entry
+    %% scan roughly quadruples them
+    Ratio = R2 / max(1, R1),
+    ?assert(Ratio < 2.6),
+    ?assert(Ratio > 1.2).
+
+count_unresolved(N) ->
+    Entries = [{M, <<"u", (integer_to_binary(M))/binary>>, 10} || M <- lists:seq(1, N)],
+    NewNs = maps:from_list([{M, true} || M <- lists:seq(1, N div 2)]),
+    ResolvedNs = maps:from_list([{1, true}]),
+    mailio_mcp_pop3:unresolved_count(Entries, NewNs, ResolvedNs).
+
+%% Run Fun in a fresh process and report its reduction cost for the call.
+measure_reductions(Fun) ->
+    Parent = self(),
+    P = spawn_link(fun() ->
+        {_, Reds0} = erlang:process_info(self(), reductions),
+        Count = Fun(),
+        {_, Reds1} = erlang:process_info(self(), reductions),
+        Parent ! {measured, Reds1 - Reds0, Count}
+    end),
+    receive
+        {measured, Reds, Count} -> {Reds, Count}
+    after 15000 ->
+        exit(P, kill),
+        exit(measure_timeout)
+    end.

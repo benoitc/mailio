@@ -246,45 +246,73 @@ cache_generation_blocks_stale_write_test_() ->
 %% been written with the generation that invalidation created, because the
 %% generation check and the insert are serialized in the cache owner. A
 %% value carrying an older generation that is readable after an
-%% invalidation is a stale survivor. A tiny cache_max_entries makes the
-%% writer sweep and evict between its generation capture and the insert,
-%% which is the window the old check-then-insert code could lose.
+%% invalidation is a stale survivor.
 cache_concurrent_write_and_invalidation_test_() ->
-    {setup,
-        fun() ->
-            application:set_env(mailio_mcp, limits, #{cache_max_entries => 1}),
-            {ok, P} = mailio_mcp_cache:start_link(),
-            P
-        end,
-        fun(P) ->
-            unlink(P),
-            exit(P, shutdown),
-            timer:sleep(50),
-            ok = application:unset_env(mailio_mcp, limits)
-        end,
-        fun(_) ->
-            [
-                fun() ->
-                    Acc = <<"accr">>,
-                    Mailbox = [<<"INBOX">>],
-                    Key = {search, Mailbox, <<"k">>},
-                    Rounds = 100,
-                    Writer =
-                        spawn_link(fun() -> writer(Acc, Key, Rounds) end),
-                    Invalidator =
-                        spawn_link(fun() -> invalidator(Acc, hd(Mailbox), Key, Rounds) end),
-                    Writer ! go,
-                    Invalidator ! go,
-                    wait_done(2)
-                end
-            ]
-        end}.
+    {timeout, 20, fun cache_concurrent_write_and_invalidation/0}.
 
-writer(Acc, Key, N) ->
+cache_concurrent_write_and_invalidation() ->
+    application:set_env(mailio_mcp, limits, #{cache_max_entries => 1}),
+    {ok, P} = mailio_mcp_cache:start_link(),
+    try
+        Acc = <<"accr">>,
+        Mailbox = [<<"INBOX">>],
+        Key = {search, Mailbox, <<"k">>},
+        Rounds = 100,
+        Writer = spawn_monitor(fun() -> writer_loop(Acc, Key, Rounds) end),
+        Invalidator = spawn_monitor(fun() -> invalidator_loop(Acc, hd(Mailbox), Key, Rounds) end),
+        %% each worker must exit normally; a timeout names the missing one
+        await_normal(Writer, writer, 10000),
+        await_normal(Invalidator, invalidator, 10000),
+        %% stale-write assertion, separate from worker completion: capture
+        %% an epoch, race a write with that epoch against an invalidation,
+        %% then read. The old value must be absent in either execution
+        %% order, and a write with the new epoch must be readable.
+        E0 = mailio_mcp_cache:epoch(Acc),
+        Self = self(),
+        Racer = spawn_monitor(fun() ->
+            Self ! {raced, mailio_mcp_cache:put(Acc, Key, raced_value, E0)}
+        end),
+        ok = mailio_mcp_cache:invalidate_mailbox(Acc, hd(Mailbox)),
+        await_normal(Racer, racer, 5000),
+        Result = race_result(),
+        E1 = mailio_mcp_cache:epoch(Acc),
+        ?assert(E1 > E0),
+        case Result of
+            %% the write was refused: the old value cannot be there
+            stale -> ?assertEqual(miss, mailio_mcp_cache:get(Acc, Key));
+            %% the write was accepted, so it ran before the invalidation
+            %% deleted the entries; it must be absent now either way
+            ok -> ?assertEqual(miss, mailio_mcp_cache:get(Acc, Key))
+        end,
+        ?assertEqual(ok, mailio_mcp_cache:put(Acc, Key, new_value, E1)),
+        ?assertMatch({ok, new_value, _}, mailio_mcp_cache:get(Acc, Key))
+    after
+        unlink(P),
+        exit(P, shutdown),
+        timer:sleep(50),
+        ok = application:unset_env(mailio_mcp, limits)
+    end.
+
+%% Wait for one exact worker's 'DOWN' and assert a normal exit. An
+%% unrelated mailbox message never counts as completion.
+await_normal({Pid, Ref}, Who, Timeout) ->
     receive
-        go -> ok
-    end,
-    writer_loop(Acc, Key, N).
+        {'DOWN', Ref, process, Pid, normal} ->
+            ok;
+        {'DOWN', Ref, process, Pid, Reason} ->
+            exit({Who, Reason})
+    after Timeout ->
+        exit(Pid, kill),
+        erlang:demonitor(Ref, [flush]),
+        exit({Who, timeout})
+    end.
+
+%% Collect the raced write's reply, whichever order it landed in.
+race_result() ->
+    receive
+        {raced, R} -> R
+    after 5000 -> exit(race_reply_timeout)
+    end.
 
 writer_loop(_Acc, _Key, 0) ->
     ok;
@@ -292,12 +320,6 @@ writer_loop(Acc, Key, N) ->
     E = mailio_mcp_cache:epoch(Acc),
     _ = mailio_mcp_cache:put(Acc, Key, {v, E}, E),
     writer_loop(Acc, Key, N - 1).
-
-invalidator(Acc, Mailbox, Key, N) ->
-    receive
-        go -> ok
-    end,
-    invalidator_loop(Acc, Mailbox, Key, N).
 
 invalidator_loop(_Acc, _Mailbox, _Key, 0) ->
     ok;
@@ -311,16 +333,6 @@ invalidator_loop(Acc, Mailbox, Key, N) ->
         _ -> ok
     end,
     invalidator_loop(Acc, Mailbox, Key, N - 1).
-
-wait_done(N) -> wait_done(N, 0).
-wait_done(N, N) ->
-    ok;
-wait_done(N, Got) ->
-    receive
-        {'EXIT', Pid, Reason} when Reason =/= normal -> exit({worker_died, Pid, Reason});
-        _ -> wait_done(N, Got + 1)
-    after 15000 -> exit(timeout)
-    end.
 
 %%--------------------------------------------------------------------
 %% Query-centered excerpts

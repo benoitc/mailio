@@ -24,7 +24,7 @@
     fingerprint/3,
     excerpts/3
 ]).
--export([index_hits/7]).
+-export([index_hits/7, unresolved_count/3]).
 
 -define(INBOX, <<"INBOX">>).
 
@@ -116,16 +116,24 @@ ensure_index(C, #{id := AccId}, Cap) ->
     Resolved = lists:filtermap(fun(E) -> index_one(C, AccId, E, HasUidl) end, Todo),
     %% Messages the index cannot answer for: outside the batch, or whose
     %% headers could not be read. Counted from the actual listing, so a
-    %% short batch makes the coverage partial instead of complete.
-    NewNs = [N || {N, _, _} <- New],
-    ResolvedNs = [N || {N, _} <- Resolved],
-    Unresolved = length([
+    %% short batch makes the coverage partial instead of complete. The
+    %% membership sets are built once: scanning a list per entry would
+    %% make the accounting quadratic in the size of the listing.
+    NewNs = maps:from_list([{N, true} || {N, _, _} <- New]),
+    ResolvedNs = maps:from_list([{N, true} || {N, _} <- Resolved]),
+    Unresolved = unresolved_count(Entries, NewNs, ResolvedNs),
+    {Entries, Resolved, Unresolved > 0, HasUidl, Unresolved}.
+
+%% @doc Listing entries the index cannot answer for: not already indexed
+%% before this batch and not resolved by it. Pure, so tests can measure its
+%% cost without a server or a store.
+unresolved_count(Entries, NewNs, ResolvedNs) ->
+    length([
         1
      || {N, Id, _} <- Entries,
-        not ((Id =/= undefined andalso not lists:member(N, NewNs)) orelse
-            lists:member(N, ResolvedNs))
-    ]),
-    {Entries, Resolved, Unresolved > 0, HasUidl, Unresolved}.
+        not ((Id =/= undefined andalso not maps:is_key(N, NewNs)) orelse
+            maps:is_key(N, ResolvedNs))
+    ]).
 
 index_one(C, AccId, {N, Id0, Size}, HasUidl) ->
     case headers(C, N, Size) of

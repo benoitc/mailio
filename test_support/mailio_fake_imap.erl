@@ -721,17 +721,22 @@ send_meta(Sock, {Seq, Uid, Flags, _MS, Raw}, State) ->
         <<")\r\n">>
     ]).
 
-%% A Message-ID header section appended to a metadata FETCH answer when the
-%% `meta_headers' option is on, so search hits carry a Message-ID.
+%% Additions to a metadata FETCH answer when the `meta_headers' option is
+%% on: a Message-ID header section, so search hits carry a Message-ID, and
+%% a minimal BODYSTRUCTURE, so a hit knows its body part and an excerpt
+%% fetch can ask for it.
 meta_headers(Raw, State) ->
     case maps:get({opt, meta_headers}, State, false) of
         true ->
+            Structure =
+                <<" BODYSTRUCTURE (\"TEXT\" \"PLAIN\" (\"CHARSET\" \"utf-8\") NIL NIL \"7BIT\" 10 1)">>,
             case msgid_of(Raw) of
                 undefined ->
-                    [];
+                    [Structure];
                 Id ->
                     H = [<<"Message-ID: <">>, Id, <<">\r\n\r\n">>],
                     [
+                        Structure,
                         <<" BODY[HEADER.FIELDS (MESSAGE-ID)] {">>,
                         integer_to_binary(iolist_size(H)),
                         <<"}\r\n">>,

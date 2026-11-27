@@ -44,7 +44,7 @@ IMAP commands are the ones the adapter sends; the login and logout around them a
 | Cursor paging, count only, freshness, forced refresh | yes | yes | |
 | Partial coverage when a candidate cap is reached | yes | no | Reported as `partial`. A failed IMAP metadata fetch, an unreadable POP3 index entry, or POP3 messages outside the index batch also mark the account partial instead of looking empty |
 | Query-centered excerpts | yes | partly | With `excerpt`, the IMAP excerpt is centered on the searched text when the body can be fetched read-only; otherwise it starts at the beginning. The centering is unit tested; the fetch path is not covered by a server test |
-| One time limit per search request | yes | yes | Account lookups, fingerprint fetches and excerpt fetching share `search_deadline_ms`; tested with servers that never answer and with a server that answers search but stalls body fetches |
+| One time limit per search request | yes | yes | Account lookups, fingerprint fetches and excerpt fetching share `search_deadline_ms`; tested with servers that never answer, with a server that answers search but stalls body fetches, and with an excerpt fetch cut off after starting |
 | Changes survive a refused metadata fetch | yes | yes | `mail_changes` reports the refusal as an error and the previous checkpoint stays usable; a retry reports the delivery. Tested on the QRESYNC path and the full comparison against the fake server |
 | Attachments: list, open one part, resource link | yes | yes | Text parts are paged; binary parts up to 64 KiB with `include_content`, larger ones through the resource |
 | stdio transport | yes | yes | |
