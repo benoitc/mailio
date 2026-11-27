@@ -9,14 +9,16 @@
 -behaviour(gen_server).
 
 -export([start_link/0, init/1, handle_call/3, handle_cast/2, handle_info/2]).
--export([get/2, put/3, invalidate_account/1, invalidate_mailbox/2, stats/0]).
+-export([get/2, put/3, put/4, epoch/1, invalidate_account/1, invalidate_mailbox/2, stats/0]).
 
 -define(T, mailio_mcp_cache_tab).
+-define(GEN, mailio_mcp_cache_gen).
 
 start_link() -> gen_server:start_link({local, ?MODULE}, ?MODULE, [], []).
 
 init([]) ->
     _ = ets:new(?T, [named_table, public, set, {read_concurrency, true}]),
+    _ = ets:new(?GEN, [named_table, public, set]),
     ok = mailio_mcp_stats:init(),
     erlang:send_after(60000, self(), sweep),
     {ok, #{}}.
@@ -46,20 +48,45 @@ get(Account, Key) ->
             miss
     end.
 
-put(Account, Key, Value) ->
-    Max = mailio_mcp_config:limit(cache_max_entries, 2000),
-    case ets:info(?T, size) >= Max of
-        true ->
-            sweep(),
-            evict(Max);
-        false ->
-            ok
-    end,
-    ets:insert(?T, {{Account, Key}, Value, erlang:system_time(second)}),
+%% @doc The account's cache generation. Every invalidation bumps it.
+-spec epoch(binary()) -> non_neg_integer().
+epoch(Account) ->
+    case ets:lookup(?GEN, Account) of
+        [{_, N}] -> N;
+        [] -> 0
+    end.
+
+bump(Account) ->
+    _ = ets:update_counter(?GEN, Account, 1, {Account, 0}),
     ok.
+
+put(Account, Key, Value) ->
+    put(Account, Key, Value, epoch(Account)).
+
+%% @doc Insert only if the account's generation is still Epoch. A search that
+%% captured the generation before an invalidation must never land its stale
+%% result after the invalidation deleted the entries.
+-spec put(binary(), term(), term(), non_neg_integer()) -> ok | stale.
+put(Account, Key, Value, Epoch) ->
+    case epoch(Account) of
+        Epoch ->
+            Max = mailio_mcp_config:limit(cache_max_entries, 2000),
+            case ets:info(?T, size) >= Max of
+                true ->
+                    sweep(),
+                    evict(Max);
+                false ->
+                    ok
+            end,
+            ets:insert(?T, {{Account, Key}, Value, erlang:system_time(second)}),
+            ok;
+        _ ->
+            stale
+    end.
 
 invalidate_account(Account) ->
     ets:match_delete(?T, {{Account, '_'}, '_', '_'}),
+    bump(Account),
     ok.
 
 invalidate_mailbox(Account, Mailbox) ->
@@ -71,6 +98,7 @@ invalidate_mailbox(Account, Mailbox) ->
      || [Boxes, Hash] <- ets:match(?T, {{Account, {search, '$1', '$2'}}, '_', '_'}),
         lists:member(Mailbox, Boxes)
     ],
+    bump(Account),
     ok.
 
 stats() -> #{entries => ets:info(?T, size)}.

@@ -202,6 +202,45 @@ cache_mailbox_invalidation_test_() ->
             ]
         end}.
 
+%% A search that captured the account's cache generation before an
+%% invalidation must not land its stale result after the invalidation ran.
+cache_generation_blocks_stale_write_test_() ->
+    {setup,
+        fun() ->
+            {ok, P} = mailio_mcp_cache:start_link(),
+            P
+        end,
+        fun(P) ->
+            unlink(P),
+            exit(P, shutdown),
+            timer:sleep(50)
+        end,
+        fun(_) ->
+            [
+                fun() ->
+                    Acc = <<"accg">>,
+                    Key = {search, [<<"INBOX">>], <<"h">>},
+                    E0 = mailio_mcp_cache:epoch(Acc),
+                    ?assertEqual(ok, mailio_mcp_cache:put(Acc, Key, v0, E0)),
+                    ok = mailio_mcp_cache:invalidate_mailbox(Acc, <<"INBOX">>),
+                    %% the write of a search that started before the
+                    %% invalidation is refused
+                    ?assertEqual(stale, mailio_mcp_cache:put(Acc, Key, stale, E0)),
+                    ?assertEqual(miss, mailio_mcp_cache:get(Acc, Key)),
+                    %% a search that started after it is kept
+                    E1 = mailio_mcp_cache:epoch(Acc),
+                    ?assert(E1 > E0),
+                    ?assertEqual(ok, mailio_mcp_cache:put(Acc, Key, v1, E1)),
+                    ?assertMatch({ok, v1, _}, mailio_mcp_cache:get(Acc, Key)),
+                    %% invalidate_account bumps the generation too
+                    E2 = mailio_mcp_cache:epoch(Acc),
+                    ok = mailio_mcp_cache:invalidate_account(Acc),
+                    ?assertEqual(stale, mailio_mcp_cache:put(Acc, Key, v2, E2)),
+                    ?assertEqual(miss, mailio_mcp_cache:get(Acc, Key))
+                end
+            ]
+        end}.
+
 %%--------------------------------------------------------------------
 %% Query-centered excerpts
 
@@ -232,6 +271,40 @@ excerpt_bounded_test() ->
     Text = binary:copy(<<"word ">>, 400),
     Ex = mailio_mcp_imap:center_excerpt(Text, <<"word">>),
     ?assert(string:length(Ex) =< 160).
+
+%% Punctuation, regex metacharacters and non-ASCII terms are matched
+%% literally, and the excerpt centers on them.
+center_excerpt_punctuation_and_unicode_test() ->
+    Pad = binary:copy(<<"padding ">>, 25),
+    Long =
+        <<
+            Pad/binary,
+            "Write to foo@example.test about invoice 2026-114 (net 30). "
+            "Trailing padding keeps the window away from the end as well."
+        >>,
+    %% digits and a dash, matched literally
+    Ex1 = mailio_mcp_imap:center_excerpt(Long, <<"2026-114">>),
+    ?assertMatch(<<"…"/utf8, _/binary>>, Ex1),
+    ?assert(string:find(Ex1, <<"invoice 2026-114">>) =/= nomatch),
+    %% an address with a dot and an at sign
+    Ex2 = mailio_mcp_imap:center_excerpt(Long, <<"foo@example.test">>),
+    ?assertMatch(<<"…"/utf8, _/binary>>, Ex2),
+    ?assert(string:find(Ex2, <<"foo@example.test">>) =/= nomatch),
+    %% regex metacharacters in the query are ordinary characters
+    ?assertEqual(
+        <<"Hello (a|b) world">>,
+        mailio_mcp_imap:center_excerpt(<<"Hello (a|b) world">>, <<"(a|b)">>)
+    ),
+    %% non-ASCII, case folded through the unicode option
+    U =
+        <<
+            "Du texte de remplissage, assez long pour dépasser la fenêtre de l'extrait sans "/utf8,
+            Pad/binary,
+            "fin. Le café est servi ici, loin du début du message. Encore du remplissage."/utf8
+        >>,
+    Ex3 = mailio_mcp_imap:center_excerpt(U, <<"CAFÉ"/utf8>>),
+    ?assertMatch(<<"…"/utf8, _/binary>>, Ex3),
+    ?assert(string:find(Ex3, <<"caf"/utf8>>) =/= nomatch).
 
 %%--------------------------------------------------------------------
 %% Handles and authorization

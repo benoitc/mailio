@@ -83,7 +83,8 @@ set_failure(Srv, Kind, Bool) when
 %% `no_exists' (EXAMINE does not report EXISTS), `zero_max_uid' (UID FETCH *
 %% answers with UID 0), `fail_flags_fetch' (FETCH 1:* answers NO), `enforce_enable' (a QRESYNC parameter
 %% on SELECT or EXAMINE is BAD unless this connection sent ENABLE QRESYNC) and `bad_validity' (UIDVALIDITY 01). `set_search/2' makes UID SEARCH
-%% answer badly.
+%% answer badly. `meta_headers' adds a Message-ID header section to every
+%% metadata FETCH answer, so search hits carry a Message-ID.
 set_option(Srv, Option, Bool) when
     Option =:= no_uidnext;
     Option =:= no_exists;
@@ -94,7 +95,8 @@ set_option(Srv, Option, Bool) when
     Option =:= preauth_greeting;
     Option =:= empty_enabled;
     Option =:= bad_validity;
-    Option =:= bad_vanished
+    Option =:= bad_vanished;
+    Option =:= meta_headers
 ->
     call(Srv, {set_option, Option, Bool}, ok).
 
@@ -636,23 +638,16 @@ handle_uid_fetch_data(Sock, Tag, SetBin, ItemsBin, #{messages := Ms} = State) ->
             {continue, State};
         false when SetBin =:= <<"*">> ->
             %% `*' alone is the message with the highest UID
-            [send_meta(Sock, M) || M <- last_message(Ms)],
+            [send_meta(Sock, M, State) || M <- last_message(Ms)],
             tagged(Sock, Tag, <<"OK UID FETCH done">>),
             {continue, State};
         false ->
-            {Lo, Hi} = set_range(SetBin),
-            %% like a real server: `N:*' always includes the highest
-            %% message, even when N is past it (RFC 3501, section 9)
-            Hits =
-                case [M || {_, Uid, _, _, _} = M <- Ms, Uid >= Lo, Uid =< Hi] of
-                    [] when
-                        Ms =/= [], binary_part(SetBin, byte_size(SetBin), -1) =:= <<"*">>
-                    ->
-                        [lists:last(Ms)];
-                    Found ->
-                        Found
-                end,
-            [send_meta(Sock, M) || M <- Hits],
+            %% like a real server: every UID of the set, and `N:*' always
+            %% includes the highest message, even when N is past it
+            %% (RFC 3501, section 9)
+            Uids = set_uids(SetBin, Ms),
+            Hits = [M || {_, Uid, _, _, _} = M <- Ms, lists:member(Uid, Uids)],
+            [send_meta(Sock, M, State) || M <- Hits],
             [send(Sock, [Line, <<"\r\n">>]) || Line <- maps:get(injected, State, [])],
             tagged(Sock, Tag, <<"OK UID FETCH done">>),
             {continue, maps:remove(injected, State)}
@@ -698,7 +693,7 @@ changedsince(Bin) ->
         nomatch -> none
     end.
 
-send_meta(Sock, {Seq, Uid, Flags, _MS, Raw}) ->
+send_meta(Sock, {Seq, Uid, Flags, _MS, Raw}, State) ->
     SeqB = integer_to_binary(Seq),
     UidB = integer_to_binary(Uid),
     Size = integer_to_binary(byte_size(Raw)),
@@ -708,8 +703,36 @@ send_meta(Sock, {Seq, Uid, Flags, _MS, Raw}) ->
         FlagsB,
         <<") INTERNALDATE \"02-Jun-2025 09:00:00 +0000\" RFC822.SIZE ">>,
         Size,
+        meta_headers(Raw, State),
         <<")\r\n">>
     ]).
+
+%% A Message-ID header section appended to a metadata FETCH answer when the
+%% `meta_headers' option is on, so search hits carry a Message-ID.
+meta_headers(Raw, State) ->
+    case maps:get({opt, meta_headers}, State, false) of
+        true ->
+            case msgid_of(Raw) of
+                undefined ->
+                    [];
+                Id ->
+                    H = [<<"Message-ID: <">>, Id, <<">\r\n\r\n">>],
+                    [
+                        <<" BODY[HEADER.FIELDS (MESSAGE-ID)] {">>,
+                        integer_to_binary(iolist_size(H)),
+                        <<"}\r\n">>,
+                        H
+                    ]
+            end;
+        false ->
+            []
+    end.
+
+msgid_of(Raw) ->
+    case binary:split(Raw, <<"Message-ID: <">>) of
+        [_, Rest] -> hd(binary:split(Rest, <<">">>));
+        _ -> undefined
+    end.
 
 send_changed(Sock, {Seq, Uid, Flags, MS, _Raw}) ->
     SeqB = integer_to_binary(Seq),
@@ -795,6 +818,28 @@ set_low(SetBin) ->
     First = hd(binary:split(Clean, <<",">>, [global])),
     Lo = hd(binary:split(First, <<":">>)),
     binary_to_integer(Lo).
+
+%% Every UID of a message set, with `*' meaning the highest UID present.
+set_uids(SetBin, Ms) ->
+    Max =
+        case Ms of
+            [] -> 0;
+            _ -> element(2, lists:last(Ms))
+        end,
+    lists:usort(lists:append([range_uids(R, Max) || R <- binary:split(SetBin, <<",">>, [global])])).
+
+range_uids(_R, 0) ->
+    [];
+range_uids(R, Max) ->
+    case binary:split(R, <<":">>) of
+        [Lo, <<"*">>] ->
+            N = binary_to_integer(Lo),
+            lists:seq(min(N, Max), Max);
+        [Lo, Hi] ->
+            lists:seq(binary_to_integer(Lo), binary_to_integer(Hi));
+        [One] ->
+            [binary_to_integer(One)]
+    end.
 
 parse_paren_flags(Bin) ->
     Inner = unparen(Bin),

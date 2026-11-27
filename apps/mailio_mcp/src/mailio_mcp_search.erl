@@ -9,7 +9,10 @@
 -export([run/2]).
 
 -define(DEFAULT_FIELDS, [from, subject, date, flags, attachments]).
--define(WORKER_TIMEOUT, 25000).
+
+%% One absolute deadline, shared by every account worker of one request, so
+%% the total wait does not grow with the number of accounts searched.
+deadline_ms() -> mailio_mcp_config:limit(search_deadline_ms, 25000).
 
 -spec run(binary(), map()) -> {ok, map()} | {error, term()}.
 run(Principal, Args) ->
@@ -25,7 +28,9 @@ run(Principal, Args) ->
         Sorted = lists:sort(fun(A, B) -> sort_key(A, Q) =< sort_key(B, Q) end, Hits1),
         Grouped =
             case {maps:get(group_copies, Q), CountOnly} of
-                %% count_only never triggers provider fingerprint fetches
+                %% count_only never triggers provider fingerprint fetches;
+                %% the count may then include copies a grouped search would
+                %% have merged, so it is reported as approximate
                 {true, false} -> group_copies(Principal, Sorted);
                 _ -> Sorted
             end,
@@ -37,7 +42,8 @@ run(Principal, Args) ->
                         (_) -> false
                     end,
                     Cov
-                ),
+                ) orelse
+                (CountOnly andalso maps:get(group_copies, Q) andalso has_msgid_dupes(Grouped)),
         Count = length(Grouped),
         Env0 = #{
             <<"count">> => Count,
@@ -225,9 +231,7 @@ decode_cursor(Principal, QHash, Args) ->
 %%====================================================================
 
 parallel(Principal, Accounts, Q) ->
-    %% One absolute deadline for every account, so the total wait does not
-    %% grow with the number of accounts searched.
-    Deadline = erlang:monotonic_time(millisecond) + ?WORKER_TIMEOUT,
+    Deadline = erlang:monotonic_time(millisecond) + deadline_ms(),
     Self = self(),
     Workers = [
         begin
@@ -277,24 +281,28 @@ account_search(Principal, Id, Q) ->
                     {ok, N} -> AQ0#{max_candidates => N};
                     error -> AQ0
                 end,
+            %% The generation is captured before the provider call: an
+            %% invalidation that lands while the search runs must not be
+            %% overwritten by this result when it comes back.
+            Epoch = mailio_mcp_cache:epoch(Id),
             Key = {search, maps:get(mailboxes, AQ), cache_hash(AQ)},
             case maps:get(refresh, Q) of
                 false ->
                     case mailio_mcp_cache:get(Id, Key) of
                         {ok, {Hits, Info}, Age} -> {ok, decorate(Hits), Info, {cache, Age}};
-                        miss -> fresh(Account, Id, Key, AQ)
+                        miss -> fresh(Account, Id, Key, AQ, Epoch)
                     end;
                 true ->
-                    fresh(Account, Id, Key, AQ)
+                    fresh(Account, Id, Key, AQ, Epoch)
             end;
         {error, _} = E ->
             E
     end.
 
-fresh(Account, Id, Key, AQ) ->
+fresh(Account, Id, Key, AQ, Epoch) ->
     case mailio_mcp_adapter:call(Account, search, [AQ]) of
         {ok, Hits, Info} ->
-            mailio_mcp_cache:put(Id, Key, {Hits, Info}),
+            mailio_mcp_cache:put(Id, Key, {Hits, Info}, Epoch),
             {ok, decorate(Hits), Info, fresh};
         {error, _} = E ->
             E
@@ -394,6 +402,24 @@ first_seen_ok(Hit, #{basis := first_seen_at, since := S, before := B}) ->
     (S =:= undefined orelse T >= S) andalso (B =:= undefined orelse T < B);
 first_seen_ok(_, _) ->
     true.
+
+%% Whether two hits share a Message-ID, the hint copy grouping uses.
+has_msgid_dupes(Hits) ->
+    lists:any(
+        fun(N) -> N > 1 end,
+        maps:values(
+            lists:foldl(
+                fun(H, M) ->
+                    case maps:get(msgid, H, undefined) of
+                        undefined -> M;
+                        Id -> maps:update_with(Id, fun(C) -> C + 1 end, 1, M)
+                    end
+                end,
+                #{},
+                Hits
+            )
+        )
+    ).
 
 %%====================================================================
 %% Ordering, paging
@@ -532,7 +558,7 @@ copy_out(Principal, H) ->
 
 fingerprints(Hits) ->
     Self = self(),
-    Deadline = erlang:monotonic_time(millisecond) + ?WORKER_TIMEOUT,
+    Deadline = erlang:monotonic_time(millisecond) + deadline_ms(),
     Workers = [
         begin
             Ref = make_ref(),

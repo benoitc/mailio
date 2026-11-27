@@ -871,21 +871,26 @@ query_byte_pos(Text, Query) ->
             undefined;
         _ ->
             Pattern = iolist_to_binary(lists:join(<<"|">>, Terms)),
-            case re:run(Text, Pattern, [caseless, {capture, first, index}]) of
+            case re:run(Text, Pattern, [caseless, unicode, {capture, first, index}]) of
                 {match, [{Pos, _}]} -> Pos;
                 _ -> undefined
             end
     end.
 
-%% Escape every non-word byte so a query term is matched literally.
+%% Escape every ASCII character that is not a regex word character with a
+%% backslash, so a query term is matched literally. Non-ASCII characters are
+%% kept as they are and matched with the unicode option, which also gives
+%% case folding outside ASCII.
 escape_re(<<>>) ->
     <<>>;
+escape_re(<<C/utf8, Rest/binary>>) when C >= 16#80 ->
+    <<C/utf8, (escape_re(Rest))/binary>>;
 escape_re(<<C/utf8, Rest/binary>>) ->
     case
         (C >= $a andalso C =< $z) orelse (C >= $A andalso C =< $Z) orelse (C >= $0 andalso C =< $9)
     of
         true -> <<C/utf8, (escape_re(Rest))/binary>>;
-        false -> <<$/, C/utf8, (escape_re(Rest))/binary>>
+        false -> <<$\\, C/utf8, (escape_re(Rest))/binary>>
     end.
 
 %% Character position of a byte offset (the prefix is scanned once).

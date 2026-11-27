@@ -24,6 +24,7 @@
     fingerprint/3,
     excerpts/3
 ]).
+-export([index_hits/7]).
 
 -define(INBOX, <<"INBOX">>).
 
@@ -219,41 +220,46 @@ search(Account, Q) ->
                     [{N, Id} || {N, Id} <- Resolved] ++
                         [{N, Id} || {N, Id, _} <- Entries, Id =/= undefined]
                 ),
-                %% A metadata index entry that cannot be read is not a
-                %% non-match: count it so the result reports partial coverage.
-                {Hits, Failed} =
-                    lists:foldl(
-                        fun({N, _Id0, _}, {Acc, F}) ->
-                            case maps:find(N, Map) of
-                                {ok, Id} ->
-                                    case idx_get(AccId, Id) of
-                                        {ok, Meta} ->
-                                            H = hit(Account, Id, Meta),
-                                            case match(H, Q) of
-                                                true -> {[H | Acc], F};
-                                                false -> {Acc, F}
-                                            end;
-                                        error ->
-                                            {Acc, F + 1}
-                                    end;
-                                error ->
-                                    {Acc, F}
-                            end
-                        end,
-                        {[], 0},
-                        Entries
-                    ),
-                Max = maps:get(max_candidates, Q, 200),
-                Hits2 = lists:nthtail(max(0, length(Hits) - Max), lists:reverse(Hits)),
-                {ok, Hits2, #{
-                    capped => length(Hits) > Max,
-                    candidates => length(Hits2),
-                    index_incomplete => Incomplete orelse Failed > 0,
-                    unindexed => Missing,
-                    failed_mailboxes => 0
-                }}
+                index_hits(Account, Q, Entries, Map, AccId, Incomplete, Missing)
             end)
     end.
+
+%% Scan the local index entries against their metadata. A metadata record
+%% that cannot be read is not a non-match: it is counted so the result
+%% reports partial coverage instead of a complete, empty search. Exported
+%% for the index tests.
+index_hits(Account, Q, Entries, Map, AccId, Incomplete, Missing) ->
+    {Hits, Failed} =
+        lists:foldl(
+            fun({N, _Id0, _}, {Acc, F}) ->
+                case maps:find(N, Map) of
+                    {ok, Id} ->
+                        case idx_get(AccId, Id) of
+                            {ok, Meta} ->
+                                H = hit(Account, Id, Meta),
+                                case match(H, Q) of
+                                    true -> {[H | Acc], F};
+                                    false -> {Acc, F}
+                                end;
+                            error ->
+                                {Acc, F + 1}
+                        end;
+                    error ->
+                        {Acc, F}
+                end
+            end,
+            {[], 0},
+            Entries
+        ),
+    Max = maps:get(max_candidates, Q, 200),
+    Hits2 = lists:nthtail(max(0, length(Hits) - Max), lists:reverse(Hits)),
+    {ok, Hits2, #{
+        capped => length(Hits) > Max,
+        candidates => length(Hits2),
+        index_incomplete => Incomplete orelse Failed > 0,
+        unindexed => Missing,
+        failed_mailboxes => 0
+    }}.
 
 refuse(Q) ->
     case maps:get(unread, Q, undefined) of
