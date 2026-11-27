@@ -100,9 +100,13 @@ grouping_still_runs_without_count_only_test() ->
 %% The deadline created once in run/2 covers every stage: account workers,
 %% fingerprint workers and excerpt fetching. One account never answers, so
 %% the account stage consumes the whole budget; the other account returns
-%% two hits sharing a Message-ID, whose fingerprint fetches then hang on a
-%% server that never answers a body-section fetch. A deadline that restarts
-%% for the fingerprint stage would let them wait the full budget again.
+%% two hits sharing a Message-ID, whose fingerprint fetches would then hang
+%% on a server that never answers a body-section fetch. A deadline that
+%% restarts for the fingerprint stage would let them wait the full budget
+%% again, and even with the total wait bounded, workers spawned after the
+%% budget is gone are only spawned to be killed. So the test runs the
+%% search in a caller with call tracing on one_fingerprint/1 and asserts
+%% that no fingerprint worker started.
 deadline_covers_stalled_stages_test_() ->
     {timeout, 30, fun deadline_covers_stalled_stages/0}.
 
@@ -140,18 +144,67 @@ deadline_covers_stalled_stages() ->
     ok = mailio_fake_imap:deliver(Srv, <<"Dup two">>),
     T0 = erlang:monotonic_time(millisecond),
     try
-        {ok, Env} = mailio_mcp_search:run(<<"p4">>, #{
-            <<"account_ids">> => [<<"silent">>, <<"dup">>], <<"excerpt">> => true
-        }),
+        %% A dedicated caller with call tracing on one_fingerprint/1,
+        %% inherited by the processes it spawns, counts exactly the
+        %% fingerprint workers of this request. Tracing is switched off
+        %% before the result is reported, so a failure later in the test
+        %% cannot leave the trace pattern behind.
+        Parent = self(),
+        spawn_link(fun() ->
+            MFA = {mailio_mcp_search, one_fingerprint, 1},
+            erlang:trace_pattern(MFA, true, [local]),
+            erlang:trace(self(), true, [call, set_on_spawn]),
+            {ok, Env} =
+                try
+                    mailio_mcp_search:run(<<"p4">>, #{
+                        <<"account_ids">> => [<<"silent">>, <<"dup">>], <<"excerpt">> => true
+                    })
+                after
+                    erlang:trace(self(), false, [call, set_on_spawn]),
+                    erlang:trace_pattern(MFA, false, [local])
+                end,
+            %% run/2 returned, so every worker it spawned was collected;
+            %% give a last trace event a moment, then report
+            Spawns = drain_fingerprint_calls(500),
+            Parent ! {done, Env, Spawns}
+        end),
+        {Env, Spawns} =
+            receive
+                {done, E, S} -> {E, S}
+            after 25000 ->
+                exit(trace_caller_timeout)
+            end,
         Elapsed = erlang:monotonic_time(millisecond) - T0,
         %% the account stage used the whole budget on the silent account
         ?assert(Elapsed > 2500),
         %% a deadline that restarts for the fingerprint stage would double
         %% the total wait
         ?assert(Elapsed < 5000),
+        %% decisive: no fingerprint worker may start once the budget is
+        %% gone. A spawned worker would only be killed again, and an empty
+        %% server command log would not catch one that never sent a command.
+        ?assertEqual(0, Spawns),
         #{<<"coverage">> := [Cov]} = Env,
         ?assertEqual(<<"offline">>, maps:get(<<"status">>, Cov)),
-        ?assertEqual(<<"silent">>, maps:get(<<"account">>, Cov))
+        ?assertEqual(<<"silent">>, maps:get(<<"account">>, Cov)),
+        %% the fast account's duplicate candidates stay separate hits: the
+        %% search still returns what it found, merging needs a fingerprint.
+        %% The candidates are the two delivered messages, UIDs 102 and 103
+        %% in the fixture; the fake server answers UID SEARCH with every
+        %% message, so identify them from their handles.
+        #{<<"hits">> := Hits} = Env,
+        Uids = [
+            begin
+                {ok, #{<<"u">> := U}} = mailio_mcp_handle:decode(
+                    msg, <<"p4">>, maps:get(<<"handle">>, H)
+                ),
+                U
+            end
+         || H <- Hits, maps:get(<<"account">>, H) =:= <<"dup">>
+        ],
+        ?assertEqual([102, 103], lists:sort(Uids -- [100, 101])),
+        ?assertEqual(4, length(Uids)),
+        ?assertNot(lists:any(fun(H) -> maps:is_key(<<"copies">>, H) end, Hits))
     after
         exit(Stall, kill),
         mailio_fake_imap:stop(Srv),
@@ -164,6 +217,21 @@ deadline_covers_stalled_stages() ->
         ok = application:unset_env(mailio_mcp, principals),
         ok = application:unset_env(mailio_mcp, limits),
         ok = application:unset_env(mailio_mcp, data_dir)
+    end.
+
+%% Collect {trace, _, call, one_fingerprint} events for a bounded time.
+%% The event carries the call arguments as the third element, so match on
+%% the module and function only.
+drain_fingerprint_calls(Ms) -> drain_fingerprint_calls(Ms, 0).
+
+drain_fingerprint_calls(Ms, N) ->
+    receive
+        {trace, _, call, {mailio_mcp_search, one_fingerprint, _}} ->
+            drain_fingerprint_calls(Ms, N + 1);
+        _ ->
+            drain_fingerprint_calls(Ms, N)
+    after Ms ->
+        N
     end.
 
 %% The deadline bounds an excerpt fetch that already started: a fast

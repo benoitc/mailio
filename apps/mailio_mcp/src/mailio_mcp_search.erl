@@ -617,14 +617,11 @@ copy_out(Principal, H) ->
 
 fingerprints(Hits, Deadline) ->
     Self = self(),
-    Workers = [
-        begin
-            Ref = make_ref(),
-            {Pid, MRef} = spawn_monitor(fun() -> Self ! {Ref, one_fingerprint(H)} end),
-            {occ_key(H), Ref, Pid, MRef}
-        end
-     || H <- Hits
-    ],
+    %% A worker is only launched while the request still has budget: once
+    %% the deadline has passed, no new fingerprint work starts, because a
+    %% spawned worker could only be killed again. Candidates left over stay
+    %% ungrouped; merging needs a confirmed fingerprint.
+    Workers = launch_fingerprint_workers(Hits, Deadline, Self, []),
     maps:from_list(
         lists:filtermap(
             fun({Key, Ref, Pid, MRef}) ->
@@ -645,6 +642,19 @@ fingerprints(Hits, Deadline) ->
             Workers
         )
     ).
+
+launch_fingerprint_workers([], _Deadline, _Self, Acc) ->
+    lists:reverse(Acc);
+launch_fingerprint_workers([H | Rest], Deadline, Self, Acc) ->
+    case left_ms(Deadline) of
+        0 ->
+            %% out of budget: no further launch, keep what is running
+            lists:reverse(Acc);
+        _ ->
+            Ref = make_ref(),
+            {Pid, MRef} = spawn_monitor(fun() -> Self ! {Ref, one_fingerprint(H)} end),
+            launch_fingerprint_workers(Rest, Deadline, Self, [{occ_key(H), Ref, Pid, MRef} | Acc])
+    end.
 
 one_fingerprint(H) ->
     Id = maps:get(account, H),
