@@ -22,8 +22,9 @@
     thread/3,
     changes/3,
     fingerprint/3,
-    excerpts/2
+    excerpts/3
 ]).
+-export([index_hits/7, unresolved_count/3]).
 
 -define(INBOX, <<"INBOX">>).
 
@@ -113,8 +114,26 @@ ensure_index(C, #{id := AccId}, Cap) ->
         end,
     Todo = lists:sublist(lists:reverse(lists:sort(New ++ NoUidl)), Cap),
     Resolved = lists:filtermap(fun(E) -> index_one(C, AccId, E, HasUidl) end, Todo),
-    Incomplete = length(New) > length(Todo),
-    {Entries, Resolved, Incomplete, HasUidl, length(New) - length(Todo)}.
+    %% Messages the index cannot answer for: outside the batch, or whose
+    %% headers could not be read. Counted from the actual listing, so a
+    %% short batch makes the coverage partial instead of complete. The
+    %% membership sets are built once: scanning a list per entry would
+    %% make the accounting quadratic in the size of the listing.
+    NewNs = maps:from_list([{N, true} || {N, _, _} <- New]),
+    ResolvedNs = maps:from_list([{N, true} || {N, _} <- Resolved]),
+    Unresolved = unresolved_count(Entries, NewNs, ResolvedNs),
+    {Entries, Resolved, Unresolved > 0, HasUidl, Unresolved}.
+
+%% @doc Listing entries the index cannot answer for: not already indexed
+%% before this batch and not resolved by it. Pure, so tests can measure its
+%% cost without a server or a store.
+unresolved_count(Entries, NewNs, ResolvedNs) ->
+    length([
+        1
+     || {N, Id, _} <- Entries,
+        not ((Id =/= undefined andalso not maps:is_key(N, NewNs)) orelse
+            maps:is_key(N, ResolvedNs))
+    ]).
 
 index_one(C, AccId, {N, Id0, Size}, HasUidl) ->
     case headers(C, N, Size) of
@@ -219,37 +238,49 @@ search(Account, Q) ->
                     [{N, Id} || {N, Id} <- Resolved] ++
                         [{N, Id} || {N, Id, _} <- Entries, Id =/= undefined]
                 ),
-                Hits = lists:filtermap(
-                    fun({N, _Id0, _}) ->
-                        case maps:find(N, Map) of
-                            {ok, Id} ->
-                                case idx_get(AccId, Id) of
-                                    {ok, Meta} ->
-                                        H = hit(Account, Id, Meta),
-                                        case match(H, Q) of
-                                            true -> {true, H};
-                                            false -> false
-                                        end;
-                                    error ->
-                                        false
-                                end;
-                            error ->
-                                false
-                        end
-                    end,
-                    Entries
-                ),
-                Max = maps:get(max_candidates, Q, 200),
-                Hits2 = lists:nthtail(max(0, length(Hits) - Max), Hits),
-                {ok, Hits2, #{
-                    capped => length(Hits) > Max,
-                    candidates => length(Hits2),
-                    index_incomplete => Incomplete,
-                    unindexed => Missing,
-                    failed_mailboxes => 0
-                }}
+                index_hits(Account, Q, Entries, Map, AccId, Incomplete, Missing)
             end)
     end.
+
+%% Scan the local index entries against their metadata. A metadata record
+%% that cannot be read is not a non-match: it is counted so the result
+%% reports partial coverage instead of a complete, empty search. Exported
+%% for the index tests.
+index_hits(Account, Q, Entries, Map, AccId, Incomplete, Missing) ->
+    {Hits, Failed} =
+        lists:foldl(
+            fun({N, _Id0, _}, {Acc, F}) ->
+                case maps:find(N, Map) of
+                    {ok, Id} ->
+                        case idx_get(AccId, Id) of
+                            {ok, Meta} ->
+                                H = hit(Account, Id, Meta),
+                                case match(H, Q) of
+                                    true -> {[H | Acc], F};
+                                    false -> {Acc, F}
+                                end;
+                            error ->
+                                %% no metadata: not a non-match, the
+                                %% coverage must stay partial
+                                {Acc, F + 1}
+                        end;
+                    error ->
+                        %% outside the resolved set: not a non-match either
+                        {Acc, F + 1}
+                end
+            end,
+            {[], 0},
+            Entries
+        ),
+    Max = maps:get(max_candidates, Q, 200),
+    Hits2 = lists:nthtail(max(0, length(Hits) - Max), lists:reverse(Hits)),
+    {ok, Hits2, #{
+        capped => length(Hits) > Max,
+        candidates => length(Hits2),
+        index_incomplete => Incomplete orelse Failed > 0,
+        unindexed => Missing,
+        failed_mailboxes => 0
+    }}.
 
 refuse(Q) ->
     case maps:get(unread, Q, undefined) of
@@ -504,7 +535,7 @@ fingerprint(Account, #{uidl := Id}, MaxBytes) ->
         end
     end).
 
-excerpts(_Account, _Hits) -> #{}.
+excerpts(_Account, _Hits, _Query) -> #{}.
 
 %%====================================================================
 %% Changes

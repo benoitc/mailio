@@ -14,7 +14,7 @@
 -callback thread(map(), map(), pos_integer()) -> {ok, [map()], boolean()} | {error, term()}.
 -callback changes(map(), binary(), map() | undefined) -> {ok, map()} | {error, term()}.
 -callback fingerprint(map(), map(), pos_integer()) -> {ok, binary()} | {error, term()}.
--callback excerpts(map(), [map()]) -> map().
+-callback excerpts(map(), [map()], binary() | undefined) -> map().
 
 -optional_callbacks([wait_for_change/4]).
 

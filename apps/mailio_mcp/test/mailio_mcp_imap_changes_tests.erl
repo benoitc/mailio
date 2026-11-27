@@ -129,6 +129,45 @@ uidvalidity_change_test() ->
         ?assertEqual({error, checkpoint_expired}, changes(Acc, Snap))
     end).
 
+%% A refused metadata fetch while listing added messages is an error, not a
+%% crash. The checkpoint stays with the caller, and the retry reports the
+%% delivery. Runs the QRESYNC path and the full comparison.
+meta_refusal_on_added_keeps_checkpoint_test() ->
+    with(fun(Srv, Acc) ->
+        Snap = baseline(Acc),
+        ok = mailio_fake_imap:deliver(Srv, <<"During the outage">>),
+        ok = mailio_fake_imap:set_failure(Srv, meta, true),
+        ?assertMatch({error, {server_no, _}}, changes(Acc, Snap)),
+        ok = mailio_fake_imap:set_failure(Srv, meta, false),
+        {ok, R} = changes(Acc, Snap),
+        ?assertMatch([#{uid := 102}], maps:get(added, R))
+    end).
+
+%% The same refusal and retry on the full-comparison path (no mod-sequence).
+meta_refusal_on_full_comparison_keeps_checkpoint_test() ->
+    with(fun(Srv, Acc) ->
+        Snap = (baseline(Acc))#{modseq => undefined},
+        ok = mailio_fake_imap:deliver(Srv, <<"During the outage">>),
+        ok = mailio_fake_imap:set_failure(Srv, meta, true),
+        ?assertMatch({error, {server_no, _}}, changes(Acc, Snap)),
+        ok = mailio_fake_imap:set_failure(Srv, meta, false),
+        {ok, R} = changes(Acc, Snap),
+        ?assertMatch([#{uid := 102}], maps:get(added, R))
+    end).
+
+%% The thread reader reports a refused metadata fetch as an error too.
+thread_meta_refusal_is_an_error_test() ->
+    with(fun(Srv, Acc) ->
+        Snap = baseline(Acc),
+        ok = mailio_fake_imap:set_failure(Srv, meta, true),
+        ?assertMatch(
+            {error, {server_no, _}},
+            mailio_mcp_imap:thread(
+                Acc, #{mailbox => <<"INBOX">>, uv => maps:get(uv, Snap), uid => 100}, 10
+            )
+        )
+    end).
+
 %%--------------------------------------------------------------------
 %% Waiting for a change with IDLE
 

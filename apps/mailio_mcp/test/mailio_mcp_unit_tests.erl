@@ -155,6 +155,251 @@ page_size_cap_test() ->
     ?assertEqual(5, mailio_mcp_budget:page_size(5)).
 
 %%--------------------------------------------------------------------
+%% Search cache: mailbox invalidation must reach search entries
+
+cache_mailbox_invalidation_test_() ->
+    {setup,
+        fun() ->
+            {ok, P} = mailio_mcp_cache:start_link(),
+            P
+        end,
+        fun(P) ->
+            unlink(P),
+            exit(P, shutdown),
+            timer:sleep(50)
+        end,
+        fun(_) ->
+            [
+                fun() ->
+                    Acc = <<"acc1">>,
+                    mailio_mcp_cache:put(
+                        Acc, {search, [<<"INBOX">>, <<"Archive">>], <<"h1">>}, v1
+                    ),
+                    mailio_mcp_cache:put(Acc, {search, [<<"Archive">>], <<"h2">>}, v2),
+                    mailio_mcp_cache:put(Acc, {other, <<"INBOX">>}, v3),
+                    %% a search over INBOX is dropped, the Archive-only one stays
+                    mailio_mcp_cache:invalidate_mailbox(Acc, <<"INBOX">>),
+                    ?assertEqual(
+                        miss,
+                        mailio_mcp_cache:get(Acc, {search, [<<"INBOX">>, <<"Archive">>], <<"h1">>})
+                    ),
+                    ?assertMatch(
+                        {ok, v2, _}, mailio_mcp_cache:get(Acc, {search, [<<"Archive">>], <<"h2">>})
+                    ),
+                    ?assertMatch({ok, v3, _}, mailio_mcp_cache:get(Acc, {other, <<"INBOX">>})),
+                    mailio_mcp_cache:invalidate_mailbox(Acc, <<"Archive">>),
+                    ?assertEqual(
+                        miss, mailio_mcp_cache:get(Acc, {search, [<<"Archive">>], <<"h2">>})
+                    ),
+                    %% other accounts are untouched
+                    mailio_mcp_cache:put(<<"acc2">>, {search, [<<"INBOX">>], <<"h3">>}, v4),
+                    mailio_mcp_cache:invalidate_mailbox(Acc, <<"INBOX">>),
+                    ?assertMatch(
+                        {ok, v4, _},
+                        mailio_mcp_cache:get(<<"acc2">>, {search, [<<"INBOX">>], <<"h3">>})
+                    )
+                end
+            ]
+        end}.
+
+%% A search that captured the account's cache generation before an
+%% invalidation must not land its stale result after the invalidation ran.
+cache_generation_blocks_stale_write_test_() ->
+    {setup,
+        fun() ->
+            {ok, P} = mailio_mcp_cache:start_link(),
+            P
+        end,
+        fun(P) ->
+            unlink(P),
+            exit(P, shutdown),
+            timer:sleep(50)
+        end,
+        fun(_) ->
+            [
+                fun() ->
+                    Acc = <<"accg">>,
+                    Key = {search, [<<"INBOX">>], <<"h">>},
+                    E0 = mailio_mcp_cache:epoch(Acc),
+                    ?assertEqual(ok, mailio_mcp_cache:put(Acc, Key, v0, E0)),
+                    ok = mailio_mcp_cache:invalidate_mailbox(Acc, <<"INBOX">>),
+                    %% the write of a search that started before the
+                    %% invalidation is refused
+                    ?assertEqual(stale, mailio_mcp_cache:put(Acc, Key, stale, E0)),
+                    ?assertEqual(miss, mailio_mcp_cache:get(Acc, Key)),
+                    %% a search that started after it is kept
+                    E1 = mailio_mcp_cache:epoch(Acc),
+                    ?assert(E1 > E0),
+                    ?assertEqual(ok, mailio_mcp_cache:put(Acc, Key, v1, E1)),
+                    ?assertMatch({ok, v1, _}, mailio_mcp_cache:get(Acc, Key)),
+                    %% invalidate_account bumps the generation too
+                    E2 = mailio_mcp_cache:epoch(Acc),
+                    ok = mailio_mcp_cache:invalidate_account(Acc),
+                    ?assertEqual(stale, mailio_mcp_cache:put(Acc, Key, v2, E2)),
+                    ?assertEqual(miss, mailio_mcp_cache:get(Acc, Key))
+                end
+            ]
+        end}.
+
+%% A put and an invalidation that race must not leave the deleted entry
+%% behind. Invariant: whatever an invalidation leaves readable must have
+%% been written with the generation that invalidation created, because the
+%% generation check and the insert are serialized in the cache owner. A
+%% value carrying an older generation that is readable after an
+%% invalidation is a stale survivor.
+cache_concurrent_write_and_invalidation_test_() ->
+    {timeout, 20, fun cache_concurrent_write_and_invalidation/0}.
+
+cache_concurrent_write_and_invalidation() ->
+    application:set_env(mailio_mcp, limits, #{cache_max_entries => 1}),
+    {ok, P} = mailio_mcp_cache:start_link(),
+    try
+        Acc = <<"accr">>,
+        Mailbox = [<<"INBOX">>],
+        Key = {search, Mailbox, <<"k">>},
+        Rounds = 100,
+        Writer = spawn_monitor(fun() -> writer_loop(Acc, Key, Rounds) end),
+        Invalidator = spawn_monitor(fun() -> invalidator_loop(Acc, hd(Mailbox), Key, Rounds) end),
+        %% each worker must exit normally; a timeout names the missing one
+        await_normal(Writer, writer, 10000),
+        await_normal(Invalidator, invalidator, 10000),
+        %% stale-write assertion, separate from worker completion: capture
+        %% an epoch, race a write with that epoch against an invalidation,
+        %% then read. The old value must be absent in either execution
+        %% order, and a write with the new epoch must be readable.
+        E0 = mailio_mcp_cache:epoch(Acc),
+        Self = self(),
+        Racer = spawn_monitor(fun() ->
+            Self ! {raced, mailio_mcp_cache:put(Acc, Key, raced_value, E0)}
+        end),
+        ok = mailio_mcp_cache:invalidate_mailbox(Acc, hd(Mailbox)),
+        await_normal(Racer, racer, 5000),
+        Result = race_result(),
+        E1 = mailio_mcp_cache:epoch(Acc),
+        ?assert(E1 > E0),
+        case Result of
+            %% the write was refused: the old value cannot be there
+            stale -> ?assertEqual(miss, mailio_mcp_cache:get(Acc, Key));
+            %% the write was accepted, so it ran before the invalidation
+            %% deleted the entries; it must be absent now either way
+            ok -> ?assertEqual(miss, mailio_mcp_cache:get(Acc, Key))
+        end,
+        ?assertEqual(ok, mailio_mcp_cache:put(Acc, Key, new_value, E1)),
+        ?assertMatch({ok, new_value, _}, mailio_mcp_cache:get(Acc, Key))
+    after
+        unlink(P),
+        exit(P, shutdown),
+        timer:sleep(50),
+        ok = application:unset_env(mailio_mcp, limits)
+    end.
+
+%% Wait for one exact worker's 'DOWN' and assert a normal exit. An
+%% unrelated mailbox message never counts as completion.
+await_normal({Pid, Ref}, Who, Timeout) ->
+    receive
+        {'DOWN', Ref, process, Pid, normal} ->
+            ok;
+        {'DOWN', Ref, process, Pid, Reason} ->
+            exit({Who, Reason})
+    after Timeout ->
+        exit(Pid, kill),
+        erlang:demonitor(Ref, [flush]),
+        exit({Who, timeout})
+    end.
+
+%% Collect the raced write's reply, whichever order it landed in.
+race_result() ->
+    receive
+        {raced, R} -> R
+    after 5000 -> exit(race_reply_timeout)
+    end.
+
+writer_loop(_Acc, _Key, 0) ->
+    ok;
+writer_loop(Acc, Key, N) ->
+    E = mailio_mcp_cache:epoch(Acc),
+    _ = mailio_mcp_cache:put(Acc, Key, {v, E}, E),
+    writer_loop(Acc, Key, N - 1).
+
+invalidator_loop(_Acc, _Mailbox, _Key, 0) ->
+    ok;
+invalidator_loop(Acc, Mailbox, Key, N) ->
+    ok = mailio_mcp_cache:invalidate_mailbox(Acc, Mailbox),
+    Current = mailio_mcp_cache:epoch(Acc),
+    %% anything readable now was written after the invalidation was
+    %% serialized, so it carries the current generation
+    case mailio_mcp_cache:get(Acc, Key) of
+        {ok, {v, E}, _} when E =/= Current -> exit({stale_survivor, E, Current});
+        _ -> ok
+    end,
+    invalidator_loop(Acc, Mailbox, Key, N - 1).
+
+%%--------------------------------------------------------------------
+%% Query-centered excerpts
+
+center_excerpt_test() ->
+    %% no query: starts at the beginning
+    ?assertEqual(<<"Hello world">>, mailio_mcp_imap:center_excerpt(<<"Hello world">>, undefined)),
+    %% centered on the first matching term, case-insensitive
+    Long = <<
+        "The meeting is scheduled for next week and the agenda is attached. "
+        "Your invoice 2026-114 total is due. "
+        "Please pay promptly."
+    >>,
+    Ex = mailio_mcp_imap:center_excerpt(Long, <<"invoice">>),
+    ?assertMatch(<<"…"/utf8, _/binary>>, Ex),
+    ?assert(string:find(Ex, <<"invoice 2026-114">>) =/= nomatch),
+    %% no matching term: starts at the beginning
+    ?assertEqual(
+        <<"Hello world">>, mailio_mcp_imap:center_excerpt(<<"Hello world">>, <<"nothing here">>)
+    ),
+    %% never cut inside a UTF-8 code point
+    U = <<"a", 195, 169, "b"/utf8, " caf", 195, 169, " date target">>,
+    UEx = mailio_mcp_imap:center_excerpt(U, <<"date">>),
+    ?assertEqual(true, is_binary(UEx)),
+    %% re-decoding the bytes as UTF-8 succeeds, so no code point was cut
+    ?assertEqual(UEx, unicode:characters_to_binary(UEx, utf8)).
+
+excerpt_bounded_test() ->
+    Text = binary:copy(<<"word ">>, 400),
+    Ex = mailio_mcp_imap:center_excerpt(Text, <<"word">>),
+    ?assert(string:length(Ex) =< 160).
+
+%% Punctuation, regex metacharacters and non-ASCII terms are matched
+%% literally, and the excerpt centers on them.
+center_excerpt_punctuation_and_unicode_test() ->
+    Pad = binary:copy(<<"padding ">>, 25),
+    Long =
+        <<
+            Pad/binary,
+            "Write to foo@example.test about invoice 2026-114 (net 30). "
+            "Trailing padding keeps the window away from the end as well."
+        >>,
+    %% digits and a dash, matched literally
+    Ex1 = mailio_mcp_imap:center_excerpt(Long, <<"2026-114">>),
+    ?assertMatch(<<"…"/utf8, _/binary>>, Ex1),
+    ?assert(string:find(Ex1, <<"invoice 2026-114">>) =/= nomatch),
+    %% an address with a dot and an at sign
+    Ex2 = mailio_mcp_imap:center_excerpt(Long, <<"foo@example.test">>),
+    ?assertMatch(<<"…"/utf8, _/binary>>, Ex2),
+    ?assert(string:find(Ex2, <<"foo@example.test">>) =/= nomatch),
+    %% regex metacharacters in the query are ordinary characters
+    ?assertEqual(
+        <<"Hello (a|b) world">>,
+        mailio_mcp_imap:center_excerpt(<<"Hello (a|b) world">>, <<"(a|b)">>)
+    ),
+    %% non-ASCII, case folded through the unicode option
+    U =
+        <<
+            "Du texte de remplissage, assez long pour dépasser la fenêtre de l'extrait sans "/utf8,
+            Pad/binary,
+            "fin. Le café est servi ici, loin du début du message. Encore du remplissage."/utf8
+        >>,
+    Ex3 = mailio_mcp_imap:center_excerpt(U, <<"CAFÉ"/utf8>>),
+    ?assertMatch(<<"…"/utf8, _/binary>>, Ex3),
+    ?assert(string:find(Ex3, <<"caf"/utf8>>) =/= nomatch).
+
+%%--------------------------------------------------------------------
 %% Handles and authorization
 
 handle_test_() ->
