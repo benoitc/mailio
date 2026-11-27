@@ -155,6 +155,85 @@ page_size_cap_test() ->
     ?assertEqual(5, mailio_mcp_budget:page_size(5)).
 
 %%--------------------------------------------------------------------
+%% Search cache: mailbox invalidation must reach search entries
+
+cache_mailbox_invalidation_test_() ->
+    {setup,
+        fun() ->
+            {ok, P} = mailio_mcp_cache:start_link(),
+            P
+        end,
+        fun(P) ->
+            unlink(P),
+            exit(P, shutdown),
+            timer:sleep(50)
+        end,
+        fun(_) ->
+            [
+                fun() ->
+                    Acc = <<"acc1">>,
+                    mailio_mcp_cache:put(
+                        Acc, {search, [<<"INBOX">>, <<"Archive">>], <<"h1">>}, v1
+                    ),
+                    mailio_mcp_cache:put(Acc, {search, [<<"Archive">>], <<"h2">>}, v2),
+                    mailio_mcp_cache:put(Acc, {other, <<"INBOX">>}, v3),
+                    %% a search over INBOX is dropped, the Archive-only one stays
+                    mailio_mcp_cache:invalidate_mailbox(Acc, <<"INBOX">>),
+                    ?assertEqual(
+                        miss,
+                        mailio_mcp_cache:get(Acc, {search, [<<"INBOX">>, <<"Archive">>], <<"h1">>})
+                    ),
+                    ?assertMatch(
+                        {ok, v2, _}, mailio_mcp_cache:get(Acc, {search, [<<"Archive">>], <<"h2">>})
+                    ),
+                    ?assertMatch({ok, v3, _}, mailio_mcp_cache:get(Acc, {other, <<"INBOX">>})),
+                    mailio_mcp_cache:invalidate_mailbox(Acc, <<"Archive">>),
+                    ?assertEqual(
+                        miss, mailio_mcp_cache:get(Acc, {search, [<<"Archive">>], <<"h2">>})
+                    ),
+                    %% other accounts are untouched
+                    mailio_mcp_cache:put(<<"acc2">>, {search, [<<"INBOX">>], <<"h3">>}, v4),
+                    mailio_mcp_cache:invalidate_mailbox(Acc, <<"INBOX">>),
+                    ?assertMatch(
+                        {ok, v4, _},
+                        mailio_mcp_cache:get(<<"acc2">>, {search, [<<"INBOX">>], <<"h3">>})
+                    )
+                end
+            ]
+        end}.
+
+%%--------------------------------------------------------------------
+%% Query-centered excerpts
+
+center_excerpt_test() ->
+    %% no query: starts at the beginning
+    ?assertEqual(<<"Hello world">>, mailio_mcp_imap:center_excerpt(<<"Hello world">>, undefined)),
+    %% centered on the first matching term, case-insensitive
+    Long = <<
+        "The meeting is scheduled for next week and the agenda is attached. "
+        "Your invoice 2026-114 total is due. "
+        "Please pay promptly."
+    >>,
+    Ex = mailio_mcp_imap:center_excerpt(Long, <<"invoice">>),
+    ?assertMatch(<<"…"/utf8, _/binary>>, Ex),
+    ?assert(string:find(Ex, <<"invoice 2026-114">>) =/= nomatch),
+    %% no matching term: starts at the beginning
+    ?assertEqual(
+        <<"Hello world">>, mailio_mcp_imap:center_excerpt(<<"Hello world">>, <<"nothing here">>)
+    ),
+    %% never cut inside a UTF-8 code point
+    U = <<"a", 195, 169, "b"/utf8, " caf", 195, 169, " date target">>,
+    UEx = mailio_mcp_imap:center_excerpt(U, <<"date">>),
+    ?assertEqual(true, is_binary(UEx)),
+    %% re-decoding the bytes as UTF-8 succeeds, so no code point was cut
+    ?assertEqual(UEx, unicode:characters_to_binary(UEx, utf8)).
+
+excerpt_bounded_test() ->
+    Text = binary:copy(<<"word ">>, 400),
+    Ex = mailio_mcp_imap:center_excerpt(Text, <<"word">>),
+    ?assert(string:length(Ex) =< 160).
+
+%%--------------------------------------------------------------------
 %% Handles and authorization
 
 handle_test_() ->

@@ -2,7 +2,17 @@
 
 ## Unreleased
 
-Nothing yet.
+### mailio_mcp
+
+#### Fixed
+
+- A failed IMAP metadata fetch no longer looks like an empty mailbox: the failure is reported and the account's coverage is marked partial instead of complete. The same applies to a POP3 index entry that cannot be read.
+- A cached search result can no longer be returned for a different query. Search cache entries are keyed by a hash of the full query instead of a small hash bucket.
+- Mail arriving in a mailbox now invalidates the cached search results that cover it, instead of waiting for the cache to expire.
+- Searching several accounts shares one overall time limit, so a slow account no longer multiplies the total wait.
+- `count_only` searches no longer fetch message fingerprints for copy grouping.
+- When the server candidate set is capped before the exact filters run, the result says so instead of presenting a capped search as complete.
+- With `excerpt`, the excerpt now centers on the searched text when the server can supply the body, instead of always starting at the beginning of the message.
 
 ## 0.2.0 - 2026-11-26
 

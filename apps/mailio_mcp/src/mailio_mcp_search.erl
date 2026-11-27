@@ -18,14 +18,16 @@ run(Principal, Args) ->
         {ok, Q} ?= parse_query(Args),
         QHash = qhash(Accounts, Q),
         {ok, After} ?= decode_cursor(Principal, QHash, Args),
+        CountOnly = maps:get(count_only, Q),
         Results = parallel(Principal, Accounts, Q),
         {Hits0, Cov, Ages} = merge(Results),
         Hits1 = [H || H <- Hits0, first_seen_ok(H, Q)],
         Sorted = lists:sort(fun(A, B) -> sort_key(A, Q) =< sort_key(B, Q) end, Hits1),
         Grouped =
-            case maps:get(group_copies, Q) of
-                true -> group_copies(Principal, Sorted);
-                false -> Sorted
+            case {maps:get(group_copies, Q), CountOnly} of
+                %% count_only never triggers provider fingerprint fetches
+                {true, false} -> group_copies(Principal, Sorted);
+                _ -> Sorted
             end,
         Approx =
             lists:any(fun(#{status := S}) -> S =/= complete end, Cov) orelse
@@ -49,7 +51,7 @@ run(Principal, Args) ->
                 Partial -> Env0#{<<"coverage">> => Partial}
             end,
         Env2 = Env1#{<<"freshness">> => freshness(Ages)},
-        case maps:get(count_only, Q) of
+        case CountOnly of
             true ->
                 {ok, Env2};
             false ->
@@ -58,7 +60,7 @@ run(Principal, Args) ->
                 {Page, Remaining} = take(Rest, Limit),
                 Page2 =
                     case maps:get(excerpt, Q) of
-                        true -> with_excerpts(Accounts, Page);
+                        true -> with_excerpts(Accounts, Page, Q);
                         false -> Page
                     end,
                 Basis = maps:get(basis, Q),
@@ -201,6 +203,11 @@ qhash(Accounts, Q) ->
         crypto:hash(sha256, term_to_binary({lists:sort(Accounts), Canon})), lowercase
     ).
 
+%% Collision-resistant hash of the canonical per-account query. A phash2
+%% bucket could return one query's hits for a different query.
+cache_hash(AQ) ->
+    binary:encode_hex(crypto:hash(sha256, term_to_binary(AQ)), lowercase).
+
 decode_cursor(Principal, QHash, Args) ->
     case maps:get(<<"cursor">>, Args, undefined) of
         undefined ->
@@ -218,6 +225,9 @@ decode_cursor(Principal, QHash, Args) ->
 %%====================================================================
 
 parallel(Principal, Accounts, Q) ->
+    %% One absolute deadline for every account, so the total wait does not
+    %% grow with the number of accounts searched.
+    Deadline = erlang:monotonic_time(millisecond) + ?WORKER_TIMEOUT,
     Self = self(),
     Workers = [
         begin
@@ -227,16 +237,16 @@ parallel(Principal, Accounts, Q) ->
         end
      || Id <- Accounts
     ],
-    [collect(W) || W <- Workers].
+    [collect(W, Deadline) || W <- Workers].
 
-collect({Id, Ref, Pid, MRef}) ->
+collect({Id, Ref, Pid, MRef}, Deadline) ->
     receive
         {Ref, R} ->
             erlang:demonitor(MRef, [flush]),
             {Id, R};
         {'DOWN', MRef, process, Pid, Reason} ->
             {Id, {error, {unavailable, Reason}}}
-    after ?WORKER_TIMEOUT ->
+    after max(0, Deadline - erlang:monotonic_time(millisecond)) ->
         exit(Pid, kill),
         erlang:demonitor(MRef, [flush]),
         {Id, {error, {unavailable, <<"timeout">>}}}
@@ -267,7 +277,7 @@ account_search(Principal, Id, Q) ->
                     {ok, N} -> AQ0#{max_candidates => N};
                     error -> AQ0
                 end,
-            Key = {search, erlang:phash2(AQ, 1 bsl 32)},
+            Key = {search, maps:get(mailboxes, AQ), cache_hash(AQ)},
             case maps:get(refresh, Q) of
                 false ->
                     case mailio_mcp_cache:get(Id, Key) of
@@ -411,7 +421,12 @@ skip_to(Hits, After, Q) -> [H || H <- Hits, tuple_to_list(sort_key(H, Q)) > tupl
 take(L, N) when length(L) =< N -> {L, []};
 take(L, N) -> lists:split(N, L).
 
-with_excerpts(_Accounts, Page) ->
+with_excerpts(_Accounts, Page, Q) ->
+    Query =
+        case maps:get(text, Q, undefined) of
+            undefined -> maps:get(subject, Q, undefined);
+            T -> T
+        end,
     ByAcc = lists:foldl(
         fun(H, M) -> maps:update_with(maps:get(account, H), fun(L) -> [H | L] end, [H], M) end,
         #{},
@@ -425,7 +440,7 @@ with_excerpts(_Accounts, Page) ->
                 maps:from_list([
                     {{Id, K}, V}
                  || {K, V} <- maps:to_list(
-                        mailio_mcp_adapter:call(Account, excerpts, [lists:reverse(Hs)])
+                        mailio_mcp_adapter:call(Account, excerpts, [lists:reverse(Hs), Query])
                     )
                 ])
             )
@@ -435,7 +450,7 @@ with_excerpts(_Accounts, Page) ->
     ),
     [
         case maps:find({maps:get(account, H), excerpt_key(H)}, Ex) of
-            {ok, T} -> H#{excerpt => T};
+            {ok, Text} -> H#{excerpt => Text};
             error -> H
         end
      || H <- Page
@@ -517,6 +532,7 @@ copy_out(Principal, H) ->
 
 fingerprints(Hits) ->
     Self = self(),
+    Deadline = erlang:monotonic_time(millisecond) + ?WORKER_TIMEOUT,
     Workers = [
         begin
             Ref = make_ref(),
@@ -537,7 +553,7 @@ fingerprints(Hits) ->
                         false;
                     {'DOWN', MRef, process, Pid, _} ->
                         false
-                after ?WORKER_TIMEOUT ->
+                after max(0, Deadline - erlang:monotonic_time(millisecond)) ->
                     exit(Pid, kill),
                     false
                 end

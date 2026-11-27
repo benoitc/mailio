@@ -64,6 +64,13 @@ invalidate_account(Account) ->
 
 invalidate_mailbox(Account, Mailbox) ->
     ets:match_delete(?T, {{Account, {'_', Mailbox, '_'}}, '_', '_'}),
+    %% Search entries cover a set of mailboxes; drop the ones that include
+    %% this one so changed mail are never served from a stale search result.
+    [
+        ets:delete(?T, {Account, {search, Boxes, Hash}})
+     || [Boxes, Hash] <- ets:match(?T, {{Account, {search, '$1', '$2'}}, '_', '_'}),
+        lists:member(Mailbox, Boxes)
+    ],
     ok.
 
 stats() -> #{entries => ets:info(?T, size)}.

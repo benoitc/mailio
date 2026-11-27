@@ -22,7 +22,7 @@
     thread/3,
     changes/3,
     fingerprint/3,
-    excerpts/2
+    excerpts/3
 ]).
 
 -define(INBOX, <<"INBOX">>).
@@ -219,32 +219,36 @@ search(Account, Q) ->
                     [{N, Id} || {N, Id} <- Resolved] ++
                         [{N, Id} || {N, Id, _} <- Entries, Id =/= undefined]
                 ),
-                Hits = lists:filtermap(
-                    fun({N, _Id0, _}) ->
-                        case maps:find(N, Map) of
-                            {ok, Id} ->
-                                case idx_get(AccId, Id) of
-                                    {ok, Meta} ->
-                                        H = hit(Account, Id, Meta),
-                                        case match(H, Q) of
-                                            true -> {true, H};
-                                            false -> false
-                                        end;
-                                    error ->
-                                        false
-                                end;
-                            error ->
-                                false
-                        end
-                    end,
-                    Entries
-                ),
+                %% A metadata index entry that cannot be read is not a
+                %% non-match: count it so the result reports partial coverage.
+                {Hits, Failed} =
+                    lists:foldl(
+                        fun({N, _Id0, _}, {Acc, F}) ->
+                            case maps:find(N, Map) of
+                                {ok, Id} ->
+                                    case idx_get(AccId, Id) of
+                                        {ok, Meta} ->
+                                            H = hit(Account, Id, Meta),
+                                            case match(H, Q) of
+                                                true -> {[H | Acc], F};
+                                                false -> {Acc, F}
+                                            end;
+                                        error ->
+                                            {Acc, F + 1}
+                                    end;
+                                error ->
+                                    {Acc, F}
+                            end
+                        end,
+                        {[], 0},
+                        Entries
+                    ),
                 Max = maps:get(max_candidates, Q, 200),
-                Hits2 = lists:nthtail(max(0, length(Hits) - Max), Hits),
+                Hits2 = lists:nthtail(max(0, length(Hits) - Max), lists:reverse(Hits)),
                 {ok, Hits2, #{
                     capped => length(Hits) > Max,
                     candidates => length(Hits2),
-                    index_incomplete => Incomplete,
+                    index_incomplete => Incomplete orelse Failed > 0,
                     unindexed => Missing,
                     failed_mailboxes => 0
                 }}
@@ -504,7 +508,7 @@ fingerprint(Account, #{uidl := Id}, MaxBytes) ->
         end
     end).
 
-excerpts(_Account, _Hits) -> #{}.
+excerpts(_Account, _Hits, _Query) -> #{}.
 
 %%====================================================================
 %% Changes

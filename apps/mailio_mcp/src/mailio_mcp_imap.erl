@@ -16,9 +16,10 @@
     changes/3,
     wait_for_change/4,
     fingerprint/3,
-    excerpts/2
+    excerpts/3
 ]).
 -export([parse_bodystructure/1, is_attachment/1, body_part/1]).
+-export([center_excerpt/2]).
 
 -define(HDR_FIELDS, <<"FROM TO CC REPLY-TO SUBJECT DATE MESSAGE-ID IN-REPLY-TO REFERENCES">>).
 -define(FETCH_META,
@@ -207,10 +208,14 @@ search_box(C, Account, Box, Q) ->
                     Max = maps:get(max_candidates, Q, 200),
                     Capped = length(Uids) > Max,
                     Take = lists:nthtail(max(0, length(Uids) - Max), Uids),
-                    {ok, Metas} = fetch_meta(C, Take),
-                    Hits = [to_hit(Account, Box, Sel, M) || M <- Metas],
-                    Filtered = [H || H <- Hits, local_match(H, Q)],
-                    {ok, Filtered, #{capped => Capped, candidates => length(Take)}};
+                    case fetch_meta(C, Take) of
+                        {ok, Metas} ->
+                            Hits = [to_hit(Account, Box, Sel, M) || M <- Metas],
+                            Filtered = [H || H <- Hits, local_match(H, Q)],
+                            {ok, Filtered, #{capped => Capped, candidates => length(Take)}};
+                        {error, _} = E ->
+                            E
+                    end;
                 Other ->
                     cmd_error(Other)
             end;
@@ -340,17 +345,21 @@ parse_select(Events) ->
 fetch_meta(_C, []) ->
     {ok, []};
 fetch_meta(C, Uids) ->
-    Chunks = chunk(Uids, 50),
-    Res = lists:append([fetch_chunk(C, Ch) || Ch <- Chunks]),
-    {ok, Res}.
+    Res = [fetch_chunk(C, Ch) || Ch <- chunk(Uids, 50)],
+    case [E || {error, E} <- Res] of
+        [E | _] -> {error, E};
+        [] -> {ok, lists:append([M || {ok, M} <- Res])}
+    end.
 
 fetch_chunk(C, Uids) ->
     Set = iolist_to_binary(lists:join(<<",">>, [integer_to_binary(U) || U <- Uids])),
     case mailio_mcp_imap_io:cmd(C, [<<"UID FETCH ">>, Set, <<" ">>, ?FETCH_META]) of
         {ok, U, _} ->
-            [fetch_map(Items) || {fetch, _Seq, Items} <- U];
-        _ ->
-            []
+            {ok, [fetch_map(Items) || {fetch, _Seq, Items} <- U]};
+        {error, _} = E ->
+            E;
+        Other ->
+            cmd_error(Other)
     end.
 
 chunk([], _) ->
@@ -776,19 +785,20 @@ sort_key(H) ->
 %% Excerpts and fingerprints
 %%====================================================================
 
-%% @doc Short plain-text excerpts for the given hits.
--spec excerpts(map(), [map()]) -> #{term() => binary()}.
-excerpts(Account, Hits) ->
+%% @doc Short plain-text excerpts for the given hits. When a query is given,
+%% the excerpt is centered on its first matching term.
+-spec excerpts(map(), [map()], binary() | undefined) -> #{term() => binary()}.
+excerpts(Account, Hits, Query) ->
     case
         with_conn(Account, fun(C) ->
-            {ok, lists:foldl(fun(H, Acc) -> excerpt_one(C, H, Acc) end, #{}, Hits)}
+            {ok, lists:foldl(fun(H, Acc) -> excerpt_one(C, H, Query, Acc) end, #{}, Hits)}
         end)
     of
         {ok, M} -> M;
         _ -> #{}
     end.
 
-excerpt_one(C, #{mailbox := Box, uv := UV, uid := Uid, parts := Parts}, Acc) ->
+excerpt_one(C, #{mailbox := Box, uv := UV, uid := Uid, parts := Parts}, Query, Acc) ->
     case {body_part(Parts), examine(C, Box)} of
         {#{id := Id, encoding := Enc, type := Type} = P, {ok, #{uv := UV}}} ->
             case fetch_section(C, Uid, Id, 1200) of
@@ -801,13 +811,86 @@ excerpt_one(C, #{mailbox := Box, uv := UV, uid := Uid, parts := Parts}, Acc) ->
                         end,
                     T2 = mailio_mcp_mime:strip_quoted(T1),
                     T3 = re:replace(T2, <<"\\s+">>, <<" ">>, [global, {return, binary}]),
-                    Acc#{{Box, UV, Uid} => mailio_mcp_budget:shorten(string:trim(T3), 160)};
+                    Acc#{{Box, UV, Uid} => center_excerpt(string:trim(T3), Query)};
                 _ ->
                     Acc
             end;
         _ ->
             Acc
     end.
+
+-define(EXCERPT_CHARS, 160).
+-define(EXCERPT_CONTEXT_CHARS, 40).
+
+%% @doc Excerpt centered on the first match of any query term. Without a
+%% query, or when no term matches, the excerpt starts at the beginning of the
+%% text. Lengths are in characters, so UTF-8 is never cut inside a code point.
+-spec center_excerpt(binary(), binary() | undefined) -> binary().
+center_excerpt(Text, Query) when is_binary(Text) ->
+    Len = string:length(Text),
+    case query_byte_pos(Text, Query) of
+        undefined ->
+            mailio_mcp_budget:shorten(Text, ?EXCERPT_CHARS);
+        BytePos ->
+            Start = max(0, char_pos(Text, BytePos) - ?EXCERPT_CONTEXT_CHARS),
+            Slice = string:slice(Text, Start, ?EXCERPT_CHARS),
+            Marked =
+                case {Start > 0, Start + ?EXCERPT_CHARS < Len} of
+                    {true, true} ->
+                        [<<"…"/utf8>>, Slice, <<"…"/utf8>>];
+                    {true, false} ->
+                        [<<"…"/utf8>>, Slice];
+                    {false, true} ->
+                        [Slice, <<"…"/utf8>>];
+                    {false, false} ->
+                        Slice
+                end,
+            Final =
+                case is_binary(Marked) of
+                    true -> Marked;
+                    false -> iolist_to_binary(Marked)
+                end,
+            mailio_mcp_budget:shorten(Final, ?EXCERPT_CHARS)
+    end;
+center_excerpt(Text, _) ->
+    Text.
+
+%% Byte position of the first query term occurrence in Text, or undefined.
+query_byte_pos(_Text, undefined) ->
+    undefined;
+query_byte_pos(_Text, <<>>) ->
+    undefined;
+query_byte_pos(Text, Query) ->
+    Terms =
+        [
+            escape_re(T)
+         || T <- lists:sublist(string:split(string:trim(Query), <<" ">>, all), 8), T =/= <<>>
+        ],
+    case Terms of
+        [] ->
+            undefined;
+        _ ->
+            Pattern = iolist_to_binary(lists:join(<<"|">>, Terms)),
+            case re:run(Text, Pattern, [caseless, {capture, first, index}]) of
+                {match, [{Pos, _}]} -> Pos;
+                _ -> undefined
+            end
+    end.
+
+%% Escape every non-word byte so a query term is matched literally.
+escape_re(<<>>) ->
+    <<>>;
+escape_re(<<C/utf8, Rest/binary>>) ->
+    case
+        (C >= $a andalso C =< $z) orelse (C >= $A andalso C =< $Z) orelse (C >= $0 andalso C =< $9)
+    of
+        true -> <<C/utf8, (escape_re(Rest))/binary>>;
+        false -> <<$/, C/utf8, (escape_re(Rest))/binary>>
+    end.
+
+%% Character position of a byte offset (the prefix is scanned once).
+char_pos(Text, BytePos) ->
+    string:length(binary:part(Text, 0, BytePos)).
 
 %% @doc Fingerprint of a message body (the whole body up to MaxBytes), used
 %% as evidence that two copies are the same message.
